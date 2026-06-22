@@ -200,7 +200,7 @@ def process_gem_file(
                     low_prec_cols.append(col_str)
         if low_prec_cols:
             warnings.append(
-                "⚠️ Reduced precision detected: the following columns contain only "
+                "Reduced precision detected: the following columns contain only "
                 f"integer values — {', '.join(low_prec_cols)}. "
                 "GEM CSV exports typically round measurements, which causes scores to "
                 "differ slightly from the XLSX equivalent. "
@@ -804,7 +804,7 @@ def render_graph_editor(
 
     opts = GraphOptions()
 
-    with st.expander("✏️ Graph Editor", expanded=False):
+    with st.expander("Graph Editor", expanded=False):
         col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
@@ -867,7 +867,7 @@ def render_graph_editor(
                 if x_min < x_max:
                     opts.x_lim = (x_min, x_max)
                 else:
-                    st.caption("⚠️ X min must be < X max")
+                    st.caption("X min must be < X max")
 
             st.markdown("**Y axis**")
             y_auto = st.checkbox("Auto", value=True, key=f"ge_yauto_{file_key}")
@@ -882,7 +882,7 @@ def render_graph_editor(
                 if y_min < y_max:
                     opts.y_lim = (y_min, y_max)
                 else:
-                    st.caption("⚠️ Y min must be < Y max")
+                    st.caption("Y min must be < Y max")
 
         st.divider()
         st.markdown("**Labels & Title**")
@@ -959,7 +959,7 @@ def _render_mode_section(
 
     col_table, col_best = st.columns([3, 1])
     with col_table:
-        st.markdown("### 🏆 Frequency Ranking")
+        st.markdown("### Frequency Ranking")
         st.dataframe(
             rank_df.style.background_gradient(subset=["Score"], cmap="RdYlGn"),
             use_container_width=True,
@@ -987,13 +987,13 @@ def _render_mode_section(
     opts = render_graph_editor(output_data, file_key=file_key)
 
     # ── Overview plot ────────────────────────────────────────────────────
-    st.markdown("### 📈 All representative profiles")
+    st.markdown("### All representative profiles")
     overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts)
     st.pyplot(overview_fig, use_container_width=True)
     plt.close(overview_fig)
 
     # ── Per-sheet detail ─────────────────────────────────────────────────
-    with st.expander("🔍 Per-frequency detail plots", expanded=False):
+    with st.expander("Per-frequency detail plots", expanded=False):
         visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
         for sheet_name in visible:
             interp_df = output_data.get(sheet_name)
@@ -1009,12 +1009,12 @@ def _render_mode_section(
             plt.close(sheet_fig)
 
     # ── Downloads ────────────────────────────────────────────────────────
-    st.markdown("### 💾 Downloads")
+    st.markdown("### Downloads")
     dl1, dl2, dl3 = st.columns(3)
 
     with dl1:
         st.download_button(
-            label="📥 Interpolated profiles (.xlsx)",
+            label="Interpolated profiles (.xlsx)",
             data=build_excel_download(output_data),
             file_name=f"{stem}_{mode}_interpolated.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1023,7 +1023,7 @@ def _render_mode_section(
 
     with dl2:
         st.download_button(
-            label="📥 Scores (.csv)",
+            label="Scores (.csv)",
             data=build_scores_csv(scores),
             file_name=f"{stem}_{mode}_scores.csv",
             mime="text/csv",
@@ -1035,7 +1035,7 @@ def _render_mode_section(
         png_bytes = fig_to_png(download_fig)
         plt.close(download_fig)
         st.download_button(
-            label="📥 Overview plot (.png)",
+            label="Overview plot (.png)",
             data=png_bytes,
             file_name=f"{stem}_{mode}_overview.png",
             mime="image/png",
@@ -1065,7 +1065,7 @@ def render_legacy_results(
         )
 
     if warnings:
-        with st.expander(f"⚠️ {len(warnings)} warning(s)", expanded=False):
+        with st.expander(f"{len(warnings)} warning(s)", expanded=False):
             for w in warnings:
                 st.warning(w)
 
@@ -1095,7 +1095,7 @@ def render_gem_results(
         )
 
     if warnings:
-        with st.expander(f"⚠️ {len(warnings)} warning(s)", expanded=False):
+        with st.expander(f"{len(warnings)} warning(s)", expanded=False):
             for w in warnings:
                 st.warning(w)
 
@@ -1130,16 +1130,16 @@ def render_gem_results(
 def main():
     st.set_page_config(
         page_title="UltraRank Frequency",
-        page_icon="📡",
+        page_icon=None,
         layout="wide",
     )
 
-    st.title("📡 Representative Incision Tool")
+    st.title("Representative Incision Tool")
     st.caption("Geophysical representative profile builder — EC / MS modes")
 
     # ── Sidebar controls ────────────────────────────────────────────────────
     with st.sidebar:
-        st.header("⚙️ Settings")
+        st.header("Settings")
 
         mode = st.radio(
             "Measurement mode",
@@ -1173,7 +1173,7 @@ def main():
         st.markdown("**Output files are available for download after processing.**")
 
         st.divider()
-        with st.expander("ℹ️ About", expanded=False):
+        with st.expander("About", expanded=False):
             st.markdown(
                 """
 **Representative Incision Tool** — v2.1
@@ -1498,7 +1498,7 @@ The **Batch Export — all methods** option runs all seven methods in one step a
     # ── Batch download (shown once, above per-file results) ────────────────
     if batch_results:
         st.divider()
-        st.markdown("### 📦 Batch Export")
+        st.markdown("### Batch Export")
 
         dl_col1, dl_col2 = st.columns(2)
 
@@ -1509,7 +1509,7 @@ The **Batch Export — all methods** option runs all seven methods in one step a
             )
             batch_bytes = build_batch_xlsx(batch_results)
             st.download_button(
-                label=f"📥 Download — {interp_kind} method (.xlsx)",
+                label=f"Download — {interp_kind} method (.xlsx)",
                 data=batch_bytes,
                 file_name=f"batch_{interp_kind}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1521,7 +1521,7 @@ The **Batch Export — all methods** option runs all seven methods in one step a
                 f"Interpolated profiles & scores for **all {len(ALL_INTERP_METHODS)} methods** "
                 f"across {len(uploaded_files)} file(s). May take a moment to generate."
             )
-            if st.button("⚙️ Generate all-methods export", key="btn_all_methods"):
+            if st.button("Generate all-methods export", key="btn_all_methods"):
                 with st.spinner(
                     f"Running {len(ALL_INTERP_METHODS)} interpolation methods "
                     f"across {len(uploaded_files)} file(s)…"
@@ -1530,7 +1530,7 @@ The **Batch Export — all methods** option runs all seven methods in one step a
                         uploaded_files, mode, distance_step
                     )
                 st.download_button(
-                    label="📥 Download — all methods (.xlsx)",
+                    label="Download — all methods (.xlsx)",
                     data=all_methods_bytes,
                     file_name="batch_all_methods.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1540,7 +1540,7 @@ The **Batch Export — all methods** option runs all seven methods in one step a
     # ── Per-file detailed results ───────────────────────────────────────────
     for uploaded_file in uploaded_files:
         st.divider()
-        st.subheader(f"📄 {uploaded_file.name}")
+        st.subheader(uploaded_file.name)
 
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
