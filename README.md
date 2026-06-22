@@ -3,6 +3,7 @@
 ## Overview
 
 **RIs_v2.py** is a Streamlit web application for analyzing multi-frequency electromagnetic induction (EMI) survey data. It automatically identifies the **most representative frequencies** (EC and MS channels) for geophysical profiling by scoring them based on signal-to-noise ratio.
+The tool can be also be used online via https://gemris.streamlit.app
 
 ### Key Features
 
