@@ -457,3 +457,31 @@ def test_pseudosection_no_overlap():
     b = pd.Series([1.0, 2.0], index=[5.0, 6.0])
     with pytest.raises(C.ContouringError, match="overlap"):
         C.build_pseudosection({"1Hz": a, "2Hz": b})
+
+
+# ---------------------------------------------------------------------------
+# Figures
+# ---------------------------------------------------------------------------
+
+def test_area_map_figure_spline_single_panel():
+    res = C.compute_area_map(line_survey(), VALUE_COL, cell_size=2.0)
+    fig = C.make_area_map_figure(res, "EC (mS/m)", "test")
+    assert len(fig.axes) == 2  # map + colour bar
+    plt.close(fig)
+
+
+def test_area_map_figure_kriging_has_two_panels():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="kriging", cell_size=2.0)
+    fig = C.make_area_map_figure(res, "EC (mS/m)", "test")
+    assert len(fig.axes) == 4  # two panels + two colour bars
+    plt.close(fig)
+
+
+def test_pseudosection_figure_labels_measured_frequencies():
+    s = pd.Series(np.arange(10.0), index=np.arange(10.0))
+    ps = C.build_pseudosection({"1000Hz": s, "10000Hz": s + 1})
+    fig = C.make_pseudosection_figure(ps, "EC (mS/m)", "t")
+    ax = fig.axes[0]
+    assert ax.get_yscale() == "log"
+    assert [t.get_text() for t in ax.get_yticklabels()] == ["1000Hz", "10000Hz"]
+    plt.close(fig)

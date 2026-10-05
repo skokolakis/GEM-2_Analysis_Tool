@@ -659,3 +659,77 @@ def build_pseudosection(profiles: dict[str, pd.Series]) -> PseudoSection:
         for lb in labels
     ])
     return PseudoSection(distance=distance, labels=labels, frequencies=frequencies, values=values)
+
+
+# ---------------------------------------------------------------------------
+# Figures
+# ---------------------------------------------------------------------------
+
+def make_area_map_figure(
+    result: AreaMapResult,
+    label: str,
+    title: str,
+    n_levels: int = 20,
+    show_points: bool = True,
+) -> plt.Figure:
+    """Contour map; for kriging, adds a kriging standard-deviation panel."""
+    spec = result.spec
+    panels = 2 if result.variance is not None else 1
+    fig, axes = plt.subplots(1, panels, figsize=(7 * panels, 6), squeeze=False)
+    xs, ys = spec.xs, spec.ys
+
+    ax = axes[0, 0]
+    cs = ax.contourf(
+        xs, ys, np.ma.masked_invalid(result.z),
+        levels=contour_levels(result.z, n_levels), cmap="viridis", extend="both",
+    )
+    fig.colorbar(cs, ax=ax, label=label)
+    if show_points:
+        ax.plot(result.bx, result.by, ",", color="k", alpha=0.4)
+    ax.set_title(title + (" — line-levelled (per-line median)" if result.levelled else ""))
+
+    if result.variance is not None:
+        ax2 = axes[0, 1]
+        std = np.sqrt(result.variance)
+        cs2 = ax2.contourf(
+            xs, ys, np.ma.masked_invalid(std),
+            levels=contour_levels(std, n_levels), cmap="magma", extend="both",
+        )
+        fig.colorbar(cs2, ax=ax2, label=f"Kriging std. dev. — {label}")
+        ax2.set_title("Kriging standard deviation")
+
+    xlab = "Easting (local m)" if result.origin is not None else "X (m)"
+    ylab = "Northing (local m)" if result.origin is not None else "Y (m)"
+    for a in axes[0]:
+        a.set_aspect("equal")
+        a.set_xlabel(xlab)
+        a.set_ylabel(ylab)
+    fig.tight_layout()
+    return fig
+
+
+def make_pseudosection_figure(
+    ps: PseudoSection, label: str, title: str, n_levels: int = 20
+) -> plt.Figure:
+    """Distance x frequency contour with a white line at each measured frequency."""
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    if ps.frequencies is not None:
+        rows = ps.frequencies
+        ax.set_yscale("log")
+        ax.yaxis.set_minor_locator(NullLocator())
+        ax.set_ylabel("Frequency (Hz)")
+    else:
+        rows = np.arange(len(ps.labels), dtype=float)
+        ax.set_ylabel("Frequency / sheet")
+    ax.set_yticks(rows, labels=ps.labels)
+    cs = ax.contourf(
+        ps.distance, rows, np.ma.masked_invalid(ps.values),
+        levels=contour_levels(ps.values, n_levels), cmap="viridis", extend="both",
+    )
+    for r in rows:
+        ax.axhline(r, color="white", linewidth=0.6, alpha=0.8)
+    fig.colorbar(cs, ax=ax, label=label)
+    ax.set_xlabel("Distance (m)")
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig
