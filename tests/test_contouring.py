@@ -368,3 +368,50 @@ def test_cross_validate_returns_finite_metrics(method):
     res = C.compute_area_map(line_survey(), VALUE_COL, method=method, cell_size=1.0)
     cv = C.cross_validate(res.bx, res.by, res.bv, method, variogram=res.variogram)
     assert cv["n"] > 0 and 0 <= cv["mae"] <= cv["rmse"] < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: blanking, NaN line labels, kriging cell growth, error wrapping
+# ---------------------------------------------------------------------------
+
+def test_default_blanking_keeps_gaps_between_wide_lines():
+    df = line_survey(n_lines=6, spacing=40.0, along=1.0, length=200.0)
+    res = C.compute_area_map(df, VALUE_COL)
+    xx, yy = np.meshgrid(res.spec.xs, res.spec.ys)
+    inside = (xx <= 200.0) & (yy <= 200.0)  # nodes within the surveyed block
+    assert np.isfinite(res.z[inside]).mean() > 0.98
+
+
+def test_explicit_blank_distance_is_respected():
+    df = line_survey(n_lines=6, spacing=40.0, along=1.0, length=200.0)
+    res = C.compute_area_map(df, VALUE_COL, blank_distance=5.0)
+    assert res.blank_distance == 5.0
+    assert np.isnan(res.z).mean() > 0.3  # strips between 40 m lines are blanked
+
+
+def test_levelling_with_blank_line_labels_keeps_map():
+    df = line_survey()
+    df.loc[df.index[:20], "Line"] = np.nan
+    res = C.compute_area_map(df, VALUE_COL, level=True, cell_size=1.0)
+    assert np.isfinite(res.bv).all()
+    assert np.isfinite(res.z).any()
+
+
+def test_kriging_auto_cell_grows_to_respect_point_cap():
+    rng = np.random.default_rng(0)
+    n = 12000
+    df = pd.DataFrame({"Line": rng.integers(0, 50, n),
+                       "X": rng.uniform(0, 100, n), "Y": rng.uniform(0, 100, n)})
+    df[VALUE_COL] = bump(df["X"] / 2, df["Y"] / 2)
+    res = C.compute_area_map(df, VALUE_COL, method="kriging")
+    assert len(res.bv) <= C.KRIGE_MAX_POINTS
+    assert res.spec.cell > C.auto_cell_size(df["X"].to_numpy(), df["Y"].to_numpy())
+
+
+def test_predict_wraps_degenerate_geometry_errors():
+    px = np.arange(10.0)
+    py = 2.0 * px  # perfectly collinear
+    with pytest.raises(C.ContouringError, match="Gridding failed"):
+        C.predict(px, py, np.ones(10), np.array([1.0]), np.array([5.0]), "spline")
+    with pytest.raises(C.ContouringError, match="Gridding failed"):
+        C.predict(px, py, np.ones(10), np.array([1.0]), np.array([5.0]), "linear")

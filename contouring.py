@@ -19,7 +19,7 @@ from matplotlib.ticker import NullLocator
 import pandas as pd
 from scipy.interpolate import RBFInterpolator, griddata
 from scipy.optimize import curve_fit
-from scipy.spatial import cKDTree
+from scipy.spatial import Delaunay, QhullError, cKDTree
 from scipy.spatial.distance import pdist
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,9 @@ GLOBAL_MAX_POINTS = 2000        # spline: above this, use local neighbourhoods
 KRIGE_MAX_POINTS = 4000         # PyKrige builds all pairwise distances at set-up
 VARIOGRAM_MAX_POINTS = 2000     # subsample size for the empirical variogram
 VARIOGRAM_BINS = 15
+BLANK_NN_FACTOR = 2.0           # default blanking >= 2 x median point spacing
+BLANK_COVERAGE_FACTOR = 1.5     # ... and >= 1.5 x P90 node-to-data distance inside the hull
+KRIGE_CELL_GROWTH = 1.25        # auto cell growth step to respect KRIGE_MAX_POINTS
 NODATA = -9999.0
 
 METHODS = {
@@ -153,7 +156,10 @@ def level_lines(values: np.ndarray, lines: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     global_median = float(np.nanmedian(values))
     line_medians = (
-        pd.Series(values).groupby(np.asarray(lines)).transform("median").to_numpy()
+        pd.Series(values)
+        .groupby(np.asarray(lines), dropna=False)
+        .transform("median")
+        .to_numpy()
     )
     return values + (global_median - line_medians)
 
@@ -368,15 +374,20 @@ def predict(
     p = np.column_stack([px - cx, py - cy])
     q = np.column_stack([np.ravel(qx) - cx, np.ravel(qy) - cy])
 
-    if method == "spline":
-        neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
-        rbf = RBFInterpolator(
-            p, pv, kernel="thin_plate_spline", smoothing=smoothing, neighbors=neighbours
-        )
-        return rbf(q), None
-
-    if method == "linear":
-        return griddata(p, pv, q, method="linear"), None
+    if method in ("spline", "linear"):
+        try:
+            if method == "spline":
+                neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
+                rbf = RBFInterpolator(
+                    p, pv, kernel="thin_plate_spline", smoothing=smoothing,
+                    neighbors=neighbours,
+                )
+                return rbf(q), None
+            return griddata(p, pv, q, method="linear"), None
+        except (np.linalg.LinAlgError, QhullError, ValueError) as exc:
+            raise ContouringError(
+                f"Gridding failed ({exc}). Try a larger cell size or another method."
+            ) from exc
 
     if method == "kriging":
         if variogram is None:
@@ -431,6 +442,27 @@ def blank_far(
     out = np.array(grid, dtype=float, copy=True)
     out[(d > max_distance).reshape(out.shape)] = np.nan
     return out
+
+
+def default_blank_distance(spec: GridSpec, px: np.ndarray, py: np.ndarray) -> float:
+    """
+    Blanking distance that keeps the gaps between survey lines filled:
+    max(BLANK_NN_FACTOR x median point spacing,
+        BLANK_COVERAGE_FACTOR x 90th percentile of node-to-nearest-point
+        distance over nodes inside the data's convex hull).
+    """
+    pts = np.column_stack([px, py])
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    nodes = np.column_stack([xx.ravel(), yy.ravel()])
+    try:
+        inside = Delaunay(pts).find_simplex(nodes) >= 0
+    except QhullError as exc:
+        raise ContouringError(f"Could not triangulate the data ({exc}).") from exc
+    nn = BLANK_NN_FACTOR * median_nn_spacing(px, py)
+    if not inside.any():
+        return nn
+    d, _ = cKDTree(pts).query(nodes[inside])
+    return max(nn, BLANK_COVERAGE_FACTOR * float(np.percentile(d, 90)))
 
 
 def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
@@ -500,6 +532,10 @@ def compute_area_map(
     cell = cell_size if cell_size else auto_cell_size(x, y)
     spec = make_grid(x, y, cell)
     bx, by, bv = block_median(x, y, v, spec)
+    while method == "kriging" and not cell_size and len(bv) > KRIGE_MAX_POINTS:
+        cell = round_sig(cell * KRIGE_CELL_GROWTH)
+        spec = make_grid(x, y, cell)
+        bx, by, bv = block_median(x, y, v, spec)
     if len(bv) < MIN_POINTS:
         raise ContouringError("Not enough points to grid.")
 
@@ -510,7 +546,7 @@ def compute_area_map(
     if var is not None:
         var = var.reshape(spec.ny, spec.nx)
 
-    dist = blank_distance if blank_distance else 2.0 * median_nn_spacing(bx, by)
+    dist = blank_distance if blank_distance else default_blank_distance(spec, bx, by)
     z = blank_far(z, spec, bx, by, dist)
     if var is not None:
         var = blank_far(var, spec, bx, by, dist)
