@@ -191,3 +191,23 @@ def test_check_geometry_area_passes():
 def test_check_geometry_too_few_points():
     with pytest.raises(C.ContouringError, match="Not enough"):
         C.check_geometry(np.arange(5.0), np.arange(5.0) ** 2)
+
+
+# ---------------------------------------------------------------------------
+# Variogram
+# ---------------------------------------------------------------------------
+
+def test_fit_variogram_recovers_structure():
+    df = line_survey()
+    spec = C.make_grid(df["X"].to_numpy(), df["Y"].to_numpy(), 1.0)
+    bx, by, bv = C.block_median(df["X"].to_numpy(), df["Y"].to_numpy(),
+                                df[VALUE_COL].to_numpy(), spec)
+    vf = C.fit_variogram(bx, by, bv, "spherical")
+    assert vf.psill > 10 * vf.nugget  # smooth field: structured, not pure nugget
+    assert 5.0 < vf.range < 100.0
+    assert vf.parameters == [vf.psill, vf.range, vf.nugget]
+
+
+def test_fit_variogram_rejects_unknown_model():
+    with pytest.raises(ValueError, match="Unknown variogram model"):
+        C.fit_variogram(np.arange(20.0), np.arange(20.0) ** 0.5, np.arange(20.0), "cubic")

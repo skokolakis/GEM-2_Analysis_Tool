@@ -239,3 +239,84 @@ def block_median(
     df = pd.DataFrame({"ix": ix, "iy": iy, "x": x, "y": y, "v": v})
     agg = df.groupby(["iy", "ix"], sort=True)[["x", "y", "v"]].median()
     return agg["x"].to_numpy(), agg["y"].to_numpy(), agg["v"].to_numpy()
+
+
+# ---------------------------------------------------------------------------
+# Variogram
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VariogramFit:
+    model: str
+    psill: float
+    range: float
+    nugget: float
+    lags: tuple[float, ...]
+    gamma: tuple[float, ...]
+
+    @property
+    def parameters(self) -> list[float]:
+        """PyKrige parameter order for spherical / exponential / gaussian."""
+        return [self.psill, self.range, self.nugget]
+
+
+def fit_variogram(
+    px: np.ndarray, py: np.ndarray, pv: np.ndarray, model: str = "spherical", seed: int = 0
+) -> VariogramFit:
+    """
+    Empirical semivariogram up to half the maximum pair distance, fitted by
+    pair-count-weighted least squares (Oliver & Webster, 2014).
+
+    PyKrige's built-in fit uses lags over the full distance range, where
+    long-range pairs dominate and smooth fields collapse to pure nugget.
+    """
+    from pykrige import variogram_models as vm
+
+    funcs = {
+        "spherical": vm.spherical_variogram_model,
+        "exponential": vm.exponential_variogram_model,
+        "gaussian": vm.gaussian_variogram_model,
+    }
+    if model not in funcs:
+        raise ValueError(f"Unknown variogram model: {model!r}")
+
+    px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    if len(pv) > VARIOGRAM_MAX_POINTS:
+        idx = np.random.default_rng(seed).choice(len(pv), VARIOGRAM_MAX_POINTS, replace=False)
+        px, py, pv = px[idx], py[idx], pv[idx]
+
+    d = pdist(np.column_stack([px, py]))
+    g = 0.5 * pdist(pv[:, None], "sqeuclidean")
+    max_lag = 0.5 * float(d.max())
+    keep = (d > 0) & (d <= max_lag)
+    d, g = d[keep], g[keep]
+    edges = np.linspace(0.0, max_lag, VARIOGRAM_BINS + 1)
+    which = np.clip(np.digitize(d, edges) - 1, 0, VARIOGRAM_BINS - 1)
+    counts = np.bincount(which, minlength=VARIOGRAM_BINS)
+    occupied = counts > 0
+    lags = np.bincount(which, weights=d, minlength=VARIOGRAM_BINS)[occupied] / counts[occupied]
+    gamma = np.bincount(which, weights=g, minlength=VARIOGRAM_BINS)[occupied] / counts[occupied]
+    counts = counts[occupied]
+    if len(lags) < 3:
+        raise KrigingError(
+            "Too few distance classes to fit a variogram. Try the thin-plate spline method."
+        )
+
+    def f(h, psill, rng_, nugget):
+        return funcs[model]([psill, rng_, nugget], h)
+
+    p0 = [max(float(gamma.max() - gamma.min()), 1e-12), max_lag / 2, max(float(gamma.min()), 0.0)]
+    try:
+        popt, _ = curve_fit(
+            f, lags, gamma, p0=p0, sigma=1.0 / np.sqrt(counts),
+            bounds=([0.0, 1e-6 * max_lag, 0.0], [np.inf, 4.0 * max_lag, np.inf]),
+            maxfev=20000,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise KrigingError(
+            f"Variogram fit failed ({exc}). Try the thin-plate spline method."
+        ) from exc
+    return VariogramFit(
+        model=model, psill=float(popt[0]), range=float(popt[1]), nugget=float(popt[2]),
+        lags=tuple(lags.tolist()), gamma=tuple(gamma.tolist()),
+    )
