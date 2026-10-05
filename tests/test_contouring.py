@@ -415,3 +415,45 @@ def test_predict_wraps_degenerate_geometry_errors():
         C.predict(px, py, np.ones(10), np.array([1.0]), np.array([5.0]), "spline")
     with pytest.raises(C.ContouringError, match="Gridding failed"):
         C.predict(px, py, np.ones(10), np.array([1.0]), np.array([5.0]), "linear")
+
+
+# ---------------------------------------------------------------------------
+# Pseudo-section
+# ---------------------------------------------------------------------------
+
+def test_parse_frequency():
+    assert C.parse_frequency("4525Hz") == 4525.0
+    assert C.parse_frequency("EC 93.5 kHz") == 93.5
+    assert C.parse_frequency("north") is None
+
+
+def test_pseudosection_aligns_overlap_and_sorts():
+    a = pd.Series(np.arange(0.0, 51.0), index=np.arange(0.0, 51.0))             # 0..50, step 1
+    b = pd.Series(np.arange(10.0, 60.5, 0.5), index=np.arange(10.0, 60.5, 0.5))  # 10..60, step 0.5
+    ps = C.build_pseudosection({"38025Hz": a, "4525Hz": b})
+    assert ps.labels == ["4525Hz", "38025Hz"]
+    np.testing.assert_allclose(ps.frequencies, [4525.0, 38025.0])
+    assert ps.distance[0] == 10.0 and ps.distance[-1] == 50.0
+    assert np.diff(ps.distance)[0] == 0.5
+    assert np.isfinite(ps.values).all()
+    np.testing.assert_allclose(ps.values[0], ps.distance)  # b(d) = d
+    np.testing.assert_allclose(ps.values[1], ps.distance)  # a(d) = d
+
+
+def test_pseudosection_unparsed_labels_keep_order():
+    s = pd.Series([1.0, 2.0, 3.0], index=[0.0, 1.0, 2.0])
+    ps = C.build_pseudosection({"north": s, "south": s})
+    assert ps.labels == ["north", "south"] and ps.frequencies is None
+
+
+def test_pseudosection_needs_two_frequencies():
+    s = pd.Series([1.0, 2.0], index=[0.0, 1.0])
+    with pytest.raises(C.ContouringError, match="at least 2"):
+        C.build_pseudosection({"4525Hz": s})
+
+
+def test_pseudosection_no_overlap():
+    a = pd.Series([1.0, 2.0], index=[0.0, 1.0])
+    b = pd.Series([1.0, 2.0], index=[5.0, 6.0])
+    with pytest.raises(C.ContouringError, match="overlap"):
+        C.build_pseudosection({"1Hz": a, "2Hz": b})

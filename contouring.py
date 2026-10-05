@@ -594,3 +594,68 @@ def cross_validate(
         "mae": float(np.mean(np.abs(err))),
         "n": int(err.size),
     }
+
+
+# ---------------------------------------------------------------------------
+# Pseudo-section
+# ---------------------------------------------------------------------------
+
+def parse_frequency(label: str) -> float | None:
+    """First number in a label, e.g. '4525Hz' -> 4525.0; None if absent."""
+    m = re.search(r"\d+(?:\.\d+)?", str(label))
+    return float(m.group()) if m else None
+
+
+@dataclass
+class PseudoSection:
+    distance: np.ndarray             # (n_dist,)
+    labels: list[str]                # row labels, in plotting order
+    frequencies: np.ndarray | None   # (n_freq,) if every label parsed, else None
+    values: np.ndarray               # (n_freq, n_dist)
+
+
+def build_pseudosection(profiles: dict[str, pd.Series]) -> PseudoSection:
+    """
+    Stack mean profiles (index = distance) onto their common overlap.
+
+    Each profile is linearly interpolated onto a shared grid spanning the
+    overlap of all ranges, at the smallest step among them; nothing is
+    extrapolated.
+    """
+    cleaned: dict[str, pd.Series] = {}
+    for label, s in profiles.items():
+        s = s.dropna().sort_index()
+        if len(s) >= 2:
+            cleaned[str(label)] = s
+    if len(cleaned) < 2:
+        raise ContouringError("A pseudo-section needs at least 2 frequencies.")
+
+    lo = max(float(s.index.min()) for s in cleaned.values())
+    hi = min(float(s.index.max()) for s in cleaned.values())
+    if hi <= lo:
+        raise ContouringError("Profiles do not overlap in distance.")
+    step = min(
+        float(np.median(np.diff(s.index.to_numpy(dtype=float)))) for s in cleaned.values()
+    )
+    n = int(math.floor((hi - lo) / step + 1e-9)) + 1
+    distance = lo + step * np.arange(n)
+
+    labels = list(cleaned.keys())
+    freqs = [parse_frequency(lb) for lb in labels]
+    if all(f is not None for f in freqs):
+        order = np.argsort(freqs, kind="stable")
+        labels = [labels[i] for i in order]
+        frequencies = np.array([freqs[i] for i in order], dtype=float)
+    else:
+        frequencies = None
+
+    values = np.vstack([
+        np.interp(
+            distance,
+            cleaned[lb].index.to_numpy(dtype=float),
+            cleaned[lb].to_numpy(dtype=float),
+            left=np.nan, right=np.nan,
+        )
+        for lb in labels
+    ])
+    return PseudoSection(distance=distance, labels=labels, frequencies=frequencies, values=values)
