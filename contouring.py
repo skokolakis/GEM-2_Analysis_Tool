@@ -625,6 +625,7 @@ def build_pseudosection(profiles: dict[str, pd.Series]) -> PseudoSection:
     cleaned: dict[str, pd.Series] = {}
     for label, s in profiles.items():
         s = s.dropna().sort_index()
+        s = s[~s.index.duplicated()]
         if len(s) >= 2:
             cleaned[str(label)] = s
     if len(cleaned) < 2:
@@ -638,11 +639,13 @@ def build_pseudosection(profiles: dict[str, pd.Series]) -> PseudoSection:
         float(np.median(np.diff(s.index.to_numpy(dtype=float)))) for s in cleaned.values()
     )
     n = int(math.floor((hi - lo) / step + 1e-9)) + 1
-    distance = lo + step * np.arange(n)
+    if n < 2:
+        raise ContouringError("Profiles overlap by less than one distance step.")
+    distance = np.clip(lo + step * np.arange(n), lo, hi)  # no float overshoot past hi
 
     labels = list(cleaned.keys())
     freqs = [parse_frequency(lb) for lb in labels]
-    if all(f is not None for f in freqs):
+    if all(f is not None and f > 0 for f in freqs) and len(set(freqs)) == len(freqs):
         order = np.argsort(freqs, kind="stable")
         labels = [labels[i] for i in order]
         frequencies = np.array([freqs[i] for i in order], dtype=float)

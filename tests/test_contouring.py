@@ -513,3 +513,37 @@ def test_grid_to_csv_kriging_has_variance_column():
     res = C.compute_area_map(line_survey(), VALUE_COL, method="kriging", cell_size=2.0)
     df = pd.read_csv(io.BytesIO(C.grid_to_csv(res)))
     assert list(df.columns) == ["x", "y", "value", "variance"]
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: pseudo-section edge cases
+# ---------------------------------------------------------------------------
+
+def test_pseudosection_float_endpoint_has_no_blank_column():
+    idx = np.linspace(0.0, 3.0, 31)  # step 0.1 with float noise
+    a = pd.Series(np.ones(31), index=idx)
+    b = pd.Series(np.ones(4), index=[0.0, 0.1, 0.2, 0.30000000000000004])
+    c = pd.Series(np.ones(4), index=[0.0, 0.1, 0.2, 0.3])
+    ps = C.build_pseudosection({"1Hz": a, "2Hz": b, "3Hz": c})
+    assert np.isfinite(ps.values).all()
+    assert ps.distance[-1] <= 0.3
+
+
+def test_pseudosection_overlap_below_one_step_raises():
+    a = pd.Series([1.0, 2.0, 3.0], index=[0.0, 5.0, 10.0])
+    b = pd.Series([1.0, 2.0, 3.0], index=[9.5, 14.5, 19.5])
+    with pytest.raises(C.ContouringError, match="less than one distance step"):
+        C.build_pseudosection({"1Hz": a, "2Hz": b})
+
+
+def test_pseudosection_duplicate_distances_tolerated():
+    a = pd.Series([1.0, 1.0, 2.0, 3.0], index=[0.0, 0.0, 1.0, 2.0])
+    b = pd.Series([1.0, 2.0, 3.0], index=[0.0, 1.0, 2.0])
+    ps = C.build_pseudosection({"1Hz": a, "2Hz": b})
+    assert np.isfinite(ps.values).all()
+
+
+def test_pseudosection_zero_or_duplicate_frequency_uses_categorical_axis():
+    s = pd.Series([1.0, 2.0, 3.0], index=[0.0, 1.0, 2.0])
+    assert C.build_pseudosection({"0Hz": s, "10Hz": s}).frequencies is None
+    assert C.build_pseudosection({"EC 10Hz": s, "MS 10Hz": s}).frequencies is None
