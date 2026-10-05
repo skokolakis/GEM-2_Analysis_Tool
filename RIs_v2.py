@@ -1642,6 +1642,25 @@ The **Batch Export — all methods** option runs all seven methods in one step a
 
 ---
 
+#### 2D contouring
+
+Switch on in the sidebar under **2D contouring**.
+
+- **Pseudo-section** — mean profiles of all frequencies as one
+  distance × frequency contour, aligned on their common distance
+  range. The frequency axis is *not* depth: under LIN, depth
+  sensitivity is set by coil geometry (Huang, 2005).
+- **Area map** — plan-view grid of one frequency from the X/Y (or
+  Lat/Lon) coordinates of all lines: optional per-line median
+  levelling (Mauring & Kihle, 2006), block-median reduction, then
+  thin-plate spline (Briggs, 1974; Sandwell, 1987), ordinary
+  kriging with a fitted variogram and standard-deviation map
+  (Lesch et al., 1995; Corwin & Lesch, 2005; Oliver & Webster,
+  2014) or linear triangulation. Nodes far from data are blanked.
+  Use **Cross-validate** to compare methods (Li & Heap, 2011).
+
+---
+
 #### Supported file formats
 
 | Format | Notes |
@@ -1725,6 +1744,44 @@ The **Batch Export — all methods** option runs all seven methods in one step a
   cubic interpolation. *SIAM J. Numer. Anal.*, **17**(2),
   238–246.
   [doi:10.1137/0717021](https://doi.org/10.1137/0717021)
+
+- Briggs, I.C. (1974). Machine contouring using minimum
+  curvature. *Geophysics*, **39**(1), 39–48.
+  [doi:10.1190/1.1440410](https://doi.org/10.1190/1.1440410)
+
+- Sandwell, D.T. (1987). Biharmonic spline interpolation of
+  GEOS-3 and SEASAT altimeter data. *Geophys. Res. Lett.*,
+  **14**(2), 139–142.
+  [doi:10.1029/GL014i002p00139](https://doi.org/10.1029/GL014i002p00139)
+
+- Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial
+  prediction of soil salinity using electromagnetic induction
+  techniques: 1. *Water Resour. Res.*, **31**(2), 373–386.
+  [doi:10.1029/94WR02179](https://doi.org/10.1029/94WR02179)
+
+- Corwin, D.L. & Lesch, S.M. (2005). Apparent soil electrical
+  conductivity measurements in agriculture. *Comput. Electron.
+  Agric.*, **46**, 11–43.
+  [doi:10.1016/j.compag.2004.10.005](https://doi.org/10.1016/j.compag.2004.10.005)
+
+- Oliver, M.A. & Webster, R. (2014). A tutorial guide to
+  geostatistics: computing and modelling variograms and kriging.
+  *Catena*, **113**, 56–69.
+  [doi:10.1016/j.catena.2013.09.006](https://doi.org/10.1016/j.catena.2013.09.006)
+
+- Li, J. & Heap, A.D. (2011). A review of comparative studies of
+  spatial interpolation methods in environmental sciences.
+  *Ecol. Inform.*, **6**, 228–241.
+  [doi:10.1016/j.ecoinf.2010.12.003](https://doi.org/10.1016/j.ecoinf.2010.12.003)
+
+- Mauring, E. & Kihle, O. (2006). Leveling aerogeophysical data
+  using a moving differential median filter. *Geophysics*,
+  **71**(1), L5–L11.
+  [doi:10.1190/1.2163912](https://doi.org/10.1190/1.2163912)
+
+- Huang, H. (2005). Depth of investigation for small broadband
+  electromagnetic sensors. *Geophysics*, **70**(6), G135–G142.
+  [doi:10.1190/1.2122412](https://doi.org/10.1190/1.2122412)
                 """
             )
 
