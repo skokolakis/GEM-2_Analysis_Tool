@@ -142,3 +142,18 @@ New plots use the correct GEM units: EC in mS/m, MS in 10⁻³ SI (ppt). For leg
 ## Out of scope
 
 Lag / sensor–GPS offset correction, GeoTIFF export, inversion, and the scientific-fidelity fixes tracked in issues #5–#18.
+
+## Amendments after implementation review (2026-10-06)
+
+The shipped behaviour differs from the sections above in these reviewed and approved ways:
+
+- **Coordinates** — Lat/Lon are used only with ≥ 10 usable fixes; rows at (0, 0) are GPS no-fix and dropped. Otherwise X/Y.
+- **Transect check** — elongated data (spread ratio < 0.05) count as a transect only if there are fewer than 3 distinct across-track line positions (positions within 1 m are one track), so narrow corridor surveys are accepted.
+- **Levelling** — rows with blank `Line` labels form their own group instead of becoming NaN.
+- **Blanking default** — max(2 × median block-median spacing, 1.5 × the 90th-percentile node-to-data distance inside the convex hull), so gaps between survey lines stay filled.
+- **Kriging** — with the automatic cell size the cell grows ×1.25 until ≤ 4000 block medians; only a manual cell can hit the 4000-point error. The variogram uses log-spaced lag classes (< 30 pairs dropped) and Cressie (1985) weights N/γ(h)², re-evaluated three times; the gaussian model has a nugget floor of 10⁻³ × sill. (Equal-width classes with pair-count weights drove the nugget to zero on noisy data; gaussian kriging cross-validation RMSE was ~1600 against 0.3 noise.)
+- **Errors** — SciPy failures in spline/linear gridding are wrapped as `ContouringError`; figure construction is inside the UI's try blocks with a last-resort `st.error`.
+- **Pseudo-section** — duplicate distances dropped; overlap shorter than one step raises; the grid is clipped to the overlap; labels parse only as a bare number or a number with Hz/kHz (kHz converted); zero or duplicate frequencies use a categorical axis; contours are computed against log10(f).
+- **Figures** — contour levels use a relative flat-range tolerance; levels are computed before the figure is created; map axes show full coordinates (no offset).
+- **Caption / docs** — the frequency axis is "not a calibrated depth axis": McNeill (1980) and Callegary et al. (2007) for the LIN geometry statement, Huang (2005) for the √skin-depth scaling of depth of investigation.
+- **Caching** — the area-map cache is keyed only on grid-affecting settings and keeps at most 16 entries.

@@ -15,7 +15,6 @@ from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import NullLocator
 import pandas as pd
 from scipy.interpolate import RBFInterpolator, griddata
 from scipy.optimize import curve_fit
@@ -38,7 +37,10 @@ LOCAL_NEIGHBOURS = 64           # neighbourhood size for local spline / kriging
 GLOBAL_MAX_POINTS = 2000        # spline: above this, use local neighbourhoods
 KRIGE_MAX_POINTS = 4000         # PyKrige builds all pairwise distances at set-up
 VARIOGRAM_MAX_POINTS = 2000     # subsample size for the empirical variogram
-VARIOGRAM_BINS = 15
+VARIOGRAM_BINS = 15             # log-spaced lag classes up to half the max distance
+VARIOGRAM_MIN_PAIRS = 30        # lag classes with fewer pairs are ignored
+VARIOGRAM_ITERATIONS = 3        # Cressie weights are re-evaluated on the fitted model
+GAUSSIAN_NUGGET_FLOOR = 1e-3    # x total sill; keeps gaussian kriging well conditioned
 BLANK_NN_FACTOR = 2.0           # default blanking >= 2 x median point spacing
 BLANK_COVERAGE_FACTOR = 1.5     # ... and >= 1.5 x P90 node-to-data distance inside the hull
 KRIGE_CELL_GROWTH = 1.25        # auto cell growth step to respect KRIGE_MAX_POINTS
@@ -103,10 +105,10 @@ def find_coordinate_columns(df: pd.DataFrame, mode: str = "auto") -> tuple[str, 
     lat_col = next((lower[n] for n in LAT_NAMES if n in lower), None)
     lon_col = next((lower[n] for n in LON_NAMES if n in lower), None)
     if lat_col is not None and lon_col is not None:
-        # Check if both columns have at least 2 finite numeric values
-        lat_valid = pd.to_numeric(df[lat_col], errors="coerce").notna().sum() >= 2
-        lon_valid = pd.to_numeric(df[lon_col], errors="coerce").notna().sum() >= 2
-        if lat_valid and lon_valid:
+        lat = pd.to_numeric(df[lat_col], errors="coerce")
+        lon = pd.to_numeric(df[lon_col], errors="coerce")
+        usable = lat.notna() & lon.notna() & ~((lat == 0) & (lon == 0))  # (0, 0) = no fix
+        if usable.sum() >= MIN_POINTS:
             return lon_col, lat_col, True
 
     if "x" in lower and "y" in lower:
@@ -287,11 +289,15 @@ def fit_variogram(
     px: np.ndarray, py: np.ndarray, pv: np.ndarray, model: str = "spherical", seed: int = 0
 ) -> VariogramFit:
     """
-    Empirical semivariogram up to half the maximum pair distance, fitted by
-    pair-count-weighted least squares (Oliver & Webster, 2014).
+    Empirical semivariogram in log-spaced lag classes up to half the maximum
+    pair distance, fitted by weighted least squares with Cressie (1985)
+    weights N(h) / gamma(h)^2, re-evaluated on the fitted model.
 
-    PyKrige's built-in fit uses lags over the full distance range, where
-    long-range pairs dominate and smooth fields collapse to pure nugget.
+    Log-spaced classes give the short lags their own classes, and Cressie
+    weights stop the far more numerous long-lag pairs from dominating the fit.
+    With equal-width classes and pair-count weights the nugget went to zero
+    on noisy data and gaussian kriging became unstable; a small nugget floor
+    keeps the gaussian model well conditioned.
     """
     from pykrige import variogram_models as vm
 
@@ -315,10 +321,16 @@ def fit_variogram(
     max_lag = 0.5 * float(d.max())
     keep = (d > 0) & (d <= max_lag)
     d, g = d[keep], g[keep]
-    edges = np.linspace(0.0, max_lag, VARIOGRAM_BINS + 1)
+    if d.size == 0:
+        raise KrigingError(
+            "Too few distance classes to fit a variogram. Try the thin-plate spline method."
+        )
+    edges = np.geomspace(max(float(np.percentile(d, 0.5)), 1e-9 * max_lag), max_lag,
+                         VARIOGRAM_BINS + 1)
+    edges[0] = 0.0
     which = np.clip(np.digitize(d, edges) - 1, 0, VARIOGRAM_BINS - 1)
     counts = np.bincount(which, minlength=VARIOGRAM_BINS)
-    occupied = counts > 0
+    occupied = counts >= VARIOGRAM_MIN_PAIRS
     lags = np.bincount(which, weights=d, minlength=VARIOGRAM_BINS)[occupied] / counts[occupied]
     gamma = np.bincount(which, weights=g, minlength=VARIOGRAM_BINS)[occupied] / counts[occupied]
     counts = counts[occupied]
@@ -330,19 +342,25 @@ def fit_variogram(
     def f(h, psill, rng_, nugget):
         return funcs[model]([psill, rng_, nugget], h)
 
-    p0 = [max(float(gamma.max() - gamma.min()), 1e-12), max_lag / 2, max(float(gamma.min()), 0.0)]
+    popt = [max(float(gamma.max() - gamma.min()), 1e-12), max_lag / 2, max(float(gamma.min()), 0.0)]
+    gamma_floor = 1e-6 * max(float(gamma.max()), 1e-12)
     try:
-        popt, _ = curve_fit(
-            f, lags, gamma, p0=p0, sigma=1.0 / np.sqrt(counts),
-            bounds=([0.0, 1e-6 * max_lag, 0.0], [np.inf, 4.0 * max_lag, np.inf]),
-            maxfev=20000,
-        )
+        for _ in range(VARIOGRAM_ITERATIONS):
+            model_gamma = np.maximum(f(lags, *popt), gamma_floor)
+            popt, _ = curve_fit(
+                f, lags, gamma, p0=popt, sigma=model_gamma / np.sqrt(counts),
+                bounds=([0.0, 1e-6 * max_lag, 0.0], [np.inf, 4.0 * max_lag, np.inf]),
+                maxfev=20000,
+            )
     except (RuntimeError, ValueError) as exc:
         raise KrigingError(
             f"Variogram fit failed ({exc}). Try the thin-plate spline method."
         ) from exc
+    psill, rng_, nugget = (float(v) for v in popt)
+    if model == "gaussian":
+        nugget = max(nugget, GAUSSIAN_NUGGET_FLOOR * (psill + nugget))
     return VariogramFit(
-        model=model, psill=float(popt[0]), range=float(popt[1]), nugget=float(popt[2]),
+        model=model, psill=psill, range=rng_, nugget=nugget,
         lags=tuple(lags.tolist()), gamma=tuple(gamma.tolist()),
     )
 
@@ -520,6 +538,9 @@ def compute_area_map(
 
     origin = None
     if is_deg:
+        fix = ~((x == 0) & (y == 0))  # GPS no-fix rows are logged as (0, 0)
+        keep[keep] = fix
+        x, y, v = x[fix], y[fix], v[fix]
         x, y, origin = project_to_local_metres(x, y)
 
     levelled = False
@@ -602,15 +623,17 @@ def cross_validate(
 
 def parse_frequency(label: str) -> float | None:
     """
-    Frequency from a label: a bare number ('9000') or a number followed by Hz
-    ('4525Hz', 'EC 93.5 kHz' -> 93.5; units are not converted). None otherwise,
-    e.g. 'Sheet1', so such labels get a categorical axis.
+    Frequency in Hz from a label: a bare number ('9000') or a number followed
+    by Hz or kHz ('4525Hz' -> 4525.0, 'EC 93.5 kHz' -> 93500.0). None
+    otherwise, e.g. 'Sheet1', so such labels get a categorical axis.
     """
     text = str(label).strip()
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)", text) or re.search(
-        r"(\d+(?:\.\d+)?)\s*k?Hz", text, re.IGNORECASE
-    )
-    return float(m.group(1)) if m else None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return float(text)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k?)Hz", text, re.IGNORECASE)
+    if not m:
+        return None
+    return float(m.group(1)) * (1000.0 if m.group(2) else 1.0)
 
 
 @dataclass
@@ -684,26 +707,29 @@ def make_area_map_figure(
 ) -> plt.Figure:
     """Contour map; for kriging, adds a kriging standard-deviation panel."""
     spec = result.spec
-    panels = 2 if result.variance is not None else 1
+    # Compute levels first: they may raise, and no figure should be left open.
+    levels = contour_levels(result.z, n_levels)
+    std = np.sqrt(result.variance) if result.variance is not None else None
+    std_levels = contour_levels(std, n_levels) if std is not None else None
+    panels = 2 if std is not None else 1
     fig, axes = plt.subplots(1, panels, figsize=(7 * panels, 6), squeeze=False)
     xs, ys = spec.xs, spec.ys
 
     ax = axes[0, 0]
     cs = ax.contourf(
         xs, ys, np.ma.masked_invalid(result.z),
-        levels=contour_levels(result.z, n_levels), cmap="viridis", extend="both",
+        levels=levels, cmap="viridis", extend="both",
     )
     fig.colorbar(cs, ax=ax, label=label)
     if show_points:
         ax.plot(result.bx, result.by, ",", color="k", alpha=0.4)
     ax.set_title(title + (" — line-levelled (per-line median)" if result.levelled else ""))
 
-    if result.variance is not None:
+    if std is not None:
         ax2 = axes[0, 1]
-        std = np.sqrt(result.variance)
         cs2 = ax2.contourf(
             xs, ys, np.ma.masked_invalid(std),
-            levels=contour_levels(std, n_levels), cmap="magma", extend="both",
+            levels=std_levels, cmap="magma", extend="both",
         )
         fig.colorbar(cs2, ax=ax2, label=f"Kriging std. dev. — {label}")
         ax2.set_title("Kriging standard deviation")
@@ -711,6 +737,7 @@ def make_area_map_figure(
     xlab = "Easting (local m)" if result.origin is not None else "X (m)"
     ylab = "Northing (local m)" if result.origin is not None else "Y (m)"
     for a in axes[0]:
+        a.ticklabel_format(useOffset=False, style="plain")  # full map coordinates
         a.set_aspect("equal")
         a.set_xlabel(xlab)
         a.set_ylabel(ylab)
@@ -722,19 +749,20 @@ def make_pseudosection_figure(
     ps: PseudoSection, label: str, title: str, n_levels: int = 20
 ) -> plt.Figure:
     """Distance x frequency contour with a white line at each measured frequency."""
+    levels = contour_levels(ps.values, n_levels)  # may raise; before any figure exists
     fig, ax = plt.subplots(figsize=(10, 4.5))
     if ps.frequencies is not None:
-        rows = ps.frequencies
-        ax.set_yscale("log")
-        ax.yaxis.set_minor_locator(NullLocator())
-        ax.set_ylabel("Frequency (Hz)")
+        # Contour against log10(f) so values between rows are interpolated on the log axis.
+        rows = np.log10(ps.frequencies)
+        ax.set_ylabel("Frequency (Hz, log scale)")
     else:
         rows = np.arange(len(ps.labels), dtype=float)
         ax.set_ylabel("Frequency / sheet")
     ax.set_yticks(rows, labels=ps.labels)
+    ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     cs = ax.contourf(
         ps.distance, rows, np.ma.masked_invalid(ps.values),
-        levels=contour_levels(ps.values, n_levels), cmap="viridis", extend="both",
+        levels=levels, cmap="viridis", extend="both",
     )
     for r in rows:
         ax.axhline(r, color="white", linewidth=0.6, alpha=0.8)

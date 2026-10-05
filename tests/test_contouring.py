@@ -110,8 +110,10 @@ def test_find_coordinates_override():
 
 
 def test_find_coordinates_lat_lon_columns_take_precedence():
-    df = pd.DataFrame({"X": [0.0, 80.0], "Y": [0.0, 60.0],
-                       "Latitude": [50.0, 50.001], "LON": [4.0, 4.001]})
+    n = C.MIN_POINTS
+    df = pd.DataFrame({"X": np.linspace(0.0, 80.0, n), "Y": np.linspace(0.0, 60.0, n),
+                       "Latitude": np.linspace(50.0, 50.001, n),
+                       "LON": np.linspace(4.0, 4.001, n)})
     assert C.find_coordinate_columns(df) == ("LON", "Latitude", True)
 
 
@@ -423,7 +425,7 @@ def test_predict_wraps_degenerate_geometry_errors():
 
 def test_parse_frequency():
     assert C.parse_frequency("4525Hz") == 4525.0
-    assert C.parse_frequency("EC 93.5 kHz") == 93.5
+    assert C.parse_frequency("EC 93.5 kHz") == 93500.0
     assert C.parse_frequency("north") is None
 
 
@@ -482,7 +484,8 @@ def test_pseudosection_figure_labels_measured_frequencies():
     ps = C.build_pseudosection({"1000Hz": s, "10000Hz": s + 1})
     fig = C.make_pseudosection_figure(ps, "EC (mS/m)", "t")
     ax = fig.axes[0]
-    assert ax.get_yscale() == "log"
+    assert "log" in ax.get_ylabel()
+    np.testing.assert_allclose(ax.get_yticks(), [3.0, 4.0])  # log10 of 1000, 10000
     assert [t.get_text() for t in ax.get_yticklabels()] == ["1000Hz", "10000Hz"]
     plt.close(fig)
 
@@ -562,3 +565,79 @@ def test_parse_frequency_bare_numbers_and_hz_only():
     assert C.parse_frequency("9000") == 9000.0
     assert C.parse_frequency("Sheet1") is None
     assert C.parse_frequency("Line 3") is None
+
+
+# ---------------------------------------------------------------------------
+# Final fix round: variogram on noisy data, kHz labels, figures, GPS no-fix rows
+# ---------------------------------------------------------------------------
+
+def _noisy_survey():
+    df = line_survey()
+    df[VALUE_COL] = df[VALUE_COL] + np.random.default_rng(1).normal(0, 0.3, len(df))
+    return df
+
+
+def test_gaussian_kriging_is_stable_on_noisy_data():
+    # Before the fix the fitted nugget was ~0 and cross-validation RMSE was ~1600.
+    res = C.compute_area_map(_noisy_survey(), VALUE_COL, method="kriging",
+                             variogram_model="gaussian", cell_size=1.0)
+    assert res.variogram.nugget > 0
+    cv = C.cross_validate(res.bx, res.by, res.bv, "kriging", variogram=res.variogram)
+    assert cv["rmse"] < 0.5
+
+
+def test_gaussian_nugget_floor_on_noise_free_data():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="kriging",
+                             variogram_model="gaussian", cell_size=1.0)
+    vf = res.variogram
+    assert vf.nugget >= C.GAUSSIAN_NUGGET_FLOOR * (vf.psill + vf.nugget) * 0.999
+    assert bump_rmse(res) < 0.1
+
+
+def test_parse_frequency_converts_khz_and_orders_rows():
+    assert C.parse_frequency("1.5kHz") == 1500.0
+    s = pd.Series([1.0, 2.0, 3.0], index=[0.0, 1.0, 2.0])
+    ps = C.build_pseudosection({lb: s for lb in ["5kHz", "475Hz", "1.5kHz"]})
+    assert ps.labels == ["475Hz", "1.5kHz", "5kHz"]
+    np.testing.assert_allclose(ps.frequencies, [475.0, 1500.0, 5000.0])
+
+
+def test_failed_area_map_figure_does_not_leak_a_figure():
+    spec = C.GridSpec(x0=0.0, y0=0.0, cell=1.0, nx=2, ny=2)
+    res = make_result(spec, np.full((2, 2), np.nan))
+    before = len(plt.get_fignums())
+    with pytest.raises(C.ContouringError):
+        C.make_area_map_figure(res, "EC (mS/m)", "t")
+    assert len(plt.get_fignums()) == before
+
+
+def test_area_map_axes_show_full_utm_coordinates():
+    df = line_survey()
+    df["X"] += 500000.0
+    df["Y"] += 4500000.0
+    res = C.compute_area_map(df, VALUE_COL, cell_size=2.0)
+    fig = C.make_area_map_figure(res, "EC (mS/m)", "t")
+    fig.canvas.draw()
+    ax = fig.axes[0]
+    assert ax.xaxis.get_offset_text().get_text() == ""
+    assert ax.yaxis.get_offset_text().get_text() == ""
+    plt.close(fig)
+
+
+def test_gps_no_fix_zero_rows_are_dropped():
+    df = line_survey()
+    lon0, lat0 = 4.0, 50.0
+    df["Lon"] = lon0 + np.degrees(df["X"] / (C.EARTH_RADIUS_M * math.cos(math.radians(lat0))))
+    df["Lat"] = lat0 + np.degrees(df["Y"] / C.EARTH_RADIUS_M)
+    df.loc[df.index[:30], ["Lon", "Lat"]] = 0.0
+    res = C.compute_area_map(df, VALUE_COL, cell_size=1.0)
+    assert res.n_raw == len(df) - 30
+    assert res.spec.nx == pytest.approx(51, abs=2)
+
+
+def test_too_few_gps_fixes_fall_back_to_xy():
+    df = line_survey()
+    df["Lat"] = np.nan
+    df["Lon"] = np.nan
+    df.loc[df.index[:3], ["Lat", "Lon"]] = [50.0, 4.0]
+    assert C.find_coordinate_columns(df) == ("X", "Y", False)

@@ -1103,7 +1103,7 @@ def grid_params(contour: ContourSettings) -> dict:
     }
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=16)
 def compute_area_map_cached(
     file_bytes: bytes,
     file_name: str,

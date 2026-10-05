@@ -145,7 +145,7 @@ Two optional views, switched on in the sidebar under **2D contouring**. Both are
 
 ### Pseudo-section (distance × frequency)
 
-Stacks the line-averaged profiles of all frequencies (the mean across survey lines at each distance — meaningful for repeat passes of one transect) into one contour plot: distance on x, frequency on y. The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Profiles are aligned on the distance range they all cover — nothing is extrapolated. White lines mark the measured frequencies; colours between them are interpolated.
+Stacks the line-averaged profiles of all frequencies (the mean across survey lines at each distance — meaningful for repeat passes of one transect) into one contour plot: distance on x, frequency on y. The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Profiles are aligned on the distance range they all cover — nothing is extrapolated at this step. Labels in kHz are converted to Hz. White lines mark the measured frequencies; colours between them are interpolated.
 
 > The frequency axis is **not a calibrated depth axis**. Under the low-induction-number (LIN) approximation the depth response of a loop–loop sensor is set by coil geometry, not frequency (McNeill, 1980; Callegary et al., 2007). Analyses of small broadband sensors nevertheless find that the practical depth of investigation grows roughly with the square root of the skin depth, so lower frequencies see somewhat deeper (Huang, 2005). Read the axis as a qualitative trend at most.
 
@@ -153,7 +153,7 @@ Stacks the line-averaged profiles of all frequencies (the mean across survey lin
 
 For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), one frequency at a time. Narrow corridor surveys are accepted when they have at least three distinct line positions; repeat passes along one transect (lines < 1 m apart) are treated as a transect — use the pseudo-section for those.
 
-1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees; otherwise `X`/`Y`. Degrees are projected to local metres (equirectangular projection of a spherical Earth about the survey centroid; distances good to a few tenths of a percent at site scale). The sidebar override (metres / degrees) applies to `X`/`Y` only; `Lat`/`Lon` columns are always read as degrees.
+1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees when they hold at least 10 GPS fixes (rows logged as 0, 0 are treated as "no fix" and dropped); otherwise `X`/`Y`. Degrees are projected to local metres (equirectangular projection of a spherical Earth about the survey centroid; distances good to a few tenths of a percent at site scale). The sidebar override (metres / degrees) applies to `X`/`Y` only; `Lat`/`Lon` columns are always read as degrees.
 2. **Line levelling** (optional) — shifts each line to the survey median to remove line-to-line offsets (striping). It also removes any real gradient across lines, so compare with levelling off. For more advanced levelling see Mauring & Kihle (2006).
 3. **Block-median reduction** — one median point per grid cell so densely sampled lines do not dominate. Default cell size = √(bounding-box area / number of readings), about one node per reading.
 4. **Gridding**
@@ -161,7 +161,7 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
    | Method | Notes |
    |---|---|
    | Thin-plate spline | Minimum-curvature (biharmonic) surface (Briggs, 1974; Sandwell, 1987). Smoothing 0 interpolates exactly. |
-   | Ordinary kriging | Widely used for mapping apparent electrical conductivity (Corwin & Lesch, 2005); for regression / cokriging alternatives that use calibration samples see Lesch et al. (1995). The single omnidirectional variogram (spherical / exponential / gaussian) is fitted to lags up to half the maximum distance, weighted by pair counts (Oliver & Webster, 2014); kriging uses the 64 nearest points. A second panel maps the kriging standard deviation. Uses at most 4,000 block medians: with the automatic cell size the cell grows until that holds; with a manual cell size, choose a larger cell if the limit is hit. |
+   | Ordinary kriging | Widely used for mapping apparent electrical conductivity (Corwin & Lesch, 2005); for regression / cokriging alternatives that use calibration samples see Lesch et al. (1995). The single omnidirectional variogram (spherical / exponential / gaussian) is fitted to log-spaced lag classes up to half the maximum distance with Cressie (1985) weights, so the nugget reflects measurement noise (Oliver & Webster, 2014); a small nugget floor keeps the gaussian model numerically stable. Kriging uses the 64 nearest points. A second panel maps the kriging standard deviation. Uses at most 4,000 block medians: with the automatic cell size the cell grows until that holds; with a manual cell size, choose a larger cell if the limit is hit. |
    | Linear | Delaunay triangulation; blank outside the data hull. |
 
 5. **Blanking** — grid nodes farther than the blanking distance from any block median are left blank. The default keeps the gaps between survey lines filled: the larger of 2 × median point spacing and 1.5 × the 90th-percentile distance from grid nodes inside the survey to the nearest data point.
@@ -302,6 +302,8 @@ RIs_v2.py
 17. Mauring, E. & Kihle, O. (2006). Leveling aerogeophysical data using a moving differential median filter. *Geophysics*, **71**(1), L5–L11. https://doi.org/10.1190/1.2163912
 
 18. Huang, H. (2005). Depth of investigation for small broadband electromagnetic sensors. *Geophysics*, **70**(6), G135–G142. https://doi.org/10.1190/1.2122412
+
+19. Cressie, N. (1985). Fitting variogram models by weighted least squares. *Mathematical Geology*, **17**(5), 563–586. https://doi.org/10.1007/BF01032109
 
 ---
 
