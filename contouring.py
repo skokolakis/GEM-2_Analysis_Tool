@@ -280,9 +280,13 @@ class VariogramFit:
     gamma: tuple[float, ...]
 
     @property
-    def parameters(self) -> list[float]:
-        """PyKrige parameter order for spherical / exponential / gaussian."""
-        return [self.psill, self.range, self.nugget]
+    def pykrige_parameters(self) -> dict[str, float]:
+        """
+        Explicit keys for PyKrige. A PyKrige parameter *list* is read as
+        [full sill, range, nugget] (the nugget is subtracted), so a list of
+        [psill, range, nugget] would silently lower the partial sill.
+        """
+        return {"psill": self.psill, "range": self.range, "nugget": self.nugget}
 
 
 def fit_variogram(
@@ -431,7 +435,7 @@ def _krige(
         ok = OrdinaryKriging(
             p[:, 0], p[:, 1], pv,
             variogram_model=variogram.model,
-            variogram_parameters=variogram.parameters,
+            variogram_parameters=variogram.pykrige_parameters,
             pseudo_inv=True,  # stable for smooth (e.g. gaussian, zero-nugget) models
             enable_plotting=False,
             verbose=False,

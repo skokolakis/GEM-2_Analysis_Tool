@@ -207,7 +207,8 @@ def test_fit_variogram_recovers_structure():
     vf = C.fit_variogram(bx, by, bv, "spherical")
     assert vf.psill > 10 * vf.nugget  # smooth field: structured, not pure nugget
     assert 5.0 < vf.range < 100.0
-    assert vf.parameters == [vf.psill, vf.range, vf.nugget]
+    assert vf.pykrige_parameters == {"psill": vf.psill, "range": vf.range,
+                                     "nugget": vf.nugget}
 
 
 def test_fit_variogram_rejects_unknown_model():
@@ -641,3 +642,27 @@ def test_too_few_gps_fixes_fall_back_to_xy():
     df["Lon"] = np.nan
     df.loc[df.index[:3], ["Lat", "Lon"]] = [50.0, 4.0]
     assert C.find_coordinate_columns(df) == ("X", "Y", False)
+
+
+# ---------------------------------------------------------------------------
+# PyKrige parameter semantics (partial sill vs full sill)
+# ---------------------------------------------------------------------------
+
+def test_pykrige_receives_partial_sill_range_and_nugget():
+    from pykrige.ok import OrdinaryKriging
+    vf = C.VariogramFit("spherical", 2.0, 4.0, 0.5, (), ())
+    p = np.random.default_rng(0).uniform(0, 10, (30, 2))
+    ok = OrdinaryKriging(p[:, 0], p[:, 1], np.zeros(30), variogram_model=vf.model,
+                         variogram_parameters=vf.pykrige_parameters)
+    np.testing.assert_allclose(ok.variogram_model_parameters, [2.0, 4.0, 0.5])
+
+
+@pytest.mark.parametrize("model", C.VARIOGRAM_MODELS)
+def test_kriging_pure_noise_stays_within_noise(model):
+    df = line_survey()
+    df[VALUE_COL] = np.random.default_rng(3).normal(0.0, 1.0, len(df))
+    res = C.compute_area_map(df, VALUE_COL, method="kriging",
+                             variogram_model=model, cell_size=1.0)
+    cv = C.cross_validate(res.bx, res.by, res.bv, "kriging", variogram=res.variogram)
+    assert cv["rmse"] < 1.5          # block medians of 2 readings: sigma ~0.7
+    assert np.nanmax(np.abs(res.z)) < 5.0

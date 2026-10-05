@@ -157,3 +157,4 @@ The shipped behaviour differs from the sections above in these reviewed and appr
 - **Figures** — contour levels use a relative flat-range tolerance; levels are computed before the figure is created; map axes show full coordinates (no offset).
 - **Caption / docs** — the frequency axis is "not a calibrated depth axis": McNeill (1980) and Callegary et al. (2007) for the LIN geometry statement, Huang (2005) for the √skin-depth scaling of depth of investigation.
 - **Caching** — the area-map cache is keyed only on grid-affecting settings and keeps at most 16 entries.
+- **PyKrige parameters** — passed as an explicit dict `{psill, range, nugget}`. PyKrige reads a parameter *list* as `[full sill, range, nugget]`; the earlier list `[psill, range, nugget]` lowered the partial sill by the nugget (negative when nugget > psill), which corrupted kriging as soon as the fit returned real nuggets.
