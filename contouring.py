@@ -444,3 +444,117 @@ def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
         pad = max(abs(lo) * 1e-6, 1e-12)
         lo, hi = lo - pad, hi + pad
     return np.linspace(lo, hi, n_levels + 1)
+
+
+# ---------------------------------------------------------------------------
+# Area-map pipeline
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AreaMapResult:
+    spec: GridSpec
+    z: np.ndarray                       # (ny, nx), NaN where blanked
+    variance: np.ndarray | None         # kriging only
+    bx: np.ndarray                      # block-reduced points used for gridding
+    by: np.ndarray
+    bv: np.ndarray
+    method: str
+    variogram: VariogramFit | None      # kriging only
+    blank_distance: float
+    origin: tuple[float, float] | None  # (lon0, lat0) if input was degrees
+    levelled: bool
+    n_raw: int
+
+
+def compute_area_map(
+    df: pd.DataFrame,
+    value_col: str,
+    coord_mode: str = "auto",
+    method: str = "spline",
+    cell_size: float | None = None,
+    blank_distance: float | None = None,
+    level: bool = False,
+    smoothing: float = 0.0,
+    variogram_model: str = "spherical",
+    line_col: str = "Line",
+) -> AreaMapResult:
+    """Full area-map pipeline for one value column of a raw GEM table."""
+    x_col, y_col, is_deg = find_coordinate_columns(df, coord_mode)
+    x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
+    v = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
+    x, y, v = x[keep], y[keep], v[keep]
+
+    origin = None
+    if is_deg:
+        x, y, origin = project_to_local_metres(x, y)
+
+    levelled = False
+    if level and line_col in df.columns:
+        v = level_lines(v, df[line_col].to_numpy()[keep])
+        levelled = True
+
+    lines = df[line_col].to_numpy()[keep] if line_col in df.columns else None
+    check_geometry(x, y, lines)
+    cell = cell_size if cell_size else auto_cell_size(x, y)
+    spec = make_grid(x, y, cell)
+    bx, by, bv = block_median(x, y, v, spec)
+    if len(bv) < MIN_POINTS:
+        raise ContouringError("Not enough points to grid.")
+
+    variogram = fit_variogram(bx, by, bv, variogram_model) if method == "kriging" else None
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    z, var = predict(bx, by, bv, xx, yy, method, smoothing, variogram)
+    z = z.reshape(spec.ny, spec.nx)
+    if var is not None:
+        var = var.reshape(spec.ny, spec.nx)
+
+    dist = blank_distance if blank_distance else 2.0 * median_nn_spacing(bx, by)
+    z = blank_far(z, spec, bx, by, dist)
+    if var is not None:
+        var = blank_far(var, spec, bx, by, dist)
+
+    return AreaMapResult(
+        spec=spec, z=z, variance=var, bx=bx, by=by, bv=bv, method=method,
+        variogram=variogram, blank_distance=dist, origin=origin,
+        levelled=levelled, n_raw=int(keep.sum()),
+    )
+
+
+def cross_validate(
+    px: np.ndarray,
+    py: np.ndarray,
+    pv: np.ndarray,
+    method: str,
+    smoothing: float = 0.0,
+    variogram: VariogramFit | None = None,
+    k: int = 5,
+    seed: int = 0,
+) -> dict[str, float]:
+    """
+    k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted points).
+
+    For kriging the variogram is held fixed across folds (pass the fit used
+    for the map).
+    """
+    px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    folds = np.random.default_rng(seed).permutation(len(pv)) % k
+    errors = []
+    for f in range(k):
+        test = folds == f
+        train = ~test
+        est, _ = predict(
+            px[train], py[train], pv[train], px[test], py[test],
+            method, smoothing, variogram,
+        )
+        errors.append(est - pv[test])
+    err = np.concatenate(errors)
+    err = err[np.isfinite(err)]
+    if err.size == 0:
+        raise ContouringError("Cross-validation produced no predictions.")
+    return {
+        "rmse": float(np.sqrt(np.mean(err ** 2))),
+        "mae": float(np.mean(np.abs(err))),
+        "n": int(err.size),
+    }

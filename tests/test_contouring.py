@@ -315,3 +315,56 @@ def test_contour_levels_percentile_span():
 def test_contour_levels_all_blank_raises():
     with pytest.raises(C.ContouringError, match="Nothing to contour"):
         C.contour_levels(np.array([np.nan, np.nan]), 10)
+
+
+# ---------------------------------------------------------------------------
+# Area-map pipeline
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method", ["spline", "kriging"])
+def test_compute_area_map_reproduces_smooth_bump(method):
+    res = C.compute_area_map(line_survey(), VALUE_COL, method=method, cell_size=1.0)
+    assert bump_rmse(res) < 0.5  # 5 % of bump height (10)
+    if method == "kriging":
+        assert res.variance is not None and res.variogram is not None
+        assert np.nanmin(res.variance) >= 0.0
+    else:
+        assert res.variance is None and res.variogram is None
+
+
+def test_compute_area_map_defaults_and_bookkeeping():
+    df = line_survey()
+    res = C.compute_area_map(df, VALUE_COL)
+    assert res.n_raw == len(df)
+    assert 1.0 < res.spec.cell < 2.5           # auto cell size
+    assert res.blank_distance > 0
+    assert not res.levelled and res.origin is None
+
+
+def test_compute_area_map_degrees_records_origin():
+    df = line_survey()
+    lon0, lat0 = 4.0, 50.0
+    df["Lon"] = lon0 + np.degrees(df["X"] / (C.EARTH_RADIUS_M * math.cos(math.radians(lat0))))
+    df["Lat"] = lat0 + np.degrees(df["Y"] / C.EARTH_RADIUS_M)
+    res = C.compute_area_map(df, VALUE_COL, cell_size=1.0)
+    assert res.origin is not None
+    assert res.spec.nx == pytest.approx(51, abs=2)
+
+
+def test_compute_area_map_levelling_flag():
+    res = C.compute_area_map(line_survey(), VALUE_COL, level=True)
+    assert res.levelled
+
+
+def test_compute_area_map_transect_raises():
+    df = line_survey(n_lines=1)
+    df["X"] = df["X"] + 1e-4 * np.sin(df["Y"])
+    with pytest.raises(C.ContouringError, match="single transect"):
+        C.compute_area_map(df, VALUE_COL)
+
+
+@pytest.mark.parametrize("method", ["spline", "kriging", "linear"])
+def test_cross_validate_returns_finite_metrics(method):
+    res = C.compute_area_map(line_survey(), VALUE_COL, method=method, cell_size=1.0)
+    cv = C.cross_validate(res.bx, res.by, res.bv, method, variogram=res.variogram)
+    assert cv["n"] > 0 and 0 <= cv["mae"] <= cv["rmse"] < 1.0
