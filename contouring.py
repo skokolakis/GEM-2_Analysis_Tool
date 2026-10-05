@@ -30,7 +30,9 @@ LAT_NAMES = ("lat", "latitude")
 LON_NAMES = ("lon", "long", "longitude")
 DEGREE_SPAN_MAX = 0.05          # auto-detect X/Y as degrees only below this span
 MIN_POINTS = 10                 # minimum block-reduced points to grid
-COLLINEAR_RATIO = 0.05          # minor/major principal spread below this = transect
+COLLINEAR_RATIO = 0.05          # minor/major principal spread below this = elongated
+ACROSS_TRACK_TOL_M = 1.0        # line positions closer than this are one track
+MIN_TRACKS = 3                  # elongated data needs this many tracks to be an area
 MAX_GRID_NODES = 4_000_000
 LOCAL_NEIGHBOURS = 64           # neighbourhood size for local spline / kriging
 GLOBAL_MAX_POINTS = 2000        # spline: above this, use local neighbourhoods
@@ -182,12 +184,27 @@ def auto_cell_size(x: np.ndarray, y: np.ndarray) -> float:
     return round_sig(math.sqrt(area / len(x)))
 
 
-def check_geometry(x: np.ndarray, y: np.ndarray) -> None:
-    """Raise ContouringError if too few points or points lie along one line."""
+def count_tracks(x: np.ndarray, y: np.ndarray, lines: np.ndarray) -> int:
+    """Distinct across-track line positions; repeat passes of one transect count once."""
+    pts = np.column_stack([x, y]) - [np.mean(x), np.mean(y)]
+    _, vecs = np.linalg.eigh(np.cov(pts.T))
+    across = pts @ vecs[:, 0]  # coordinate along the minor principal axis
+    medians = np.sort(pd.Series(across).groupby(np.asarray(lines)).median().to_numpy())
+    return int(1 + np.sum(np.diff(medians) > ACROSS_TRACK_TOL_M))
+
+
+def check_geometry(x: np.ndarray, y: np.ndarray, lines: np.ndarray | None = None) -> None:
+    """
+    Raise ContouringError if there are too few points or the points form a
+    single transect: strongly elongated (minor/major spread < COLLINEAR_RATIO)
+    and, when line labels are given, fewer than MIN_TRACKS distinct
+    across-track line positions (repeat passes of one transect are not an area).
+    """
     if len(x) < MIN_POINTS:
         raise ContouringError("Not enough points to grid.")
     eig = np.linalg.eigvalsh(np.cov(np.vstack([x, y])))  # ascending
-    if eig[1] <= 0 or math.sqrt(max(eig[0], 0.0) / eig[1]) < COLLINEAR_RATIO:
+    elongated = eig[1] <= 0 or math.sqrt(max(eig[0], 0.0) / eig[1]) < COLLINEAR_RATIO
+    if elongated and (lines is None or count_tracks(x, y, lines) < MIN_TRACKS):
         raise ContouringError(
             "Coordinates look like a single transect — use the pseudo-section."
         )
@@ -281,6 +298,8 @@ def fit_variogram(
         raise ValueError(f"Unknown variogram model: {model!r}")
 
     px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    if len(pv) < 2:
+        raise KrigingError("Not enough points to fit a variogram.")
     if len(pv) > VARIOGRAM_MAX_POINTS:
         idx = np.random.default_rng(seed).choice(len(pv), VARIOGRAM_MAX_POINTS, replace=False)
         px, py, pv = px[idx], py[idx], pv[idx]

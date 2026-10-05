@@ -211,3 +211,33 @@ def test_fit_variogram_recovers_structure():
 def test_fit_variogram_rejects_unknown_model():
     with pytest.raises(ValueError, match="Unknown variogram model"):
         C.fit_variogram(np.arange(20.0), np.arange(20.0) ** 0.5, np.arange(20.0), "cubic")
+
+
+def _lines_df(offsets, length=1000.0):
+    rows = []
+    for i, off in enumerate(offsets):
+        y = np.arange(0.0, length, 1.0)
+        rows.append(pd.DataFrame({"Line": i, "X": np.full_like(y, off), "Y": y}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_check_geometry_narrow_corridor_survey_passes():
+    df = _lines_df([0.0, 5.0, 10.0, 15.0, 20.0])  # 20 m x 1000 m corridor
+    C.check_geometry(df["X"].to_numpy(), df["Y"].to_numpy(), df["Line"].to_numpy())
+
+
+def test_check_geometry_repeat_passes_of_one_transect_raise():
+    df = _lines_df([0.0, 0.3, -0.4])  # three passes, GPS offsets < 1 m
+    with pytest.raises(C.ContouringError, match="single transect"):
+        C.check_geometry(df["X"].to_numpy(), df["Y"].to_numpy(), df["Line"].to_numpy())
+
+
+def test_check_geometry_corridor_without_line_labels_raises():
+    df = _lines_df([0.0, 5.0, 10.0, 15.0, 20.0])
+    with pytest.raises(C.ContouringError, match="single transect"):
+        C.check_geometry(df["X"].to_numpy(), df["Y"].to_numpy())
+
+
+def test_fit_variogram_too_few_points():
+    with pytest.raises(C.KrigingError, match="Not enough points"):
+        C.fit_variogram(np.array([0.0]), np.array([0.0]), np.array([1.0]))
