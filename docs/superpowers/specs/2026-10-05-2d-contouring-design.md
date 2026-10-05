@@ -52,7 +52,7 @@ Sidebar section **"2D contouring"**:
   - Method: Thin-plate spline / Ordinary kriging / Linear (default Thin-plate spline)
   - Spline smoothing `s` ≥ 0 (default 0; spline only)
   - Variogram model: spherical / exponential / gaussian (default spherical; kriging only)
-  - Cell size (m): default auto = median nearest-neighbour spacing of the raw points, rounded to 2 significant figures
+  - Cell size (m): default auto = √(bounding-box area / number of readings), rounded to 2 significant figures — about one node per reading. *(Amended 2026-10-06: median nearest-neighbour spacing equals the along-line spacing for line surveys and produced grids ~25× too dense.)*
   - Blanking distance (m): default auto = 2 × median nearest-neighbour spacing of the block-reduced points
   - Line levelling: on/off (default off)
   - Contour levels: integer, default 20
@@ -77,11 +77,16 @@ Per file × mode × frequency:
 5. **Grid** — regular nodes at cell centres covering the bounding box of the block-reduced points.
 6. **Gridding**
    - Thin-plate spline: `scipy.interpolate.RBFInterpolator(kernel="thin_plate_spline", smoothing=s)`, with `neighbors=64` when there are more than 2000 points.
-   - Ordinary kriging: `pykrige.ok.OrdinaryKriging(variogram_model=…, enable_plotting=False)`; `execute("grid", …)` with `backend="vectorized"` for ≤ 2000 points, otherwise `backend="loop", n_closest_points=64`. Returns estimate and variance.
+   - Ordinary kriging *(amended 2026-10-06 after prototyping)*:
+     - **Variogram fitted by the app, not PyKrige.** Empirical semivariogram of the block medians (random subsample of ≤ 2000 points, seed 0), 15 equal lag bins up to **half the maximum pair distance**, model fitted by `scipy.optimize.curve_fit` weighted by pair counts (Oliver & Webster, 2014). PyKrige's built-in fit uses lags over the full distance range; on a smooth test field it collapsed to pure nugget (kriging returned the mean between lines, RMSE 2.3 vs 0.02).
+     - `OrdinaryKriging(..., variogram_parameters=[psill, range, nugget], pseudo_inv=True)` — the pseudo-inverse keeps zero-nugget Gaussian models stable (without it RMSE was 951).
+     - Always a **local neighbourhood**: `execute("points", …, backend="C", n_closest_points=min(64, n))`. Global vectorized kriging took 46 s for 51k nodes; local takes ~2 s.
+     - **Cap of 4000 block medians**: PyKrige computes all pairwise distances at set-up (O(n²) memory). Above the cap a `KrigingError` asks for a larger cell size or the spline.
+     - Variance clipped at ≥ 0. Fitted model, partial sill, range and nugget are shown under the map.
    - Linear: `scipy.interpolate.griddata(method="linear")`; nodes outside the convex hull of the points are NaN.
 7. **Blanking** — `scipy.spatial.cKDTree` over the block-reduced points; nodes whose nearest-point distance exceeds the blanking distance are set to NaN, in both the estimate and the variance.
 8. **Colour scale** — contour levels span the 2nd–98th percentiles of the finite gridded values; `extend="both"`.
-9. **Cross-validation** (on demand) — 5-fold random split (fixed seed 0) of the block-reduced points; same method and parameters; report RMSE and MAE in data units.
+9. **Cross-validation** (on demand) — 5-fold random split (fixed seed 0) of the block-reduced points; same method and parameters (for kriging, the map's variogram is held fixed across folds); report RMSE and MAE in data units.
 
 ## Processing — pseudo-section
 
@@ -111,6 +116,7 @@ New plots use the correct GEM units: EC in mS/m, MS in 10⁻³ SI (ppt). For leg
 | Minor/major principal-axis spread ratio < 0.05 | `st.info("Coordinates look like a single transect — use the pseudo-section")`, no map |
 | No coordinate columns | Area-map section shows a note for that file |
 | Kriging variogram fit or solve raises | `st.error` with the exception text and a suggestion to use the thin-plate spline |
+| Kriging with > 4000 block medians | `st.error` asking for a larger cell size or the thin-plate spline |
 | Grid > 4 000 000 nodes | `st.warning` asking for a larger cell size, no map |
 | Pseudo-section with < 2 frequencies | `st.info`, no plot |
 | Profiles with no distance overlap | `st.info("Profiles do not overlap in distance")`, no plot |
@@ -129,6 +135,9 @@ New plots use the correct GEM units: EC in mS/m, MS in 10⁻³ SI (ppt). For leg
 - Collinearity detection flags a single straight line and passes a 10-line grid.
 - Pseudo-section aligns two profiles with different grids onto their overlap, with NaN only where expected.
 - `.asc` writer: header values and the row order (north row first) are correct.
+- All three variogram models reproduce the bump (guards the pseudo-inverse); the variogram fit is structured, not pure nugget; the 4000-point kriging cap raises.
+
+`tests/test_app_contouring.py` — headless UI smoke tests with `streamlit.testing.v1.AppTest`: GEM area map + pseudo-section render without exceptions; kriging shows the variogram caption; a single-line file shows the transect message; a legacy file shows the "no coordinates" message and still renders the pseudo-section.
 
 ## Out of scope
 
