@@ -124,3 +124,70 @@ def test_find_coordinates_blank_lat_lon_falls_back_to_xy():
 def test_find_coordinates_missing_raises():
     with pytest.raises(C.ContouringError, match="No coordinate"):
         C.find_coordinate_columns(pd.DataFrame({"Line": [1], "Dist": [0.0]}))
+
+
+# ---------------------------------------------------------------------------
+# Pre-processing
+# ---------------------------------------------------------------------------
+
+def test_level_lines_removes_constant_offsets():
+    # Field varies only along the lines, so every line has the same true median.
+    y = np.tile(np.arange(0.0, 50.0, 0.5), 5)
+    lines = np.repeat(np.arange(5), 100)
+    truth = 20.0 + 0.1 * y
+    offsets = np.array([3.0, -2.0, 0.5, 7.0, -4.0])
+    levelled = C.level_lines(truth + offsets[lines], lines)
+    resid = pd.Series(levelled - truth).groupby(lines).mean().to_numpy()
+    assert np.ptp(resid) < 1e-9  # every line shifted by one common constant
+
+
+def test_level_lines_also_removes_real_cross_line_trend():
+    # Documents the caveat shown in the UI: levelling cannot tell a real
+    # cross-line gradient from a line offset.
+    lines = np.repeat(np.arange(4), 10)
+    levelled = C.level_lines(lines * 5.0, lines)
+    assert np.ptp(levelled) < 1e-9
+
+
+def test_auto_cell_size_is_geometric_mean_spacing():
+    df = line_survey()  # 5 m line spacing, 0.5 m along-line
+    cell = C.auto_cell_size(df["X"].to_numpy(), df["Y"].to_numpy())
+    assert 1.0 < cell < 2.5  # sqrt(5 * 0.5) ~= 1.6, edge effects aside
+
+
+def test_make_grid_alignment_and_size():
+    spec = C.make_grid(np.array([0.3, 9.7]), np.array([1.2, 4.9]), 1.0)
+    assert (spec.x0, spec.y0, spec.nx, spec.ny) == (0.0, 1.0, 10, 4)
+    np.testing.assert_allclose(spec.xs[:2], [0.5, 1.5])
+
+
+def test_make_grid_too_large():
+    with pytest.raises(C.GridTooLargeError):
+        C.make_grid(np.array([0.0, 10000.0]), np.array([0.0, 10000.0]), 1.0)
+
+
+def test_block_median_hand_example():
+    spec = C.GridSpec(x0=0.0, y0=0.0, cell=1.0, nx=2, ny=1)
+    x = np.array([0.1, 0.2, 0.9, 1.5])
+    y = np.array([0.5, 0.5, 0.5, 0.5])
+    v = np.array([1.0, 2.0, 10.0, 7.0])
+    bx, by, bv = C.block_median(x, y, v, spec)
+    np.testing.assert_allclose(bx, [0.2, 1.5])
+    np.testing.assert_allclose(bv, [2.0, 7.0])
+
+
+def test_check_geometry_collinear_raises():
+    x = np.linspace(0, 100, 200)
+    y = 0.5 * x + 1e-3 * np.sin(x)
+    with pytest.raises(C.ContouringError, match="single transect"):
+        C.check_geometry(x, y)
+
+
+def test_check_geometry_area_passes():
+    df = line_survey()
+    C.check_geometry(df["X"].to_numpy(), df["Y"].to_numpy())
+
+
+def test_check_geometry_too_few_points():
+    with pytest.raises(C.ContouringError, match="Not enough"):
+        C.check_geometry(np.arange(5.0), np.arange(5.0) ** 2)

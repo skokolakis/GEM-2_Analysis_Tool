@@ -140,3 +140,102 @@ def local_metres_to_lonlat(
         np.asarray(x, dtype=float) / (EARTH_RADIUS_M * math.cos(math.radians(lat0)))
     )
     return lon, lat
+
+
+# ---------------------------------------------------------------------------
+# Pre-processing
+# ---------------------------------------------------------------------------
+
+def level_lines(values: np.ndarray, lines: np.ndarray) -> np.ndarray:
+    """Zero-order levelling: shift each line so its median equals the global median."""
+    values = np.asarray(values, dtype=float)
+    global_median = float(np.nanmedian(values))
+    line_medians = (
+        pd.Series(values).groupby(np.asarray(lines)).transform("median").to_numpy()
+    )
+    return values + (global_median - line_medians)
+
+
+def median_nn_spacing(x: np.ndarray, y: np.ndarray) -> float:
+    """Median distance from each point to its nearest distinct neighbour."""
+    pts = np.unique(np.column_stack([x, y]), axis=0)
+    if len(pts) < 2:
+        raise ContouringError("Not enough distinct points to grid.")
+    d, _ = cKDTree(pts).query(pts, k=2)
+    return float(np.median(d[:, 1]))
+
+
+def round_sig(value: float, sig: int = 2) -> float:
+    if value <= 0 or not np.isfinite(value):
+        raise ContouringError("Could not determine a positive cell size.")
+    return float(f"{value:.{sig}g}")
+
+
+def auto_cell_size(x: np.ndarray, y: np.ndarray) -> float:
+    """
+    sqrt(bounding-box area / n points), 2 significant figures.
+
+    Gives roughly one grid node per raw reading — for line surveys, the
+    geometric mean of along-line and across-line spacing.
+    """
+    area = float(np.ptp(x) * np.ptp(y))
+    return round_sig(math.sqrt(area / len(x)))
+
+
+def check_geometry(x: np.ndarray, y: np.ndarray) -> None:
+    """Raise ContouringError if too few points or points lie along one line."""
+    if len(x) < MIN_POINTS:
+        raise ContouringError("Not enough points to grid.")
+    eig = np.linalg.eigvalsh(np.cov(np.vstack([x, y])))  # ascending
+    if eig[1] <= 0 or math.sqrt(max(eig[0], 0.0) / eig[1]) < COLLINEAR_RATIO:
+        raise ContouringError(
+            "Coordinates look like a single transect — use the pseudo-section."
+        )
+
+
+@dataclass(frozen=True)
+class GridSpec:
+    """Regular grid; nodes at cell centres x0 + (i + 0.5) * cell."""
+    x0: float
+    y0: float
+    cell: float
+    nx: int
+    ny: int
+
+    @property
+    def xs(self) -> np.ndarray:
+        return self.x0 + (np.arange(self.nx) + 0.5) * self.cell
+
+    @property
+    def ys(self) -> np.ndarray:
+        return self.y0 + (np.arange(self.ny) + 0.5) * self.cell
+
+    @property
+    def n_nodes(self) -> int:
+        return self.nx * self.ny
+
+
+def make_grid(x: np.ndarray, y: np.ndarray, cell: float) -> GridSpec:
+    """Grid aligned to multiples of *cell* covering the points' bounding box."""
+    x0 = math.floor(np.min(x) / cell) * cell
+    y0 = math.floor(np.min(y) / cell) * cell
+    nx = int(math.floor((np.max(x) - x0) / cell)) + 1
+    ny = int(math.floor((np.max(y) - y0) / cell)) + 1
+    spec = GridSpec(x0=x0, y0=y0, cell=cell, nx=nx, ny=ny)
+    if spec.n_nodes > MAX_GRID_NODES:
+        raise GridTooLargeError(
+            f"Grid would have {spec.n_nodes:,} nodes (limit {MAX_GRID_NODES:,}) — "
+            "increase the cell size."
+        )
+    return spec
+
+
+def block_median(
+    x: np.ndarray, y: np.ndarray, v: np.ndarray, spec: GridSpec
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """One point per occupied cell: median x, median y, median value."""
+    ix = np.floor((np.asarray(x) - spec.x0) / spec.cell).astype(np.int64)
+    iy = np.floor((np.asarray(y) - spec.y0) / spec.cell).astype(np.int64)
+    df = pd.DataFrame({"ix": ix, "iy": iy, "x": x, "y": y, "v": v})
+    agg = df.groupby(["iy", "ix"], sort=True)[["x", "y", "v"]].median()
+    return agg["x"].to_numpy(), agg["y"].to_numpy(), agg["v"].to_numpy()
