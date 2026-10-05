@@ -485,3 +485,31 @@ def test_pseudosection_figure_labels_measured_frequencies():
     assert ax.get_yscale() == "log"
     assert [t.get_text() for t in ax.get_yticklabels()] == ["1000Hz", "10000Hz"]
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Exports
+# ---------------------------------------------------------------------------
+
+def test_grid_to_asc_header_and_row_order():
+    spec = C.GridSpec(x0=100.0, y0=200.0, cell=2.0, nx=3, ny=2)
+    z = np.array([[1.0, 2.0, 3.0], [4.0, np.nan, 6.0]])  # row 0 = south
+    lines = C.grid_to_asc(make_result(spec, z)).decode().splitlines()
+    assert lines[0] == "ncols 3" and lines[1] == "nrows 2"
+    assert lines[2].startswith("xllcorner 100") and lines[3].startswith("yllcorner 200")
+    assert lines[4].startswith("cellsize 2") and lines[5] == "NODATA_value -9999"
+    assert lines[6].split() == ["4", "-9999", "6"]  # north row first
+    assert lines[7].split() == ["1", "2", "3"]
+
+
+def test_grid_to_csv_omits_blank_and_adds_lonlat():
+    spec = C.GridSpec(x0=0.0, y0=0.0, cell=1.0, nx=2, ny=1)
+    res = make_result(spec, np.array([[1.0, np.nan]]), origin=(4.0, 50.0))
+    df = pd.read_csv(io.BytesIO(C.grid_to_csv(res)))
+    assert list(df.columns) == ["x", "y", "value", "lon", "lat"] and len(df) == 1
+
+
+def test_grid_to_csv_kriging_has_variance_column():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="kriging", cell_size=2.0)
+    df = pd.read_csv(io.BytesIO(C.grid_to_csv(res)))
+    assert list(df.columns) == ["x", "y", "value", "variance"]

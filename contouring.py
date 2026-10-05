@@ -733,3 +733,35 @@ def make_pseudosection_figure(
     ax.set_title(title)
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Exports
+# ---------------------------------------------------------------------------
+
+def grid_to_csv(result: AreaMapResult) -> bytes:
+    """x, y, value [, variance] [, lon, lat] for every non-blank node."""
+    spec = result.spec
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    keep = np.isfinite(result.z)
+    out = {"x": xx[keep], "y": yy[keep], "value": result.z[keep]}
+    if result.variance is not None:
+        out["variance"] = result.variance[keep]
+    if result.origin is not None:
+        out["lon"], out["lat"] = local_metres_to_lonlat(out["x"], out["y"], result.origin)
+    return pd.DataFrame(out).to_csv(index=False).encode()
+
+
+def grid_to_asc(result: AreaMapResult) -> bytes:
+    """ESRI ASCII grid; first data row is the northernmost."""
+    spec = result.spec
+    z = np.where(np.isfinite(result.z), result.z, NODATA)
+    buf = io.StringIO()
+    buf.write(f"ncols {spec.nx}\n")
+    buf.write(f"nrows {spec.ny}\n")
+    buf.write(f"xllcorner {spec.x0:.6f}\n")
+    buf.write(f"yllcorner {spec.y0:.6f}\n")
+    buf.write(f"cellsize {spec.cell:.6f}\n")
+    buf.write(f"NODATA_value {NODATA:g}\n")
+    np.savetxt(buf, z[::-1], fmt="%.6g")
+    return buf.getvalue().encode()
