@@ -94,8 +94,9 @@ class ContourSettings:
 
 
 PSEUDOSECTION_CAPTION = (
-    "Frequency axis shows instrument response per frequency, not depth "
-    "(under LIN, depth sensitivity is set by coil geometry — Huang, 2005). "
+    "Frequency axis is not a calibrated depth axis: under LIN the depth response "
+    "is set by coil geometry (McNeill, 1980); at most, lower frequencies see "
+    "somewhat deeper (Huang, 2005). "
     "White lines mark measured frequencies; values between them are interpolated."
 )
 LEVELLING_HELP = (
@@ -1648,15 +1649,19 @@ Switch on in the sidebar under **2D contouring**.
 
 - **Pseudo-section** — mean profiles of all frequencies as one
   distance × frequency contour, aligned on their common distance
-  range. The frequency axis is *not* depth: under LIN, depth
-  sensitivity is set by coil geometry (Huang, 2005).
+  range. The frequency axis is *not* a calibrated depth axis:
+  under LIN the depth response is set by coil geometry (McNeill,
+  1980; Callegary et al., 2007); at most, lower frequencies see
+  somewhat deeper (Huang, 2005).
 - **Area map** — plan-view grid of one frequency from the X/Y (or
   Lat/Lon) coordinates of all lines: optional per-line median
-  levelling (Mauring & Kihle, 2006), block-median reduction, then
+  levelling (a simple form; cf. Mauring & Kihle, 2006),
+  block-median reduction, then
   thin-plate spline (Briggs, 1974; Sandwell, 1987), ordinary
   kriging with a fitted variogram and standard-deviation map
-  (Lesch et al., 1995; Corwin & Lesch, 2005; Oliver & Webster,
-  2014) or linear triangulation. Nodes far from data are blanked.
+  (Corwin & Lesch, 2005; Oliver & Webster, 2014; for
+  regression / cokriging alternatives see Lesch et al., 1995) or
+  linear triangulation. Nodes far from data are blanked.
   Use **Cross-validate** to compare methods (Li & Heap, 2011).
 
 ---
@@ -1756,7 +1761,9 @@ Switch on in the sidebar under **2D contouring**.
 
 - Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial
   prediction of soil salinity using electromagnetic induction
-  techniques: 1. *Water Resour. Res.*, **31**(2), 373–386.
+  techniques: 1. Statistical prediction models: a comparison of
+  multiple linear regression and cokriging. *Water Resour. Res.*,
+  **31**(2), 373–386.
   [doi:10.1029/94WR02179](https://doi.org/10.1029/94WR02179)
 
 - Corwin, D.L. & Lesch, S.M. (2005). Apparent soil electrical

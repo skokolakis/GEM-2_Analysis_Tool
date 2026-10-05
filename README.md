@@ -15,6 +15,7 @@ The tool can be also be used online via https://gemris.streamlit.app
 - **Seven interpolation methods**: Linear, cubic, nearest, quadratic, PCHIP, Akima, and polynomial
 - **Batch export**: Single XLSX packaging all files and modes; or run all 7 methods simultaneously for direct comparison
 - **Data quality warnings**: Auto-detects and warns about precision loss in CSV exports
+- **2D contouring** (optional): plan-view area maps (thin-plate spline, ordinary kriging or linear gridding) and distance × frequency pseudo-sections
 
 ---
 
@@ -22,7 +23,7 @@ The tool can be also be used online via https://gemris.streamlit.app
 
 ### Requirements
 - Python 3.9+
-- Dependencies: `streamlit` (≥ 1.26), `pandas`, `numpy`, `scipy` (≥ 1.10), `matplotlib`, `openpyxl`, `pykrige` (≥ 1.7)
+- Dependencies: `streamlit` (≥ 1.26), `pandas`, `numpy`, `scipy` (≥ 1.10), `matplotlib` (≥ 3.5), `openpyxl`, `pykrige` (≥ 1.7)
 - Tests: `pip install -r requirements-dev.txt`, then `python -m pytest`
 
 ### Setup
@@ -144,15 +145,15 @@ Two optional views, switched on in the sidebar under **2D contouring**. Both are
 
 ### Pseudo-section (distance × frequency)
 
-Stacks the representative (mean) profiles of all frequencies into one contour plot: distance on x, frequency (log scale) on y. Profiles are aligned on the distance range they all cover — nothing is extrapolated. White lines mark the measured frequencies; colours between them are interpolated.
+Stacks the line-averaged profiles of all frequencies (the mean across survey lines at each distance — meaningful for repeat passes of one transect) into one contour plot: distance on x, frequency on y. The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Profiles are aligned on the distance range they all cover — nothing is extrapolated. White lines mark the measured frequencies; colours between them are interpolated.
 
-> The frequency axis is **not depth**. Under the low-induction-number condition the depth sensitivity of a loop–loop sensor is set by coil geometry rather than frequency (McNeill, 1980; Huang, 2005).
+> The frequency axis is **not a calibrated depth axis**. Under the low-induction-number (LIN) approximation the depth response of a loop–loop sensor is set by coil geometry, not frequency (McNeill, 1980; Callegary et al., 2007). Analyses of small broadband sensors nevertheless find that the practical depth of investigation grows roughly with the square root of the skin depth, so lower frequencies see somewhat deeper (Huang, 2005). Read the axis as a qualitative trend at most.
 
 ### Area map (plan view)
 
 For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), one frequency at a time. Narrow corridor surveys are accepted when they have at least three distinct line positions; repeat passes along one transect (lines < 1 m apart) are treated as a transect — use the pseudo-section for those.
 
-1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees; otherwise `X`/`Y`. Degrees are projected to local metres (equirectangular about the survey centroid; < 0.1 % error at site scale). Override auto-detection in the sidebar if needed.
+1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees; otherwise `X`/`Y`. Degrees are projected to local metres (equirectangular projection of a spherical Earth about the survey centroid; distances good to a few tenths of a percent at site scale). The sidebar override (metres / degrees) applies to `X`/`Y` only; `Lat`/`Lon` columns are always read as degrees.
 2. **Line levelling** (optional) — shifts each line to the survey median to remove line-to-line offsets (striping). It also removes any real gradient across lines, so compare with levelling off. For more advanced levelling see Mauring & Kihle (2006).
 3. **Block-median reduction** — one median point per grid cell so densely sampled lines do not dominate. Default cell size = √(bounding-box area / number of readings), about one node per reading.
 4. **Gridding**
@@ -160,11 +161,13 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
    | Method | Notes |
    |---|---|
    | Thin-plate spline | Minimum-curvature (biharmonic) surface (Briggs, 1974; Sandwell, 1987). Smoothing 0 interpolates exactly. |
-   | Ordinary kriging | Standard for EMI / apparent-conductivity mapping (Lesch et al., 1995; Corwin & Lesch, 2005). The variogram (spherical / exponential / gaussian) is fitted to lags up to half the maximum distance, weighted by pair counts (Oliver & Webster, 2014); kriging uses the 64 nearest points. A second panel maps the kriging standard deviation. Uses at most 4,000 block medians: with the automatic cell size the cell grows until that holds; with a manual cell size, choose a larger cell if the limit is hit. |
+   | Ordinary kriging | Widely used for mapping apparent electrical conductivity (Corwin & Lesch, 2005); for regression / cokriging alternatives that use calibration samples see Lesch et al. (1995). The single omnidirectional variogram (spherical / exponential / gaussian) is fitted to lags up to half the maximum distance, weighted by pair counts (Oliver & Webster, 2014); kriging uses the 64 nearest points. A second panel maps the kriging standard deviation. Uses at most 4,000 block medians: with the automatic cell size the cell grows until that holds; with a manual cell size, choose a larger cell if the limit is hit. |
    | Linear | Delaunay triangulation; blank outside the data hull. |
 
 5. **Blanking** — grid nodes farther than the blanking distance from any block median are left blank. The default keeps the gaps between survey lines filled: the larger of 2 × median point spacing and 1.5 × the 90th-percentile distance from grid nodes inside the survey to the nearest data point.
 6. **Cross-validation** — 5-fold RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Folds are random, so along densely sampled lines the errors are optimistic; use them to rank methods rather than as absolute accuracy.
+
+Contour colours span the 2nd–98th percentile of the gridded values; values beyond that range are shown in the end colours.
 
 **Downloads:** PNG; grid CSV (`x, y, value` [, `variance`] [, `lon, lat`]); ESRI ASCII grid (`.asc`) for QGIS / ArcGIS. With degree input the `.asc` is in local metres and is not georeferenced — use the CSV `lon`/`lat` columns.
 
@@ -288,7 +291,7 @@ RIs_v2.py
 
 12. Sandwell, D.T. (1987). Biharmonic spline interpolation of GEOS-3 and SEASAT altimeter data. *Geophysical Research Letters*, **14**(2), 139–142. https://doi.org/10.1029/GL014i002p00139
 
-13. Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial prediction of soil salinity using electromagnetic induction techniques: 1. Statistical prediction models. *Water Resources Research*, **31**(2), 373–386. https://doi.org/10.1029/94WR02179
+13. Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial prediction of soil salinity using electromagnetic induction techniques: 1. Statistical prediction models: A comparison of multiple linear regression and cokriging. *Water Resources Research*, **31**(2), 373–386. https://doi.org/10.1029/94WR02179
 
 14. Corwin, D.L. & Lesch, S.M. (2005). Apparent soil electrical conductivity measurements in agriculture. *Computers and Electronics in Agriculture*, **46**, 11–43. https://doi.org/10.1016/j.compag.2004.10.005
 
