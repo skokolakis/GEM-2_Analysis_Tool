@@ -26,8 +26,8 @@ from scipy.spatial.distance import pdist
 # Constants
 # ---------------------------------------------------------------------------
 EARTH_RADIUS_M = 6_371_008.8
-LAT_NAMES = {"lat", "latitude"}
-LON_NAMES = {"lon", "long", "longitude"}
+LAT_NAMES = ("lat", "latitude")
+LON_NAMES = ("lon", "long", "longitude")
 DEGREE_SPAN_MAX = 0.05          # auto-detect X/Y as degrees only below this span
 MIN_POINTS = 10                 # minimum block-reduced points to grid
 COLLINEAR_RATIO = 0.05          # minor/major principal spread below this = transect
@@ -91,14 +91,18 @@ def find_coordinate_columns(df: pd.DataFrame, mode: str = "auto") -> tuple[str, 
     """
     Return (x_column, y_column, is_degrees).
 
-    Lat/Lon columns (case-insensitive) take precedence and are always degrees.
-    Otherwise X/Y are used; *mode* is "auto", "metres" or "degrees".
+    Lat/Lon columns (case-insensitive) with at least 2 numeric values take precedence
+    and are always degrees. Otherwise X/Y are used; *mode* is "auto", "metres" or "degrees".
     """
     lower = {str(c).strip().lower(): c for c in df.columns}
     lat_col = next((lower[n] for n in LAT_NAMES if n in lower), None)
     lon_col = next((lower[n] for n in LON_NAMES if n in lower), None)
     if lat_col is not None and lon_col is not None:
-        return lon_col, lat_col, True
+        # Check if both columns have at least 2 finite numeric values
+        lat_valid = pd.to_numeric(df[lat_col], errors="coerce").notna().sum() >= 2
+        lon_valid = pd.to_numeric(df[lon_col], errors="coerce").notna().sum() >= 2
+        if lat_valid and lon_valid:
+            return lon_col, lat_col, True
 
     if "x" in lower and "y" in lower:
         x_col, y_col = lower["x"], lower["y"]

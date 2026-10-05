@@ -115,6 +115,12 @@ def test_find_coordinates_lat_lon_columns_take_precedence():
     assert C.find_coordinate_columns(df) == ("LON", "Latitude", True)
 
 
+def test_find_coordinates_blank_lat_lon_falls_back_to_xy():
+    df = pd.DataFrame({"X": [0.0, 80.0], "Y": [0.0, 60.0],
+                       "Lat": [np.nan, np.nan], "Lon": [np.nan, np.nan]})
+    assert C.find_coordinate_columns(df) == ("X", "Y", False)
+
+
 def test_find_coordinates_missing_raises():
     with pytest.raises(C.ContouringError, match="No coordinate"):
         C.find_coordinate_columns(pd.DataFrame({"Line": [1], "Dist": [0.0]}))
