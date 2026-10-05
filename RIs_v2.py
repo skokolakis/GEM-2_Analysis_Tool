@@ -25,6 +25,8 @@ from scipy.interpolate import (
 )
 from numpy.polynomial.polynomial import polyfit, polyval
 
+import contouring as ctr
+
 # ---------------------------------------------------------------------------
 # Configuration (all in one place, easily overridden via Streamlit widgets)
 # ---------------------------------------------------------------------------
@@ -74,6 +76,34 @@ class GraphOptions:
     plot_title: str = ""   # empty → use auto-generated default
     x_label: str = ""      # empty → "Distance (m)"
     y_label: str = ""      # empty → MODES[mode]
+
+
+@dataclass(frozen=True)
+class ContourSettings:
+    """2D contouring options collected from the sidebar."""
+    area_map: bool = False
+    pseudosection: bool = False
+    coord_mode: str = "auto"              # "auto" | "metres" | "degrees"
+    method: str = "spline"                # key of contouring.METHODS
+    smoothing: float = 0.0                # thin-plate spline only
+    variogram_model: str = "spherical"    # kriging only
+    cell_size: float | None = None        # None → automatic
+    blank_distance: float | None = None   # None → automatic
+    level_lines: bool = False
+    n_levels: int = 20
+
+
+PSEUDOSECTION_CAPTION = (
+    "Frequency axis is not a calibrated depth axis: under LIN the depth response "
+    "is set by coil geometry (McNeill, 1980); at most, lower frequencies see "
+    "somewhat deeper (Huang, 2005). "
+    "White lines mark measured frequencies; values between them are interpolated."
+)
+LEVELLING_HELP = (
+    "Shifts each line so its median equals the survey median (removes "
+    "line-to-line offsets / striping). Also removes any real gradient across "
+    "lines — compare with levelling off."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1044,6 +1074,252 @@ def _render_mode_section(
 
 
 # ---------------------------------------------------------------------------
+# 2D contouring (area maps & pseudo-sections)
+# ---------------------------------------------------------------------------
+
+def gem_value_column(mode: str, freq_label: str) -> str:
+    """Raw GEM column name for a mode and frequency label such as '4525Hz'."""
+    return f"EC{freq_label}[mS/m]" if mode == "EC" else f"MSusc{freq_label}[1/1000]"
+
+
+@st.cache_data(show_spinner=False)
+def read_raw_table(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """First sheet (XLSX) or the whole table (CSV), unprocessed."""
+    if file_name.lower().endswith(".csv"):
+        return pd.read_csv(io.BytesIO(file_bytes))
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
+
+
+def grid_params(contour: ContourSettings) -> dict:
+    """Settings that affect the gridded result (display-only fields excluded)."""
+    return {
+        "coord_mode": contour.coord_mode,
+        "method": contour.method,
+        "cell_size": contour.cell_size,
+        "blank_distance": contour.blank_distance,
+        "level": contour.level_lines,
+        "smoothing": contour.smoothing,
+        "variogram_model": contour.variogram_model,
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def compute_area_map_cached(
+    file_bytes: bytes,
+    file_name: str,
+    value_col: str,
+    **params,
+) -> ctr.AreaMapResult:
+    """Cached wrapper around contouring.compute_area_map; *params* from grid_params()."""
+    return ctr.compute_area_map(read_raw_table(file_bytes, file_name), value_col, **params)
+
+
+def render_contouring_sidebar() -> ContourSettings:
+    """Sidebar controls for 2D contouring; call inside `with st.sidebar`."""
+    st.divider()
+    st.subheader("2D contouring")
+    area = st.toggle("Area map (plan view)", value=False, key="ct_area")
+    pseudo = st.toggle("Pseudo-section", value=False, key="ct_pseudo")
+    if not area:
+        return ContourSettings(area_map=False, pseudosection=pseudo)
+
+    coord_mode = st.selectbox(
+        "Coordinates", ["auto", "metres", "degrees"],
+        format_func=str.capitalize, key="ct_coords",
+        help="Auto: Lat/Lon columns are degrees; X/Y are degrees only if they "
+             "look like lon/lat spanning < 0.05°.",
+    )
+    method = st.selectbox(
+        "Gridding method", list(ctr.METHODS), format_func=ctr.METHODS.get, key="ct_method",
+    )
+    smoothing = 0.0
+    variogram_model = "spherical"
+    if method == "spline":
+        smoothing = st.number_input(
+            "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key="ct_smooth",
+            help="0 = exact interpolation; larger values trade fit for smoothness.",
+        )
+    if method == "kriging":
+        variogram_model = st.selectbox(
+            "Variogram model", ctr.VARIOGRAM_MODELS, key="ct_vario",
+        )
+    cell = st.number_input(
+        "Cell size (m, 0 = auto)", min_value=0.0, value=0.0, step=0.1,
+        format="%.2f", key="ct_cell",
+    )
+    blank = st.number_input(
+        "Blanking distance (m, 0 = auto)", min_value=0.0, value=0.0, step=0.5,
+        format="%.2f", key="ct_blank",
+        help="Grid nodes farther than this from any data point are left blank. "
+             "Auto keeps the gaps between survey lines filled: the larger of "
+             "2 × median point spacing and 1.5 × the 90th-percentile distance "
+             "from grid nodes inside the survey to the nearest data point.",
+    )
+    level = st.checkbox(
+        "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
+    )
+    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels")
+    return ContourSettings(
+        area_map=True,
+        pseudosection=pseudo,
+        coord_mode=coord_mode,
+        method=method,
+        smoothing=float(smoothing),
+        variogram_model=variogram_model,
+        cell_size=float(cell) or None,
+        blank_distance=float(blank) or None,
+        level_lines=level,
+        n_levels=int(n_levels),
+    )
+
+
+def _render_pseudosection(
+    output_data: dict[str, pd.DataFrame],
+    mode: str,
+    file_name: str,
+    file_key: str,
+    contour: ContourSettings,
+    is_gem: bool,
+) -> None:
+    st.markdown("### Pseudo-section")
+    profiles = {name: df.mean(axis=1, skipna=True) for name, df in output_data.items()}
+    try:
+        ps = ctr.build_pseudosection(profiles)
+        fig = ctr.make_pseudosection_figure(
+            ps, ctr.value_label(mode, is_gem),
+            f"Pseudo-section [{mode}] — {file_name}", contour.n_levels,
+        )
+    except ctr.ContouringError as exc:
+        st.info(str(exc))
+        return
+    except Exception as exc:  # last resort: never show a traceback
+        st.error(f"Pseudo-section failed: {exc}")
+        return
+    st.pyplot(fig, use_container_width=True)
+    png = fig_to_png(fig)
+    plt.close(fig)
+    st.caption(PSEUDOSECTION_CAPTION)
+    st.download_button(
+        "Pseudo-section (.png)", data=png,
+        file_name=f"{Path(file_name).stem}_{mode}_pseudosection.png",
+        mime="image/png", key=f"dl_ps_{file_key}",
+    )
+
+
+def _render_area_map(
+    output_data: dict[str, pd.DataFrame],
+    mode: str,
+    file_name: str,
+    file_key: str,
+    contour: ContourSettings,
+    file_bytes: bytes,
+    is_gem: bool,
+) -> None:
+    st.markdown("### Area map")
+    if not is_gem:
+        st.info(
+            "Area maps need a GEM file with X/Y or Lat/Lon coordinates; "
+            "the legacy multi-sheet format has none."
+        )
+        return
+
+    freq = st.selectbox("Frequency", list(output_data.keys()), key=f"ct_freq_{file_key}")
+    label = ctr.value_label(mode, is_gem)
+    try:
+        with st.spinner("Gridding…"):
+            result = compute_area_map_cached(
+                file_bytes, file_name, gem_value_column(mode, freq),
+                **grid_params(contour),
+            )
+        fig = ctr.make_area_map_figure(
+            result, label, f"{freq} [{mode}] — {ctr.METHODS[result.method]}",
+            contour.n_levels,
+        )
+    except ctr.GridTooLargeError as exc:
+        st.warning(str(exc))
+        return
+    except ctr.KrigingError as exc:
+        st.error(str(exc))
+        return
+    except ctr.ContouringError as exc:
+        st.info(str(exc))
+        return
+    except Exception as exc:  # last resort: never show a traceback
+        st.error(f"Area map failed: {exc}")
+        return
+    st.pyplot(fig, use_container_width=True)
+    png = fig_to_png(fig)
+    plt.close(fig)
+
+    details = (
+        f"{result.n_raw:,} readings → {len(result.bv):,} block medians · "
+        f"cell {result.spec.cell:g} m · blanking {result.blank_distance:.2f} m"
+    )
+    if result.variogram is not None:
+        vf = result.variogram
+        details += (
+            f" · variogram {vf.model}: partial sill {vf.psill:.4g}, "
+            f"range {vf.range:.3g} m, nugget {vf.nugget:.4g}"
+        )
+    st.caption(details)
+
+    if st.button("Cross-validate (5-fold)", key=f"ct_cv_{file_key}"):
+        with st.spinner("Cross-validating…"):
+            try:
+                cv = ctr.cross_validate(
+                    result.bx, result.by, result.bv, result.method,
+                    contour.smoothing, result.variogram,
+                )
+            except ctr.ContouringError as exc:
+                st.error(str(exc))
+            else:
+                st.write(
+                    f"RMSE **{cv['rmse']:.4g}**, MAE **{cv['mae']:.4g}** "
+                    f"({label}, {cv['n']:,} held-out points; random folds, "
+                    "optimistic for densely sampled lines)"
+                )
+
+    stem = Path(file_name).stem
+    base = f"{stem}_{mode}_{freq}_{result.method}"
+    c1, c2, c3 = st.columns(3)
+    c1.download_button(
+        "Area map (.png)", data=png, file_name=f"{base}.png",
+        mime="image/png", key=f"dl_am_png_{file_key}",
+    )
+    c2.download_button(
+        "Grid (.csv)", data=ctr.grid_to_csv(result), file_name=f"{base}.csv",
+        mime="text/csv", key=f"dl_am_csv_{file_key}",
+    )
+    c3.download_button(
+        "Grid (.asc)", data=ctr.grid_to_asc(result), file_name=f"{base}.asc",
+        mime="text/plain", key=f"dl_am_asc_{file_key}",
+    )
+    if result.origin is not None:
+        st.warning(
+            "Input was in degrees: the .asc grid is in local metres and is not "
+            "georeferenced. Use the lon/lat columns of the CSV to place it."
+        )
+
+
+def render_contouring(
+    output_data: dict[str, pd.DataFrame],
+    mode: str,
+    file_name: str,
+    file_key: str,
+    contour: ContourSettings,
+    file_bytes: bytes,
+    is_gem: bool,
+) -> None:
+    """Render the enabled 2D contouring sections for one file and mode."""
+    if not output_data:
+        return
+    if contour.pseudosection:
+        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
+    if contour.area_map:
+        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem)
+
+
+# ---------------------------------------------------------------------------
 # Per-format rendering dispatchers
 # ---------------------------------------------------------------------------
 
@@ -1053,6 +1329,7 @@ def render_legacy_results(
     mode: str,
     distance_step: float,
     interp_kind: str,
+    contour: ContourSettings | None = None,
 ) -> None:
     """Process and render a legacy multi-sheet Excel file."""
     stem = Path(file_name).stem
@@ -1076,6 +1353,10 @@ def render_legacy_results(
         return
 
     _render_mode_section(output_data, scores, mode, file_name, file_key=stem)
+    if contour is not None:
+        render_contouring(
+            output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
+        )
 
 
 def render_gem_results(
@@ -1083,6 +1364,7 @@ def render_gem_results(
     file_name: str,
     distance_step: float,
     interp_kind: str,
+    contour: ContourSettings | None = None,
 ) -> None:
     """Process and render a GEM instrument file (CSV or XLSX)."""
     stem = Path(file_name).stem
@@ -1121,6 +1403,11 @@ def render_gem_results(
                 file_name,
                 file_key=f"{stem}_{mode_key}",
             )
+            if contour is not None:
+                render_contouring(
+                    output_data[mode_key], mode_key, file_name,
+                    f"{stem}_{mode_key}", contour, file_bytes, is_gem=True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1168,6 +1455,8 @@ def main():
                 f"Distance step is {distance_step:.2f} m. "
                 "If your data spans less than this, all sheets will be skipped."
             )
+
+        contour = render_contouring_sidebar()
 
         st.divider()
         st.markdown("**Output files are available for download after processing.**")
@@ -1354,6 +1643,29 @@ The **Batch Export — all methods** option runs all seven methods in one step a
 
 ---
 
+#### 2D contouring
+
+Switch on in the sidebar under **2D contouring**.
+
+- **Pseudo-section** — mean profiles of all frequencies as one
+  distance × frequency contour, aligned on their common distance
+  range. The frequency axis is *not* a calibrated depth axis:
+  under LIN the depth response is set by coil geometry (McNeill,
+  1980; Callegary et al., 2007); at most, lower frequencies see
+  somewhat deeper (Huang, 2005).
+- **Area map** — plan-view grid of one frequency from the X/Y (or
+  Lat/Lon) coordinates of all lines: optional per-line median
+  levelling (a simple form; cf. Mauring & Kihle, 2006),
+  block-median reduction, then
+  thin-plate spline (Briggs, 1974; Sandwell, 1987), ordinary
+  kriging with a fitted variogram and standard-deviation map
+  (Corwin & Lesch, 2005; Oliver & Webster, 2014; for
+  regression / cokriging alternatives see Lesch et al., 1995) or
+  linear triangulation. Nodes far from data are blanked.
+  Use **Cross-validate** to compare methods (Li & Heap, 2011).
+
+---
+
 #### Supported file formats
 
 | Format | Notes |
@@ -1437,6 +1749,46 @@ The **Batch Export — all methods** option runs all seven methods in one step a
   cubic interpolation. *SIAM J. Numer. Anal.*, **17**(2),
   238–246.
   [doi:10.1137/0717021](https://doi.org/10.1137/0717021)
+
+- Briggs, I.C. (1974). Machine contouring using minimum
+  curvature. *Geophysics*, **39**(1), 39–48.
+  [doi:10.1190/1.1440410](https://doi.org/10.1190/1.1440410)
+
+- Sandwell, D.T. (1987). Biharmonic spline interpolation of
+  GEOS-3 and SEASAT altimeter data. *Geophys. Res. Lett.*,
+  **14**(2), 139–142.
+  [doi:10.1029/GL014i002p00139](https://doi.org/10.1029/GL014i002p00139)
+
+- Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial
+  prediction of soil salinity using electromagnetic induction
+  techniques: 1. Statistical prediction models: a comparison of
+  multiple linear regression and cokriging. *Water Resour. Res.*,
+  **31**(2), 373–386.
+  [doi:10.1029/94WR02179](https://doi.org/10.1029/94WR02179)
+
+- Corwin, D.L. & Lesch, S.M. (2005). Apparent soil electrical
+  conductivity measurements in agriculture. *Comput. Electron.
+  Agric.*, **46**, 11–43.
+  [doi:10.1016/j.compag.2004.10.005](https://doi.org/10.1016/j.compag.2004.10.005)
+
+- Oliver, M.A. & Webster, R. (2014). A tutorial guide to
+  geostatistics: computing and modelling variograms and kriging.
+  *Catena*, **113**, 56–69.
+  [doi:10.1016/j.catena.2013.09.006](https://doi.org/10.1016/j.catena.2013.09.006)
+
+- Li, J. & Heap, A.D. (2011). A review of comparative studies of
+  spatial interpolation methods in environmental sciences.
+  *Ecol. Inform.*, **6**, 228–241.
+  [doi:10.1016/j.ecoinf.2010.12.003](https://doi.org/10.1016/j.ecoinf.2010.12.003)
+
+- Mauring, E. & Kihle, O. (2006). Leveling aerogeophysical data
+  using a moving differential median filter. *Geophysics*,
+  **71**(1), L5–L11.
+  [doi:10.1190/1.2163912](https://doi.org/10.1190/1.2163912)
+
+- Huang, H. (2005). Depth of investigation for small broadband
+  electromagnetic sensors. *Geophysics*, **70**(6), G135–G142.
+  [doi:10.1190/1.2122412](https://doi.org/10.1190/1.2122412)
                 """
             )
 
@@ -1556,9 +1908,11 @@ The **Batch Export — all methods** option runs all seven methods in one step a
             pass
 
         if is_gem:
-            render_gem_results(file_bytes, file_name, distance_step, interp_kind)
+            render_gem_results(file_bytes, file_name, distance_step, interp_kind, contour)
         else:
-            render_legacy_results(file_bytes, file_name, mode, distance_step, interp_kind)
+            render_legacy_results(
+                file_bytes, file_name, mode, distance_step, interp_kind, contour
+            )
 
 
 if __name__ == "__main__":

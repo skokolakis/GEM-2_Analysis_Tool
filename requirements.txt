@@ -1,6 +1,7 @@
-streamlit
-matplotlib
+streamlit>=1.26
+matplotlib>=3.5
 numpy
-scipy
+scipy>=1.10
 pandas
 openpyxl
+pykrige>=1.7
