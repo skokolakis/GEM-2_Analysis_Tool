@@ -241,3 +241,77 @@ def test_check_geometry_corridor_without_line_labels_raises():
 def test_fit_variogram_too_few_points():
     with pytest.raises(C.KrigingError, match="Not enough points"):
         C.fit_variogram(np.array([0.0]), np.array([0.0]), np.array([1.0]))
+
+
+# ---------------------------------------------------------------------------
+# Interpolation
+# ---------------------------------------------------------------------------
+
+def _block_points(cell=1.0):
+    df = line_survey()
+    spec = C.make_grid(df["X"].to_numpy(), df["Y"].to_numpy(), cell)
+    bx, by, bv = C.block_median(df["X"].to_numpy(), df["Y"].to_numpy(),
+                                df[VALUE_COL].to_numpy(), spec)
+    return spec, bx, by, bv
+
+
+@pytest.mark.parametrize("method", ["spline", "kriging"])
+def test_predict_reproduces_bump_at_grid_nodes(method):
+    spec, bx, by, bv = _block_points()
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    est, var = C.predict(bx, by, bv, xx, yy, method)
+    assert np.sqrt(np.mean((est - bump(xx.ravel(), yy.ravel())) ** 2)) < 0.5
+    if method == "kriging":
+        assert var is not None and np.nanmin(var) >= 0.0
+    else:
+        assert var is None
+
+
+@pytest.mark.parametrize("model", C.VARIOGRAM_MODELS)
+def test_kriging_all_variogram_models_stable(model):
+    # gaussian with ~zero nugget is ill-conditioned without the pseudo-inverse
+    spec, bx, by, bv = _block_points()
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    est, _ = C.predict(bx, by, bv, xx, yy, "kriging", variogram_model=model)
+    assert np.sqrt(np.mean((est - bump(xx.ravel(), yy.ravel())) ** 2)) < 0.5
+
+
+def test_kriging_point_cap():
+    n = C.KRIGE_MAX_POINTS + 1
+    p = np.random.default_rng(0).uniform(0, 100, (n, 2))
+    vf = C.VariogramFit("spherical", 1.0, 10.0, 0.0, (), ())
+    with pytest.raises(C.KrigingError, match="limited"):
+        C.predict(p[:, 0], p[:, 1], np.ones(n), np.array([1.0]), np.array([1.0]),
+                  "kriging", variogram=vf)
+
+
+def test_linear_is_nan_outside_convex_hull():
+    px = np.array([0.0, 10.0, 0.0, 10.0, 5.0])
+    py = np.array([0.0, 0.0, 10.0, 10.0, 5.0])
+    est, _ = C.predict(px, py, np.arange(5.0), np.array([5.0, 20.0]),
+                       np.array([5.0, 20.0]), "linear")
+    assert np.isfinite(est[0]) and np.isnan(est[1])
+
+
+def test_predict_unknown_method():
+    with pytest.raises(ValueError, match="Unknown gridding method"):
+        C.predict(np.arange(3.0), np.arange(3.0), np.arange(3.0),
+                  np.array([0.0]), np.array([0.0]), "idw")
+
+
+def test_blank_far_masks_distant_nodes():
+    spec = C.GridSpec(x0=0.0, y0=0.0, cell=1.0, nx=10, ny=1)
+    out = C.blank_far(np.ones((1, 10)), spec, np.array([0.5]), np.array([0.5]), 2.0)
+    assert np.isfinite(out[0, :3]).all()  # nodes at 0.5, 1.5, 2.5
+    assert np.isnan(out[0, 3:]).all()
+
+
+def test_contour_levels_percentile_span():
+    v = np.r_[np.linspace(0, 1, 98), 1000.0, np.nan]
+    lv = C.contour_levels(v, 10)
+    assert len(lv) == 11 and lv[-1] < 1000.0
+
+
+def test_contour_levels_all_blank_raises():
+    with pytest.raises(C.ContouringError, match="Nothing to contour"):
+        C.contour_levels(np.array([np.nan, np.nan]), 10)

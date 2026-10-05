@@ -339,3 +339,108 @@ def fit_variogram(
         model=model, psill=float(popt[0]), range=float(popt[1]), nugget=float(popt[2]),
         lags=tuple(lags.tolist()), gamma=tuple(gamma.tolist()),
     )
+
+
+# ---------------------------------------------------------------------------
+# Interpolation
+# ---------------------------------------------------------------------------
+
+def predict(
+    px: np.ndarray,
+    py: np.ndarray,
+    pv: np.ndarray,
+    qx: np.ndarray,
+    qy: np.ndarray,
+    method: str,
+    smoothing: float = 0.0,
+    variogram: VariogramFit | None = None,
+    variogram_model: str = "spherical",
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Interpolate scattered (px, py, pv) at query points (qx, qy).
+
+    Returns (estimate, variance); variance is None except for kriging. For
+    kriging, *variogram* is fitted from the data when not supplied.
+    Coordinates are centred on the data centroid for numerical conditioning.
+    """
+    px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    cx, cy = float(np.mean(px)), float(np.mean(py))
+    p = np.column_stack([px - cx, py - cy])
+    q = np.column_stack([np.ravel(qx) - cx, np.ravel(qy) - cy])
+
+    if method == "spline":
+        neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
+        rbf = RBFInterpolator(
+            p, pv, kernel="thin_plate_spline", smoothing=smoothing, neighbors=neighbours
+        )
+        return rbf(q), None
+
+    if method == "linear":
+        return griddata(p, pv, q, method="linear"), None
+
+    if method == "kriging":
+        if variogram is None:
+            variogram = fit_variogram(p[:, 0], p[:, 1], pv, variogram_model)
+        return _krige(p, pv, q, variogram)
+
+    raise ValueError(f"Unknown gridding method: {method!r}")
+
+
+def _krige(
+    p: np.ndarray, pv: np.ndarray, q: np.ndarray, variogram: VariogramFit
+) -> tuple[np.ndarray, np.ndarray]:
+    """Ordinary kriging with a local neighbourhood of LOCAL_NEIGHBOURS points."""
+    from pykrige.ok import OrdinaryKriging
+
+    n = len(pv)
+    if n > KRIGE_MAX_POINTS:
+        raise KrigingError(
+            f"Kriging is limited to {KRIGE_MAX_POINTS:,} block-reduced points "
+            f"(this map has {n:,}) — increase the cell size or use the thin-plate spline."
+        )
+    try:
+        ok = OrdinaryKriging(
+            p[:, 0], p[:, 1], pv,
+            variogram_model=variogram.model,
+            variogram_parameters=variogram.parameters,
+            pseudo_inv=True,  # stable for smooth (e.g. gaussian, zero-nugget) models
+            enable_plotting=False,
+            verbose=False,
+        )
+        z, ss = ok.execute(
+            "points", q[:, 0], q[:, 1],
+            backend="C", n_closest_points=min(LOCAL_NEIGHBOURS, n),
+        )
+    except Exception as exc:  # pykrige raises a variety of types
+        raise KrigingError(
+            f"Kriging failed ({exc}). Try the thin-plate spline method."
+        ) from exc
+    z = np.asarray(np.ma.filled(z, np.nan), dtype=float)
+    ss = np.asarray(np.ma.filled(ss, np.nan), dtype=float)
+    return z, np.clip(ss, 0.0, None)
+
+
+def blank_far(
+    grid: np.ndarray, spec: GridSpec, px: np.ndarray, py: np.ndarray, max_distance: float
+) -> np.ndarray:
+    """Set grid nodes farther than *max_distance* from any data point to NaN."""
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    d, _ = cKDTree(np.column_stack([px, py])).query(
+        np.column_stack([xx.ravel(), yy.ravel()])
+    )
+    out = np.array(grid, dtype=float, copy=True)
+    out[(d > max_distance).reshape(out.shape)] = np.nan
+    return out
+
+
+def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
+    """n_levels + 1 evenly spaced boundaries spanning the 2nd-98th percentile."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        raise ContouringError("Nothing to contour (all values blank).")
+    lo, hi = np.percentile(finite, [2, 98])
+    if hi <= lo:
+        pad = max(abs(lo) * 1e-6, 1e-12)
+        lo, hi = lo - pad, hi + pad
+    return np.linspace(lo, hi, n_levels + 1)
