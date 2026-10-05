@@ -547,3 +547,18 @@ def test_pseudosection_zero_or_duplicate_frequency_uses_categorical_axis():
     s = pd.Series([1.0, 2.0, 3.0], index=[0.0, 1.0, 2.0])
     assert C.build_pseudosection({"0Hz": s, "10Hz": s}).frequencies is None
     assert C.build_pseudosection({"EC 10Hz": s, "MS 10Hz": s}).frequencies is None
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: near-flat contour levels, frequency label parsing
+# ---------------------------------------------------------------------------
+
+def test_contour_levels_increasing_for_round_off_flat_field():
+    lv = C.contour_levels(0.5 + np.array([0.0, 1e-16, 2e-16, 1e-16]), 10)
+    assert np.all(np.diff(lv) > 0)
+
+
+def test_parse_frequency_bare_numbers_and_hz_only():
+    assert C.parse_frequency("9000") == 9000.0
+    assert C.parse_frequency("Sheet1") is None
+    assert C.parse_frequency("Line 3") is None

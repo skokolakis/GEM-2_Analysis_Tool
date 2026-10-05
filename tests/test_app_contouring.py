@@ -2,7 +2,13 @@
 from streamlit.testing.v1 import AppTest
 
 
-def _gem_app(method: str = "spline", lines: int = 6, legacy: bool = False):
+def _gem_app(
+    method: str = "spline",
+    lines: int = 6,
+    legacy: bool = False,
+    blank_distance=None,
+    constant_ms: bool = False,
+):
     """Script body run by AppTest; all imports must be local."""
     import io
 
@@ -23,8 +29,14 @@ def _gem_app(method: str = "spline", lines: int = 6, legacy: bool = False):
             "MSusc1525Hz[1/1000]": 0.5 + 0.2 * bump,
             "MSusc9825Hz[1/1000]": 0.6 + 0.2 * bump,
         }))
-    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
-    contour = R.ContourSettings(area_map=True, pseudosection=True, method=method)
+    table = pd.concat(rows, ignore_index=True)
+    if constant_ms:
+        table["MSusc1525Hz[1/1000]"] = 0.5
+        table["MSusc9825Hz[1/1000]"] = 0.5
+    data = table.to_csv(index=False).encode()
+    contour = R.ContourSettings(
+        area_map=True, pseudosection=True, method=method, blank_distance=blank_distance
+    )
     if legacy:
         legacy_df = pd.DataFrame({"d": np.arange(0.0, 40.0, 0.5)})
         legacy_df["t1"] = legacy_df["d"] * 0.1
@@ -71,3 +83,16 @@ def test_legacy_file_area_map_message_and_pseudosection():
     assert not at.exception
     assert any("legacy multi-sheet format" in i.value for i in at.info)
     assert "### Pseudo-section" in " ".join(_texts(at))
+
+
+def test_tiny_blanking_distance_shows_message_not_traceback():
+    at = AppTest.from_function(_gem_app, kwargs={"blank_distance": 0.01}, default_timeout=120)
+    at.run()
+    assert not at.exception
+    assert any("Nothing to contour" in i.value for i in at.info)
+
+
+def test_constant_column_does_not_crash():
+    at = AppTest.from_function(_gem_app, kwargs={"constant_ms": True}, default_timeout=120)
+    at.run()
+    assert not at.exception

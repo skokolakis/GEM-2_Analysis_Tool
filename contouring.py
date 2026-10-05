@@ -472,7 +472,7 @@ def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
     if finite.size == 0:
         raise ContouringError("Nothing to contour (all values blank).")
     lo, hi = np.percentile(finite, [2, 98])
-    if hi <= lo:
+    if hi - lo <= 1e-9 * max(abs(lo), abs(hi), 1e-12):  # flat up to round-off
         pad = max(abs(lo) * 1e-6, 1e-12)
         lo, hi = lo - pad, hi + pad
     return np.linspace(lo, hi, n_levels + 1)
@@ -601,9 +601,16 @@ def cross_validate(
 # ---------------------------------------------------------------------------
 
 def parse_frequency(label: str) -> float | None:
-    """First number in a label, e.g. '4525Hz' -> 4525.0; None if absent."""
-    m = re.search(r"\d+(?:\.\d+)?", str(label))
-    return float(m.group()) if m else None
+    """
+    Frequency from a label: a bare number ('9000') or a number followed by Hz
+    ('4525Hz', 'EC 93.5 kHz' -> 93.5; units are not converted). None otherwise,
+    e.g. 'Sheet1', so such labels get a categorical axis.
+    """
+    text = str(label).strip()
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)", text) or re.search(
+        r"(\d+(?:\.\d+)?)\s*k?Hz", text, re.IGNORECASE
+    )
+    return float(m.group(1)) if m else None
 
 
 @dataclass

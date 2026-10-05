@@ -1089,25 +1089,28 @@ def read_raw_table(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
 
 
+def grid_params(contour: ContourSettings) -> dict:
+    """Settings that affect the gridded result (display-only fields excluded)."""
+    return {
+        "coord_mode": contour.coord_mode,
+        "method": contour.method,
+        "cell_size": contour.cell_size,
+        "blank_distance": contour.blank_distance,
+        "level": contour.level_lines,
+        "smoothing": contour.smoothing,
+        "variogram_model": contour.variogram_model,
+    }
+
+
 @st.cache_data(show_spinner=False)
 def compute_area_map_cached(
     file_bytes: bytes,
     file_name: str,
     value_col: str,
-    contour: ContourSettings,
+    **params,
 ) -> ctr.AreaMapResult:
-    """Cached wrapper around contouring.compute_area_map."""
-    return ctr.compute_area_map(
-        read_raw_table(file_bytes, file_name),
-        value_col,
-        coord_mode=contour.coord_mode,
-        method=contour.method,
-        cell_size=contour.cell_size,
-        blank_distance=contour.blank_distance,
-        level=contour.level_lines,
-        smoothing=contour.smoothing,
-        variogram_model=contour.variogram_model,
-    )
+    """Cached wrapper around contouring.compute_area_map; *params* from grid_params()."""
+    return ctr.compute_area_map(read_raw_table(file_bytes, file_name), value_col, **params)
 
 
 def render_contouring_sidebar() -> ContourSettings:
@@ -1147,7 +1150,9 @@ def render_contouring_sidebar() -> ContourSettings:
         "Blanking distance (m, 0 = auto)", min_value=0.0, value=0.0, step=0.5,
         format="%.2f", key="ct_blank",
         help="Grid nodes farther than this from any data point are left blank. "
-             "Auto = 2 × median spacing of the block-reduced points.",
+             "Auto keeps the gaps between survey lines filled: the larger of "
+             "2 × median point spacing and 1.5 × the 90th-percentile distance "
+             "from grid nodes inside the survey to the nearest data point.",
     )
     level = st.checkbox(
         "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
@@ -1179,13 +1184,16 @@ def _render_pseudosection(
     profiles = {name: df.mean(axis=1, skipna=True) for name, df in output_data.items()}
     try:
         ps = ctr.build_pseudosection(profiles)
+        fig = ctr.make_pseudosection_figure(
+            ps, ctr.value_label(mode, is_gem),
+            f"Pseudo-section [{mode}] — {file_name}", contour.n_levels,
+        )
     except ctr.ContouringError as exc:
         st.info(str(exc))
         return
-    fig = ctr.make_pseudosection_figure(
-        ps, ctr.value_label(mode, is_gem),
-        f"Pseudo-section [{mode}] — {file_name}", contour.n_levels,
-    )
+    except Exception as exc:  # last resort: never show a traceback
+        st.error(f"Pseudo-section failed: {exc}")
+        return
     st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
     plt.close(fig)
@@ -1215,11 +1223,17 @@ def _render_area_map(
         return
 
     freq = st.selectbox("Frequency", list(output_data.keys()), key=f"ct_freq_{file_key}")
+    label = ctr.value_label(mode, is_gem)
     try:
         with st.spinner("Gridding…"):
             result = compute_area_map_cached(
-                file_bytes, file_name, gem_value_column(mode, freq), contour
+                file_bytes, file_name, gem_value_column(mode, freq),
+                **grid_params(contour),
             )
+        fig = ctr.make_area_map_figure(
+            result, label, f"{freq} [{mode}] — {ctr.METHODS[result.method]}",
+            contour.n_levels,
+        )
     except ctr.GridTooLargeError as exc:
         st.warning(str(exc))
         return
@@ -1229,12 +1243,9 @@ def _render_area_map(
     except ctr.ContouringError as exc:
         st.info(str(exc))
         return
-
-    label = ctr.value_label(mode, is_gem)
-    fig = ctr.make_area_map_figure(
-        result, label, f"{freq} [{mode}] — {ctr.METHODS[result.method]}",
-        contour.n_levels,
-    )
+    except Exception as exc:  # last resort: never show a traceback
+        st.error(f"Area map failed: {exc}")
+        return
     st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
     plt.close(fig)
