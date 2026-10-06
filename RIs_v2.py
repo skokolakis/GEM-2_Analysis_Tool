@@ -1880,9 +1880,9 @@ ranked last, with a warning.
 
 | Step | What happens |
 |---|---|
-| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`). The flat GEM table is pivoted: each frequency becomes a matrix with distance as rows and survey lines as columns. |
+| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`, `I_*Hz`, `Q_*Hz`). Readings with a non-zero `Status` are dropped (optional) and the distance of each reading along its line is found (sidebar **Distance along line**). The flat GEM table is pivoted: each channel becomes a matrix with distance as rows and survey lines as columns. |
 | **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). At a repeated distance within a trace only the first reading is kept. Each trace is left blank outside its own measured range. |
-| **3. Score** | The mean profile and noise metric are computed as above. Frequencies are ranked by descending score. |
+| **3. Score** (optional) | With **Frequency scoring** on, the mean profile and noise metric are computed as above and frequencies are ranked by descending score. |
 | **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
 | **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch Export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
 
@@ -1940,6 +1940,7 @@ Switch on in the sidebar under **2D contouring**.
 |---|---|
 | **GEM-2 `.xlsx`** | Full instrument precision — recommended for scoring |
 | **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
+| **GEM-2 I/Q** | `I_*Hz` / `Q_*Hz` in ppm, plus `PowerLn`, `QSum`, `TotalEC[mS/m]` when present |
 | **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = survey traces |
 
 ---

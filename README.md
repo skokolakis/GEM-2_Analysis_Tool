@@ -8,7 +8,9 @@ The tool can be also be used online via https://gemris.streamlit.app
 ### Key Features
 
 - **Dual-format support**: Upload GEM instrument data as `.csv` or `.xlsx` (full precision), or legacy multi-sheet XLSX
-- **Intelligent ranking**: Frequencies ranked by signal-to-noise score (amplitude ÷ noise)
+- **Every GEM-2 channel**: apparent conductivity (EC), susceptibility (MS), raw in-phase (I) and quadrature (Q) in ppm, and the power-line noise, quadrature-sum and total-EC channels
+- **Quality flags and distance options**: readings flagged in the `Status` column are dropped; distance along each line from the `Y` column, coordinates, reading number or event markers
+- **Optional ranking** (sidebar toggle, off by default): frequencies ranked by signal-to-noise score (amplitude ÷ noise)
 - **Interactive graph editor**: Customize axis limits, line styles, titles, and visibility
 - **Multi-format downloads**: Export interpolated profiles (XLSX), scores (CSV), and plots (PNG)
 - **Per-frequency detail plots**: Individual traces with mean ± 1σ envelope
@@ -49,11 +51,28 @@ The app opens in your browser at `http://localhost:8501`.
 ### Uploading Data
 
 **GEM instrument format** (recommended):
-- Single file (CSV or XLSX) with all frequencies and lines in one table
-- Required columns: `Line`, `Y`, and one or more frequency columns matching the patterns:
+- Single file (CSV or XLSX) with all frequencies and lines in one table, as written by WinGEM / EMExport
+- Required columns: `Line`, `Y`, and one or more channel columns matching the patterns:
   - EC: `EC{freq}Hz[mS/m]`
   - MS: `MSusc{freq}Hz[1/1000]`
-- Automatically detects and shows both **EC** and **MS** results in separate tabs
+  - In-phase / quadrature: `I_{freq}Hz`, `Q_{freq}Hz` (ppm)
+- Optional columns used when present: `X`/`Y` or `Lat`/`Lon`, `Sample`, `Mark` (event markers), `Status` (quality flag), `PowerLn` (power-line noise, mG), `QSum`, `TotalEC[mS/m]`
+- Each mode found in the file gets its own tab: **EC**, **MS**, **I**, **Q** and **AUX** (power-line noise, quadrature sum, total EC)
+
+### GEM data options (sidebar)
+
+- **Drop readings with a Status flag** (on by default) — the GEM-2 writes a non-zero `Status` when a reading has a problem such as ADC overload (GEM-2 Manual v3.8).
+- **Distance along line**:
+
+  | Option | Distance of each reading |
+  |---|---|
+  | Y column | The exported `Y` value (WinGEM grid surveys) |
+  | Projection on the survey axis | Coordinates projected on the main axis of the whole survey — repeat passes walked in either direction share distances |
+  | Path length along each line | Cumulative distance from each line's first reading |
+  | Reading number × spacing | Reading order within the line × the spacing you enter |
+  | Between event markers | Markers placed every *spacing* metres, readings spaced evenly between them (dead reckoning); readings outside the first and last marker are not used |
+
+- **Event markers** are drawn as dotted vertical lines on every profile.
 
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
@@ -61,6 +80,8 @@ The app opens in your browser at `http://localhost:8501`.
 - Select measurement mode (EC or MS) from sidebar
 
 ### Understanding the Score
+
+Scoring is optional: switch on **Frequency scoring** at the top of the sidebar. With it off (the default) the app shows each mode's channels, profiles, maps and exports without scores. AUX channels are never scored.
 
 $$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
 
@@ -185,7 +206,7 @@ One sheet per frequency with columns:
 - `Distance (m)` — common interpolation grid
 - `{Frequency}_mean` — representative (mean across lines) profile
 
-**Scores (`.csv`)**
+**Scores (`.csv`)** — only with scoring on
 One row per frequency:
 - `mean_std` — noise level (σ) in same units as measurement
 - `amplitude` — dynamic range of the profile
@@ -202,7 +223,7 @@ A single workbook combining all uploaded files:
 
 | Sheet | Contents |
 |---|---|
-| `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ), Noise method, Traces |
+| `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ), Noise method, Traces — only with scoring on |
 | `{stem}_{mode}` | Distance column + one `{freq}_mean` column per frequency, joined on distance (a frequency is blank where it has no data) |
 
 The **all-methods** batch export adds a `Method` column to the `Scores` sheet and creates separate data sheets per (file, mode, method) combination.
@@ -212,6 +233,9 @@ The **all-methods** batch export adds a `Method` column to the `Scores` sheet an
 ## Architecture
 
 ```
+gem_io.py      — GEM-2 export channels, Status flags, event markers, distance along line
+pipeline.py    — PrepSettings and prepare_gem_table(): the raw table before profiles and maps
+contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
 ├── Configuration & constants
 ├── GEM format detection
