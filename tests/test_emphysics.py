@@ -88,3 +88,51 @@ def test_depth_of_investigation_is_finite_and_shallower_at_higher_height_no():
     assert 0.5 < d < 5.0
 
 
+def test_batch_conversion_matches_scalar_and_is_fast():
+    import time
+
+    rng = np.random.default_rng(0)
+    sig = 10 ** rng.uniform(-3, -0.3, 2000)
+    kap = rng.uniform(0, 3e-3, 2000)
+    for f in (1525.0, 63025.0):
+        z = E.forward_ppm_batch([f], sig[:, None], kap[:, None])[:, 0]
+        t = time.perf_counter()
+        s_est, k_est = E.halfspace_from_ppm_batch(f, z.real, z.imag)
+        assert time.perf_counter() - t < 20
+        np.testing.assert_allclose(s_est, sig, rtol=1e-4)
+        np.testing.assert_allclose(k_est, kap, atol=1e-7)
+
+
+def test_batch_conversion_blanks_non_positive_quadrature():
+    s, k = E.halfspace_from_ppm_batch(1525.0, np.array([10.0, 10.0, np.nan]), np.array([-1.0, 0.0, 5.0]))
+    assert np.isnan(s).all() and np.isnan(k).all()
+
+
+def test_frequency_table_columns_and_trend():
+    t = E.frequency_table([475.0, 63025.0], [0.02, 0.02])
+    assert list(t.columns[:4]) == ["Frequency (Hz)", "EC (mS/m)", "Skin depth (m)", "Induction number"]
+    assert t["Skin depth (m)"].iloc[0] > t["Skin depth (m)"].iloc[1]
+    assert t["Induction number"].iloc[1] > t["Induction number"].iloc[0]
+
+
+def test_multiheight_bias_is_recovered():
+    f = np.array([1525.0, 5325.0, 18325.0, 63025.0])
+    h = np.array([0.3, 0.8, 1.4, 2.0])
+    bias_i = np.array([30.0, -20.0, 50.0, 100.0])
+    bias_q = np.array([-15.0, 10.0, 40.0, -60.0])
+    ii, qq = [], []
+    for hk in h:
+        z = E.forward_ppm(f, [0.04], [1e-3], sensor=E.Sensor(height=hk))
+        ii.append(z.real + bias_i)
+        qq.append(z.imag + bias_q)
+    fit = E.fit_multiheight_bias(f, h, np.array(ii), np.array(qq))
+    assert fit["sigma"] == pytest.approx(0.04, rel=1e-3)
+    np.testing.assert_allclose(fit["bias_i"], bias_i, atol=0.5)
+    np.testing.assert_allclose(fit["bias_q"], bias_q, atol=0.5)
+    assert fit["rms"] < 1e-3
+
+
+def test_multiheight_needs_two_heights():
+    with pytest.raises(ValueError, match="2 or more heights"):
+        E.fit_multiheight_bias([1525.0], [1.0, 1.0], [[1.0], [1.0]], [[1.0], [1.0]])
+
