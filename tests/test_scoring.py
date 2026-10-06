@@ -1,11 +1,14 @@
 """Regression tests for GEM ingestion, scoring and exports in RIs_v2."""
 import io
 
-import numpy as np
-import pandas as pd
-import pytest
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
 
-import RIs_v2 as R
+import RIs_v2 as R  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +64,6 @@ def test_process_sheet_keeps_first_reading_at_repeated_distance():
     ],
 )
 def test_plot_axes_carry_correct_units(mode, is_gem, expected):
-    import matplotlib.pyplot as plt
-
     interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
     scores = {"f": {"score": 1.0}}
     fig = R.make_overview_figure({"f": interp}, scores, mode, "x", is_gem=is_gem)
@@ -201,3 +202,41 @@ def test_zero_noise_gives_blank_score_ranked_last():
 def test_non_overlapping_traces_are_reported():
     df = pd.DataFrame({"d": X, "a": np.where(X < 40, 1.0, np.nan), "b": np.where(X > 60, 2.0, np.nan)})
     assert R.process_sheet(df, 0.5, "linear")[2] == "traces do not overlap in distance"
+
+
+# ---------------------------------------------------------------------------
+# Polynomial trend fit (#6)
+# ---------------------------------------------------------------------------
+
+def test_polynomial_is_well_conditioned_on_projected_coordinates():
+    rng = np.random.default_rng(0)
+    northing = 4.5e6 + X
+    df = pd.DataFrame({"d": northing, "a": _trace(rng), "b": _trace(rng)})
+    with np.errstate(all="raise"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")      # RankWarning used to be emitted here
+            utm = R.process_sheet(df, 0.5, "polynomial")[1]
+    local = R.process_sheet(df.assign(d=X), 0.5, "polynomial")[1]
+    assert utm["score"] == pytest.approx(local["score"], rel=1e-6)
+
+
+def test_all_methods_export_flags_polynomial_as_trend_fit():
+    class Upload:
+        name = "legacy.xlsx"
+
+        def __init__(self, data):
+            self._data = data
+
+        def getvalue(self):
+            return self._data
+
+    rng = np.random.default_rng(0)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)}).to_excel(
+            w, sheet_name="1000", index=False)
+    xlsx = R.build_all_methods_batch_xlsx([Upload(buf.getvalue())], "EC", 0.5)
+    scores = pd.read_excel(io.BytesIO(xlsx), sheet_name="Scores").set_index("Method")
+    assert not scores.loc["polynomial", "Exact interpolant"]
+    assert scores.drop(index="polynomial")["Exact interpolant"].all()

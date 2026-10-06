@@ -23,7 +23,6 @@ from scipy.interpolate import (
     PchipInterpolator,
     make_interp_spline,
 )
-from numpy.polynomial.polynomial import polyfit, polyval
 
 import contouring as ctr
 
@@ -45,6 +44,16 @@ MODES = {
 }
 
 ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
+
+# Methods that fit a smooth trend instead of passing through every sample.
+# They remove short-wavelength variability from each trace, lowering σ and
+# inflating the score, so their scores are not comparable with interpolants.
+TREND_FIT_METHODS = {"polynomial"}
+TREND_FIT_WARNING = (
+    "`polynomial` is a least-squares trend fit (degree ≤ 5), not an interpolant: "
+    "it smooths each trace, which lowers σ and inflates the score. Use it to view "
+    "trends, not to compare scores with the other methods."
+)
 
 LINE_STYLES = {
     "Solid": "-",
@@ -330,9 +339,10 @@ def _interpolate_with_method(
         return make_interp_spline(xp, yp, k=2)(target_x)
 
     if method == "polynomial":
+        # Least-squares trend fit (exact only for ≤ 6 points). Polynomial.fit
+        # maps x onto [-1, 1], keeping projected coordinates well-conditioned.
         degree = min(len(xp) - 1, 5)
-        coeffs = polyfit(xp, yp, degree)
-        return polyval(target_x, coeffs)
+        return np.polynomial.Polynomial.fit(xp, yp, degree)(target_x)
 
     if method == "akima":
         return Akima1DInterpolator(xp, yp)(target_x)
@@ -824,7 +834,8 @@ def build_all_methods_batch_xlsx(
 
     Workbook layout
     ---------------
-    Sheet "Scores"            : File | Mode | Frequency | Method | Score | Amplitude | Noise(σ)
+    Sheet "Scores"            : File | Mode | Frequency | Method | Exact interpolant | Score
+                                | Amplitude | Noise(σ)
                                 | Noise method | Traces
     "{stem}_{mode}_{method}"  : Distance (m) + one {freq}_mean column per frequency
     """
@@ -879,6 +890,7 @@ def build_all_methods_batch_xlsx(
                             "Mode": mode_key,
                             "Frequency / Sheet": freq,
                             "Method": method,
+                            "Exact interpolant": method not in TREND_FIT_METHODS,
                             "Score": round(metrics["score"], 4),
                             "Amplitude": round(metrics["amplitude"], 6),
                             "Noise (σ)": round(metrics["mean_std"], 6),
@@ -1565,9 +1577,12 @@ def main():
 
         interp_kind = st.selectbox(
             "Interpolation method",
-            ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"],
+            ALL_INTERP_METHODS,
             index=0,
+            format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
         )
+        if interp_kind in TREND_FIT_METHODS:
+            st.warning(TREND_FIT_WARNING)
 
         if distance_step > 10.0:
             st.warning(
@@ -1755,7 +1770,7 @@ Seven methods are available from the sidebar dropdown. Each is applied uniformly
 | **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth, low-noise profiles. May overshoot at sharp boundaries. |
 | **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial. Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
 | **akima** | 5 | Akima (1970) local spline. Uses only neighbouring points to set slopes, making it robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | Global least-squares polynomial fit (degree = min(n − 1, 5)). Suitable for very smooth, low-point-count profiles; avoid for long profiles where Runge oscillations can appear. |
+| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. |
 
 The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
 
