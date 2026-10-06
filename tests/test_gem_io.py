@@ -52,3 +52,29 @@ def test_channel_column_inverts_find_channels(mode):
         assert G.channel_column(mode, label) == col
 
 
+def test_drop_flagged_rows():
+    status = np.zeros(22, dtype=int)
+    status[[3, 15]] = 2
+    df, n = G.drop_flagged_rows(_export(status=status))
+    assert n == 2 and len(df) == 20
+
+
+def test_drop_flagged_rows_without_status_column():
+    df, n = G.drop_flagged_rows(_export().drop(columns="Status"))
+    assert n == 0 and len(df) == 22
+
+
+@pytest.mark.parametrize("marks", [
+    [3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6],      # running counter
+    [0, 0, 7, 0, 0, 8, 0, 0, 9, 0, 0],      # set only on the flagged reading
+])
+def test_marker_rows_for_both_mark_styles(marks):
+    df = _export(lines=1, mark=marks)
+    assert np.nonzero(G.marker_rows(df))[0].tolist() == [2, 5, 8]
+
+
+def test_marker_distances_deduplicated():
+    df = _export(lines=2, mark=[0, 0, 7, 0, 0, 8, 0, 0, 0, 9, 0] * 2)
+    assert G.marker_distances(df, df["Y"].to_numpy()) == [2.0, 5.0, 9.0]
+
+

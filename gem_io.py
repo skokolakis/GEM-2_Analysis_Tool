@@ -73,3 +73,31 @@ def channel_column(mode: str, label: str) -> str:
     raise ValueError(f"Unknown mode: {mode!r}")
 
 
+def drop_flagged_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Removes readings with a non-zero Status (e.g. ADC overload). Returns (table, number removed)."""
+    if "Status" not in df.columns:
+        return df, 0
+    status = pd.to_numeric(df["Status"], errors="coerce").fillna(0)
+    bad = (status != 0).to_numpy()
+    return df.loc[~bad].reset_index(drop=True), int(bad.sum())
+
+
+def marker_rows(df: pd.DataFrame, line_col: str = "Line") -> np.ndarray:
+    """
+    Boolean mask of event-marker readings: the Mark value differs from the
+    previous reading of the same line and is not 0. Works whether Mark is a
+    running counter or is set only on the flagged reading.
+    """
+    if "Mark" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    mark = pd.to_numeric(df["Mark"], errors="coerce")
+    previous = mark.groupby(df[line_col], sort=False).shift(1)
+    return (previous.notna() & (mark != previous) & (mark != 0)).to_numpy()
+
+
+def marker_distances(df: pd.DataFrame, distance: np.ndarray, line_col: str = "Line") -> list[float]:
+    """Sorted, de-duplicated distances (mm resolution) of event-marker readings."""
+    d = np.asarray(distance, dtype=float)[marker_rows(df, line_col)]
+    return sorted(set(np.round(d[np.isfinite(d)], 3).tolist()))
+
+
