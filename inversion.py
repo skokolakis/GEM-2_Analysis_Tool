@@ -231,3 +231,132 @@ def emagpy_csv(
     return pd.DataFrame(out).to_csv(index=False).encode()
 
 
+# ---------------------------------------------------------------------------
+# Profiles -> stations, results -> tables and figures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StationData:
+    distance: np.ndarray         # (S,) m
+    frequencies: np.ndarray      # (F,) Hz
+    quadrature: np.ndarray       # (S, F) ppm
+    noise: np.ndarray | None     # (F,) ppm, measured between passes; None if unknown
+    source: str                  # "Q" or "EC"
+
+
+def _mean_profile_table(output_data: dict[str, pd.DataFrame]) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """Mean profiles of all channels on their joint distance grid: (distance, labels, values (D, F))."""
+    profiles = {}
+    for label, df in output_data.items():
+        prof = df.mean(axis=1, skipna=True)
+        prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
+        profiles[label] = prof
+    table = pd.concat(profiles, axis=1).sort_index()
+    return table.index.to_numpy(dtype=float), list(table.columns), table.to_numpy(dtype=float)
+
+
+def station_data(
+    output_data: dict[str, dict[str, pd.DataFrame]],
+    scores: dict[str, dict[str, dict]],
+    station_step: float,
+    sensor: E.Sensor = E.GEM2,
+) -> StationData:
+    """
+    Stations every `station_step` metres along the mean profiles. Uses the
+    quadrature channels when present, otherwise EC converted to quadrature
+    (ec_to_quadrature). The measured noise is the between-pass sigma of each
+    frequency (None for a frequency scored from a single pass).
+    """
+    source = "Q" if output_data.get("Q") else "EC"
+    channels = output_data.get(source) or {}
+    if not channels:
+        raise ValueError("Inversion needs Q (quadrature) or EC channels.")
+    distance, labels, values = _mean_profile_table(channels)
+    freqs = np.array([float(lb[:-2]) for lb in labels])
+    order = np.argsort(freqs)
+    freqs, values = freqs[order], values[:, order]
+    labels = [labels[i] for i in order]
+    targets = np.arange(distance[0], distance[-1] + 1e-9, station_step)
+    keep = np.unique(np.abs(distance[:, None] - targets[None, :]).argmin(axis=0))
+    distance, values = distance[keep], values[keep]
+
+    noise = np.array([
+        scores.get(source, {}).get(lb, {}).get("mean_std", np.nan)
+        if scores.get(source, {}).get(lb, {}).get("noise_method") == "between-trace" else np.nan
+        for lb in labels
+    ])
+    if source == "EC":
+        q = ec_to_quadrature(freqs, values, sensor)
+        # noise in mS/m -> ppm with the local slope dQ/dEC at the median EC
+        med = np.nanmedian(values, axis=0, keepdims=True)
+        slope = (ec_to_quadrature(freqs, med * 1.01, sensor) - ec_to_quadrature(freqs, med, sensor)) / (0.01 * med)
+        noise = noise * np.abs(slope[0])
+        values = q
+    return StationData(
+        distance=distance, frequencies=freqs, quadrature=values,
+        noise=noise if np.isfinite(noise).any() else None, source=source,
+    )
+
+
+def model_table(result: InversionResult, distance: np.ndarray) -> pd.DataFrame:
+    """One row per station and layer: distance, depth from/to (m), EC (mS/m)."""
+    top = result.grid.depth_top
+    bottom = np.concatenate([top[1:], [np.inf]])
+    rows = []
+    for d, model in zip(distance, result.log_sigma):
+        for z0, z1, ls in zip(top, bottom, model):
+            rows.append({"Distance (m)": d, "Depth from (m)": z0, "Depth to (m)": z1,
+                         "EC (mS/m)": 1000.0 * 10.0 ** ls})
+    return pd.DataFrame(rows)
+
+
+def make_section_figure(result: InversionResult, distance: np.ndarray, title: str):
+    """Distance x depth section of log10 EC (mS/m); the half-space is drawn 20 % below the last layer."""
+    import matplotlib.pyplot as plt
+
+    top = result.grid.depth_top
+    edges_z = np.concatenate([top, [top[-1] * 1.2 if top[-1] > 0 else 1.0]])
+    if len(distance) > 1:
+        mid = 0.5 * (distance[1:] + distance[:-1])
+        edges_x = np.concatenate([[2 * distance[0] - mid[0]], mid, [2 * distance[-1] - mid[-1]]])
+    else:
+        edges_x = np.array([distance[0] - 0.5, distance[0] + 0.5])
+    fig, ax = plt.subplots(figsize=(10, 4))
+    mesh = ax.pcolormesh(edges_x, edges_z, (result.log_sigma + 3.0).T, cmap="viridis", shading="flat")
+    ax.invert_yaxis()
+    fig.colorbar(mesh, ax=ax, label="log₁₀ EC (mS/m)")
+    ax.set_xlabel("Distance (m)")
+    ax.set_ylabel("Depth (m)")
+    ax.set_title(f"{title} — χ² {result.chi2:.2f}, {result.iterations} iterations")
+    fig.tight_layout()
+    return fig
+
+
+def emagpy_from_table(
+    table: pd.DataFrame, sensor: E.Sensor = E.GEM2, errors_ms_m: dict[str, float] | None = None
+) -> bytes:
+    """
+    EMagPy survey file from a prepared GEM table: every reading with its
+    coordinates in metres (projected about the survey centroid when the file
+    has degrees; along-line distance and y = 0 when it has no coordinates)
+    and the EC channels in frequency order. errors_ms_m maps EC column names
+    to 1-sigma errors.
+    """
+    found = gem_io.find_channels(table.columns)["EC"]
+    if not found:
+        raise ValueError("The EMagPy export needs EC channels.")
+    labels = sorted(found, key=lambda lb: float(lb[:-2]))
+    try:
+        x, y, _ = corrections.xy_metres(table)
+    except ctr.ContouringError:
+        x = pd.to_numeric(table[pipeline.DISTANCE_COL], errors="coerce").to_numpy(dtype=float)
+        y = np.zeros(len(table))
+    ec = table[[found[lb] for lb in labels]].apply(pd.to_numeric, errors="coerce").to_numpy()
+    keep = np.isfinite(x) & np.isfinite(y)
+    err = None
+    if errors_ms_m:
+        err = np.array([errors_ms_m.get(found[lb], np.nan) for lb in labels])
+        if not np.isfinite(err).all():
+            err = None
+    return emagpy_csv(x[keep], y[keep], [float(lb[:-2]) for lb in labels], ec[keep], sensor, err)

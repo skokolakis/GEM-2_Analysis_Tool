@@ -1,0 +1,90 @@
+"""Stations from profiles, result tables, EMagPy export and the inversion panel."""
+import io
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+import emphysics as E  # noqa: E402
+import inversion as V  # noqa: E402
+import pipeline  # noqa: E402
+
+FREQS = [1525.0, 5325.0, 18325.0]
+
+
+def _profiles(values_by_label, distance=np.arange(0, 10.5, 0.5), passes=2):
+    return {lb: pd.DataFrame({f"Line_{p}": v for p in range(passes)}, index=distance)
+            for lb, v in values_by_label.items()}
+
+
+def test_station_data_from_quadrature():
+    q = E.forward_ppm(FREQS, [0.02]).imag
+    out = {"Q": _profiles({f"{f:g}Hz": np.full(21, qi) for f, qi in zip(FREQS[::-1], q[::-1])})}
+    scores = {"Q": {f"{f:g}Hz": {"mean_std": 2.0, "noise_method": "between-trace"} for f in FREQS}}
+    s = V.station_data(out, scores, station_step=2.0)
+    assert s.source == "Q"
+    np.testing.assert_allclose(s.frequencies, FREQS)            # sorted
+    np.testing.assert_allclose(s.distance, [0, 2, 4, 6, 8, 10])
+    np.testing.assert_allclose(s.quadrature[0], q)
+    np.testing.assert_allclose(s.noise, 2.0)
+
+
+def test_station_data_from_ec_converts_values_and_noise():
+    out = {"EC": _profiles({f"{f:g}Hz": np.full(21, 20.0) for f in FREQS})}
+    scores = {"EC": {f"{f:g}Hz": {"mean_std": 0.5, "noise_method": "between-trace"} for f in FREQS}}
+    s = V.station_data(out, scores, 1.0)
+    assert s.source == "EC"
+    np.testing.assert_allclose(s.quadrature[0], E.forward_ppm(FREQS, [0.02]).imag, rtol=1e-9)
+    slope = (E.forward_ppm(FREQS, [0.0202]).imag - E.forward_ppm(FREQS, [0.02]).imag) / 0.2
+    np.testing.assert_allclose(s.noise, 0.5 * slope, rtol=1e-6)        # ppm per mS/m
+
+
+def test_single_pass_noise_is_not_used():
+    out = {"Q": _profiles({"1525Hz": np.ones(21)}, passes=1)}
+    scores = {"Q": {"1525Hz": {"mean_std": 2.0, "noise_method": "intra-profile"}}}
+    assert V.station_data(out, scores, 1.0).noise is None
+
+
+def test_model_table_and_section_figure():
+    g = V.make_layer_grid(4.0, 5)
+    res = V.InversionResult(log_sigma=np.full((3, 5), -2.0), grid=g, predicted=np.zeros((3, 2)),
+                            chi2=1.0, alpha=1.0, iterations=2, history=[1.0])
+    table = V.model_table(res, np.array([0.0, 1.0, 2.0]))
+    assert len(table) == 15 and np.allclose(table["EC (mS/m)"], 10.0)
+    assert np.isinf(table["Depth to (m)"].iloc[4])
+    fig = V.make_section_figure(res, np.array([0.0, 1.0, 2.0]), "t")
+    assert fig.axes[0].get_ylabel() == "Depth (m)"
+    plt.close(fig)
+
+
+def test_emagpy_from_table_with_and_without_coordinates():
+    table = pd.DataFrame({"Line": 0, "X": [0.0, 1.0], "Y": [0.0, 0.0],
+                          "EC5325Hz[mS/m]": [11.0, 12.0], "EC1525Hz[mS/m]": [10.0, 10.5],
+                          pipeline.DISTANCE_COL: [0.0, 1.0]})
+    df = pd.read_csv(io.BytesIO(V.emagpy_from_table(table, errors_ms_m={
+        "EC1525Hz[mS/m]": 0.2, "EC5325Hz[mS/m]": 0.3})))
+    assert list(df.columns) == ["x", "y", "elevation", "HCP1.66f1525h1", "HCP1.66f5325h1",
+                                "HCP1.66f1525h1_err", "HCP1.66f5325h1_err"]
+    no_xy = table.drop(columns=["X", "Y"])
+    df = pd.read_csv(io.BytesIO(V.emagpy_from_table(no_xy)))
+    assert df["x"].tolist() == [0.0, 1.0] and df["y"].tolist() == [0.0, 0.0]
+
+
+def test_emagpy_reads_the_export():
+    emagpy = pytest.importorskip("emagpy")
+    table = pd.DataFrame({"Line": 0, "X": np.arange(5.0), "Y": 0.0,
+                          "EC1525Hz[mS/m]": 10.0, "EC5325Hz[mS/m]": 11.0,
+                          pipeline.DISTANCE_COL: np.arange(5.0)})
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "s.csv")
+        with open(path, "wb") as fh:
+            fh.write(V.emagpy_from_table(table))
+        k = emagpy.Problem()
+        k.createSurvey(path)
+        assert k.surveys[0].freqs == [1525.0, 5325.0]
+
