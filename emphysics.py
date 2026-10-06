@@ -190,3 +190,77 @@ def lin_ppm_per_sigma(frequency: float, sensor: Sensor = GEM2) -> float:
     total = term(sensor.separation) - (term(sensor.bucking) if sensor.bucking else 0.0)
     return PPM * w * MU0 * total / 4.0
 
+
+def halfspace_from_ppm(
+    frequency: float,
+    inphase: float,
+    quadrature: float,
+    sensor: Sensor = GEM2,
+) -> tuple[float, float]:
+    """
+    Apparent conductivity (S/m) and susceptibility (SI) of the homogeneous
+    half-space that reproduces one (in-phase, quadrature) pair in ppm
+    (Huang & Won, 2000). Starts from the low-induction-number estimate.
+    """
+    q_per_sigma = lin_ppm_per_sigma(frequency, sensor)
+    i_per_kappa = forward_ppm(frequency, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3
+    s0 = max(quadrature / q_per_sigma, 1e-5)
+    k0 = inphase / i_per_kappa if i_per_kappa else 0.0
+    scale = np.array([abs(quadrature) + 1.0, abs(inphase) + 1.0])
+
+    def residual(p):
+        z = forward_ppm(frequency, [np.exp(p[0])], [p[1]], sensor=sensor)[0]
+        return (np.array([z.imag, z.real]) - [quadrature, inphase]) / scale
+
+    sol = least_squares(residual, [np.log(s0), k0], method="lm", xtol=1e-12, ftol=1e-12)
+    return float(np.exp(sol.x[0])), float(sol.x[1])
+
+
+def skin_depth(sigma: float, frequency: float) -> float:
+    """Plane-wave skin depth sqrt(2 / (w mu0 sigma)) in m."""
+    if sigma <= 0:
+        return float("inf")
+    return float(np.sqrt(2.0 / (2 * np.pi * frequency * MU0 * sigma)))
+
+
+def induction_number(sigma: float, frequency: float, sensor: Sensor = GEM2) -> float:
+    """B = separation / skin depth; LIN holds for B << 1."""
+    return float(sensor.separation / skin_depth(sigma, frequency))
+
+
+def cumulative_sensitivity(
+    frequency: float, sigma: float, depths, sensor: Sensor = GEM2
+) -> np.ndarray:
+    """
+    Fraction of the half-space quadrature response that comes from below each
+    depth: Q(resistive layer of thickness z over sigma) / Q(half-space sigma).
+    """
+    full = forward_ppm(frequency, [sigma], sensor=sensor).imag[0]
+    out = []
+    for z in np.atleast_1d(depths):
+        if z <= 0:
+            out.append(1.0)
+            continue
+        q = forward_ppm(frequency, [1e-8, sigma], thickness=[z], sensor=sensor).imag[0]
+        out.append(q / full)
+    return np.asarray(out, dtype=float)
+
+
+def depth_of_investigation(
+    frequency: float, sigma: float, sensor: Sensor = GEM2, fraction: float = 0.3
+) -> float:
+    """Depth below which only `fraction` of the quadrature response originates."""
+    depths = np.geomspace(0.01, 100.0, 200)
+    c = cumulative_sensitivity(frequency, sigma, depths, sensor)
+    below = np.nonzero(c <= fraction)[0]
+    if below.size == 0:
+        return float("inf")
+    i = below[0]
+    if i == 0:
+        return float(depths[0])
+    # log-linear interpolation between the bracketing depths
+    x0, x1 = np.log(depths[i - 1]), np.log(depths[i])
+    t = (c[i - 1] - fraction) / (c[i - 1] - c[i])
+    return float(np.exp(x0 + t * (x1 - x0)))
+
+

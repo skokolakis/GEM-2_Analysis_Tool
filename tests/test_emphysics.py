@@ -60,3 +60,31 @@ def test_identical_layers_equal_halfspace():
     three = E.forward_ppm(FREQS, [0.03, 0.03, 0.03], thickness=[0.4, 2.0])
     np.testing.assert_allclose(three, one, rtol=1e-6)
 
+
+def test_deep_layer_matters_less_at_high_frequency_never_negative_sensitivity():
+    c = E.cumulative_sensitivity(5325.0, 0.02, [0.0, 0.5, 1, 2, 4, 8, 16])
+    assert c[0] == 1.0
+    assert np.all(np.diff(c) < 0)
+    assert 0 < c[-1] < 0.1
+
+
+def test_ppm_round_trip_recovers_halfspace():
+    for f in FREQS:
+        for sigma, kappa in [(0.005, 0.0), (0.05, 2e-3), (0.5, 1e-4)]:
+            z = E.forward_ppm(f, [sigma], [kappa])[0]
+            s_est, k_est = E.halfspace_from_ppm(f, z.real, z.imag)
+            assert s_est == pytest.approx(sigma, rel=1e-4)
+            assert k_est == pytest.approx(kappa, abs=1e-6)
+
+
+def test_skin_depth_and_induction_number():
+    assert E.skin_depth(0.01, 10_000.0) == pytest.approx(50.33, rel=1e-3)
+    assert E.induction_number(0.01, 10_000.0) == pytest.approx(1.66 / 50.33, rel=1e-3)
+    assert E.skin_depth(0.0, 10_000.0) == float("inf")
+
+
+def test_depth_of_investigation_is_finite_and_shallower_at_higher_height_no():
+    d = E.depth_of_investigation(5325.0, 0.02)
+    assert 0.5 < d < 5.0
+
+
