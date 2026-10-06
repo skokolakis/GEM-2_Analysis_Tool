@@ -48,3 +48,14 @@ def test_is_gem_format_accepts_iq_only_export():
     assert not R.is_gem_format(pd.DataFrame({"Line": [0], "Y": [0.0], "PowerLn": [1.0]}))
 
 
+def test_overview_legend_without_scores_and_markers():
+    interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
+    fig = R.make_overview_figure(
+        {"f": interp}, {"f": {"score": 3.0}}, "EC", "x", is_gem=True,
+        show_scores=False, markers=[0.5],
+    )
+    labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert labels == ["f", "Event marker"]
+    plt.close(fig)
+
+

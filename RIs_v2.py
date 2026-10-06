@@ -615,9 +615,18 @@ def process_file(
 # Plot helpers (return Figure objects, never touch global pyplot state)
 # ---------------------------------------------------------------------------
 
-def profile_label(mode: str, is_gem: bool) -> str:
+def profile_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
     """Y-axis label for mean profiles: GEM units are known, legacy units are not."""
-    return f"Mean {ctr.value_label(mode, is_gem)}"
+    if mode == "AUX" and channel is None:
+        return "Mean value (units in legend)"
+    return f"Mean {ctr.value_label(mode, is_gem, channel)}"
+
+
+def _draw_markers(ax: plt.Axes, markers: list[float] | None) -> None:
+    """Dotted vertical line at each event-marker distance."""
+    for i, m in enumerate(markers or []):
+        ax.axvline(m, color="0.4", linestyle=":", linewidth=0.8,
+                   label="Event marker" if i == 0 else None)
 
 
 def make_overview_figure(
@@ -627,8 +636,10 @@ def make_overview_figure(
     file_name: str,
     opts: GraphOptions | None = None,
     is_gem: bool = False,
+    show_scores: bool = True,
+    markers: list[float] | None = None,
 ) -> plt.Figure:
-    """All representative profiles on one axes."""
+    """All representative profiles on one axes; scores in the legend when *show_scores*."""
     if opts is None:
         opts = GraphOptions()
 
@@ -643,16 +654,19 @@ def make_overview_figure(
             continue
         rep_prof = interp_df.mean(axis=1, skipna=True)
         common_dist = interp_df.index.values
-        sc = scores[sheet_name]["score"]
+        name = ctr.value_label(mode, is_gem, sheet_name) if mode == "AUX" else sheet_name
+        if show_scores:
+            name = f"{name} (score={scores[sheet_name]['score']:.2f})"
         if not np.all(np.isnan(rep_prof.values)):
             ax.plot(
                 common_dist,
                 rep_prof.values,
-                label=f"{sheet_name} (score={sc:.2f})",
+                label=name,
                 linewidth=opts.line_width,
                 linestyle=opts.line_style,
             )
 
+    _draw_markers(ax, markers)
     ax.set_xlabel(opts.x_label or "Distance (m)")
     ax.set_ylabel(opts.y_label or y_label)
     ax.set_title(opts.plot_title or f"Representative profiles [{mode}] — {file_name}")
@@ -672,6 +686,7 @@ def make_sheet_figure(
     mode: str,
     opts: GraphOptions | None = None,
     is_gem: bool = False,
+    markers: list[float] | None = None,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean +/- 1 sigma envelope."""
     if opts is None:
@@ -716,8 +731,9 @@ def make_sheet_figure(
             label="±1σ",
         )
 
+    _draw_markers(ax, markers)
     ax.set_xlabel(opts.x_label or "Distance (m)")
-    ax.set_ylabel(opts.y_label or profile_label(mode, is_gem))
+    ax.set_ylabel(opts.y_label or profile_label(mode, is_gem, sheet_name))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
     ax.grid(opts.show_grid, alpha=0.4)
