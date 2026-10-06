@@ -463,3 +463,124 @@ def heading_mask(df: pd.DataFrame, center: float, tolerance: float) -> np.ndarra
     return np.isfinite(h) & (diff <= tolerance)
 
 
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
+
+def _per_line(df: pd.DataFrame, col: str, func) -> tuple[np.ndarray, int]:
+    v = _numeric(df, col)
+    total = 0
+    for idx in _by_line(df):
+        v[idx], n = func(v[idx])
+        total += n
+    return v, total
+
+
+def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Runs the enabled corrections in this order: despike, clip, sensor height,
+    temperature, drift, background offset, reference calibration, EC at
+    25 °C, PCA, smoothing, GPS lag, heading filter. Returns (table, messages).
+    Raises ValueError when an enabled step cannot run (missing columns).
+    """
+    out = df.copy()
+    msgs: list[str] = []
+    cols = channel_columns(out)
+
+    if s.despike:
+        total = 0
+        for col in cols:
+            out[col], n = _per_line(
+                out, col, lambda v: despike_series(v, s.despike_window, s.despike_threshold)
+            )
+            total += n
+        msgs.append(f"Despiking blanked {total} reading(s) across {len(cols)} channel(s).")
+
+    if s.clip_percentiles:
+        lo, hi = s.clip_percentiles
+        total = 0
+        for col in cols:
+            out[col], n = clip_to_percentiles(_numeric(out, col), lo, hi)
+            total += n
+        msgs.append(f"Clipping to the {lo:g}–{hi:g} percentile range blanked {total} value(s).")
+
+    if s.altitude_column:
+        if s.altitude_column not in out.columns:
+            raise ValueError(f"Altitude column '{s.altitude_column}' not found.")
+        h = _numeric(out, s.altitude_column)
+        ref = s.altitude_reference if s.altitude_reference is not None else float(np.nanmedian(h))
+        models = []
+        for col in cols:
+            out[col], model = correct_height(_numeric(out, col), h, ref)
+            models.append(model)
+        msgs.append(
+            f"Sensor-height correction to {ref:.3g} m from '{s.altitude_column}' "
+            f"({models.count('exponential')} exponential, {models.count('linear')} linear fits)."
+        )
+
+    if s.temperature_column:
+        out, m = correct_temperature(out, s.temperature_column, s.drift_lines)
+        msgs += m
+
+    if s.drift_lines:
+        out, m = correct_drift(out, s.drift_lines, s.drift_model)
+        msgs += m
+
+    if s.ec_background is not None:
+        shifts = []
+        for col in channel_columns(out, ("EC",)):
+            v = _numeric(out, col)
+            shift = s.ec_background - float(np.nanmedian(v))
+            out[col] = v + shift
+            shifts.append(f"{col}: {shift:+.4g}")
+        msgs.append("Shifted EC channels to the known background — " + "; ".join(shifts))
+
+    if s.reference:
+        ref = pd.read_csv(io.BytesIO(s.reference))
+        fits = fit_reference_calibration(out, ref, s.reference_radius, s.reference_method)
+        if not fits:
+            msgs.append("Reference calibration: no channel had 3 or more matched points; nothing applied.")
+        for f in fits:
+            out[f["column"]] = f["gain"] * _numeric(out, f["column"]) + f["offset"]
+            msgs.append(
+                f"Calibrated {f['column']}: gain {f['gain']:.4g}, offset {f['offset']:+.4g} "
+                f"(R² {f['r2']:.3f}, {f['n']} reference points, {s.reference_method})."
+            )
+
+    if s.soil_temperature is not None:
+        for col in channel_columns(out, ("EC",)):
+            out[col] = ec_at_25(_numeric(out, col), s.soil_temperature)
+        msgs.append(f"EC converted to 25 °C from a soil temperature of {s.soil_temperature:g} °C.")
+
+    if s.pca_components > 0:
+        for mode in gem_io.FREQUENCY_MODES:
+            mcols = channel_columns(out, (mode,))
+            if len(mcols) <= s.pca_components:
+                continue
+            values, kept = pca_denoise(out[mcols].apply(pd.to_numeric, errors="coerce").to_numpy(),
+                                       s.pca_components)
+            out[mcols] = values
+            msgs.append(
+                f"PCA noise reduction on {mode}: kept {s.pca_components} of {len(mcols)} "
+                f"components ({100 * kept:.1f} % of the variance)."
+            )
+
+    if s.smooth_window > 1:
+        for col in cols:
+            out[col], _ = _per_line(out, col, lambda v: (running_mean(v, s.smooth_window), 0))
+        msgs.append(f"Running mean over {s.smooth_window} readings.")
+
+    if s.lag_seconds:
+        out = shift_positions(out, _require_time(out, "GPS lag correction"), s.lag_seconds)
+        msgs.append(f"Positions shifted for a GPS lag of {s.lag_seconds:+.2f} s.")
+
+    if s.bearing_center is not None:
+        keep = heading_mask(out, s.bearing_center, s.bearing_tolerance)
+        msgs.append(
+            f"Heading filter kept {int(keep.sum())} of {len(out)} reading(s) "
+            f"({s.bearing_center:g}° ± {s.bearing_tolerance:g}°)."
+        )
+        out = out.loc[keep].reset_index(drop=True)
+
+    return out, msgs

@@ -155,3 +155,26 @@ def test_heading_filter_keeps_one_direction():
     assert set(df.loc[keep, "Line"]) == {0, 2, 4}
 
 
+# ── pipeline ─────────────────────────────────────────────────────────────────
+
+def test_background_offset_and_soil_temperature_in_pipeline():
+    df = _survey()
+    s = C.CorrectionSettings(ec_background=30.0)
+    out, msgs = C.apply_corrections(df, s)
+    assert np.median(out["EC1525Hz[mS/m]"]) == pytest.approx(30.0)
+    assert out["MSusc1525Hz[1/1000]"].equals(df["MSusc1525Hz[1/1000]"])
+
+
+def test_corrections_reported_and_scores_flagged_through_pipeline():
+    prep = pipeline.PrepSettings(corrections=C.CorrectionSettings(smooth_window=5, despike=True))
+    out, msgs = pipeline.prepare_gem_table(_survey(), prep)
+    assert any("Running mean over 5" in m for m in msgs)
+    assert any("Despiking blanked" in m for m in msgs)
+    assert prep.corrections.lowers_noise
+
+
+def test_inactive_settings_change_nothing():
+    df = _survey()
+    out, msgs = pipeline.prepare_gem_table(df, pipeline.PrepSettings())
+    assert not msgs
+    pd.testing.assert_frame_equal(out.drop(columns=pipeline.DISTANCE_COL), df)

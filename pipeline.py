@@ -1,6 +1,6 @@
 """
 Preparation of a raw GEM table before profiles and maps are built: quality
-flags and distance along each line.
+flags, corrections and filters, and distance along each line.
 
 Pure functions only (no Streamlit). Every step reports what it changed in
 plain-language messages that the app shows as warnings.
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+import corrections
 import gem_io
 
 DISTANCE_COL = gem_io.DISTANCE_COL   # column added by prepare_gem_table
@@ -25,6 +26,7 @@ class PrepSettings:
     distance_method: str = "Y"        # key of gem_io.DISTANCE_METHODS
     distance_spacing: float = 1.0     # m, for "sample" and "markers"
     coord_mode: str = "auto"          # "auto" | "metres" | "degrees"
+    corrections: corrections.CorrectionSettings = corrections.CorrectionSettings()
 
 
 def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tuple[pd.DataFrame, list[str]]:
@@ -52,6 +54,10 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
                 f"Dropped {n_flagged} reading(s) with a non-zero Status flag "
                 "(the instrument reports a problem such as ADC overload)."
             )
+
+    if prep.corrections.active:
+        df, steps = corrections.apply_corrections(df, prep.corrections)
+        messages.extend(steps)
 
     if order_based:
         distance = df[DISTANCE_COL].to_numpy(dtype=float)
