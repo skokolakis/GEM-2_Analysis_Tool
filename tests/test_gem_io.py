@@ -110,3 +110,14 @@ def test_projection_without_coordinates_raises():
     df = pd.DataFrame({"Line": [0, 1], "Y": [0.0, 1.0]})
     with pytest.raises(ctr.ContouringError):
         G.along_track_distance(df, "projection")
+
+
+def test_time_seconds_from_ms_and_hhmmss_with_midnight():
+    df = pd.DataFrame({"Time[hhmmss.sss]": [235959.5, 0.5, 1.0]})
+    np.testing.assert_allclose(G.time_seconds(df), [86399.5, 86400.5, 86401.0])
+    df = pd.DataFrame({"Time[ms]": [1000.0, 2500.0]})
+    np.testing.assert_allclose(G.time_seconds(df), [1.0, 2.5])
+    assert G.time_seconds(pd.DataFrame({"x": [1]})) is None
+
+
+# ── filters ─────────────────────────────────────────────────────────────────

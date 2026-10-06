@@ -73,6 +73,26 @@ def channel_column(mode: str, label: str) -> str:
     raise ValueError(f"Unknown mode: {mode!r}")
 
 
+def time_seconds(df: pd.DataFrame) -> np.ndarray | None:
+    """
+    Time of each reading in seconds since the first midnight, from Time[ms]
+    (milliseconds of the day) or Time[hhmmss.sss]; None if neither column
+    exists. Passing midnight adds a day so time keeps increasing.
+    """
+    if "Time[ms]" in df.columns:
+        t = pd.to_numeric(df["Time[ms]"], errors="coerce").to_numpy(dtype=float) / 1000.0
+    elif "Time[hhmmss.sss]" in df.columns:
+        v = pd.to_numeric(df["Time[hhmmss.sss]"], errors="coerce").to_numpy(dtype=float)
+        hours = np.floor(v / 10000.0)
+        minutes = np.floor(v / 100.0) % 100.0
+        t = hours * 3600.0 + minutes * 60.0 + (v - hours * 10000.0 - minutes * 100.0)
+    else:
+        return None
+    steps = np.diff(np.nan_to_num(t, nan=0.0))
+    days = np.concatenate([[0.0], np.cumsum(steps < -43200.0)])
+    return t + 86400.0 * days
+
+
 def drop_flagged_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """Removes readings with a non-zero Status (e.g. ADC overload). Returns (table, number removed)."""
     if "Status" not in df.columns:
