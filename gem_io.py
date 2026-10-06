@@ -106,13 +106,15 @@ def marker_rows(df: pd.DataFrame, line_col: str = "Line") -> np.ndarray:
     """
     Boolean mask of event-marker readings: the Mark value differs from the
     previous reading of the same line and is not 0. Works whether Mark is a
-    running counter or is set only on the flagged reading.
+    running counter or is set only on the flagged reading. A marker on the
+    first reading of a line cannot be told apart from a running counter's
+    starting value, so it is not detected.
     """
     if "Mark" not in df.columns:
         return np.zeros(len(df), dtype=bool)
     mark = pd.to_numeric(df["Mark"], errors="coerce")
     previous = mark.groupby(df[line_col], sort=False).shift(1)
-    return (previous.notna() & (mark != previous) & (mark != 0)).to_numpy()
+    return (mark.notna() & previous.notna() & (mark != previous) & (mark != 0)).to_numpy()
 
 
 def marker_distances(df: pd.DataFrame, distance: np.ndarray, line_col: str = "Line") -> list[float]:
@@ -134,6 +136,32 @@ def _local_xy(df: pd.DataFrame, coord_mode: str) -> tuple[np.ndarray, np.ndarray
         if ok.any():
             x[ok], y[ok], _ = ctr.project_to_local_metres(x[ok], y[ok])
     return x, y
+
+
+def _line_axis(x: np.ndarray, y: np.ndarray, ok: np.ndarray, df: pd.DataFrame,
+               line_col: str) -> np.ndarray | None:
+    """
+    Mean direction of the survey lines: the main axis of each line, flipped to
+    agree with the lines before it and weighted by its number of readings.
+    None when no line has two distinct positions.
+    """
+    total = None
+    for idx in df.groupby(line_col, sort=False).indices.values():
+        i = idx[ok[idx]]
+        if len(i) < 2:
+            continue
+        pts = np.column_stack([x[i], y[i]])
+        pts = pts - pts.mean(axis=0)
+        if not np.any(pts):
+            continue
+        _, vecs = np.linalg.eigh(pts.T @ pts)
+        v = vecs[:, -1] * len(i)
+        if total is not None and v @ total < 0:
+            v = -v
+        total = v if total is None else total + v
+    if total is None or not np.any(total):
+        return None
+    return total / np.linalg.norm(total)
 
 
 def _marker_distance(df: pd.DataFrame, spacing: float, line_col: str) -> np.ndarray:
@@ -166,8 +194,9 @@ def along_track_distance(
     Distance of every reading along its survey line, in metres.
 
     Y          : the Y column as exported (WinGEM grid surveys).
-    projection : coordinates projected on the main axis of the survey, so
-                 repeat passes walked in either direction share distances.
+    projection : coordinates projected on the mean direction of the survey
+                 lines, so repeat passes walked in either direction share
+                 distances.
     path       : cumulative path length from each line's first reading.
     sample     : reading number within the line x spacing.
     markers    : dead reckoning between event markers placed `spacing` apart.
@@ -189,8 +218,10 @@ def along_track_distance(
     if method == "projection":
         pts = np.column_stack([x[ok], y[ok]])
         centred = pts - pts.mean(axis=0)
-        _, vecs = np.linalg.eigh(np.cov(centred.T))
-        axis = vecs[:, -1]
+        axis = _line_axis(x, y, ok, df, line_col)
+        if axis is None:                          # no line has two positions
+            _, vecs = np.linalg.eigh(np.cov(centred.T))
+            axis = vecs[:, -1]
         if axis[np.argmax(np.abs(axis))] < 0:     # increase eastward / northward
             axis = -axis
         proj = centred @ axis

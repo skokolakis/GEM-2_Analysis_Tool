@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -848,7 +848,7 @@ def build_batch_xlsx(
             data_df = mean_profiles_table(output_data, label_len=20)
 
             # Sheet name: "{stem}_{mode}", truncated to 31 chars
-            raw_sheet = f"{stem}_{mode}"
+            raw_sheet = excel_sheet_title(f"{stem}_{mode}")
             sheet_name = raw_sheet[:EXCEL_SHEET_NAME_MAX]
             # Deduplicate sheet names (multiple files could share a stem)
             existing = writer.sheets.keys()
@@ -893,8 +893,9 @@ def build_all_methods_batch_xlsx(
     score_rows: list[dict] = []
 
     def _unique_sheet(name: str, existing: "KeysView[str]") -> str:
-        """Truncate to 31 chars and deduplicate."""
-        candidate = name[:EXCEL_SHEET_NAME_MAX]
+        """Excel-safe, at most 31 chars, deduplicated."""
+        name = excel_sheet_title(name)
+        candidate = name
         suffix = 2
         while candidate in existing:
             tag = f"_{suffix}"
@@ -1644,7 +1645,7 @@ def render_gem_results(
     try:
         table, _ = prepared_table(file_bytes, file_name, prep)
         markers = gem_io.marker_distances(table, table[pipeline.DISTANCE_COL].to_numpy())
-    except Exception:  # preparation problems are already listed in the warnings
+    except (ValueError, KeyError):  # preparation problems are already listed in the warnings
         markers = []
 
     st.caption("GEM format detected — showing every channel in the file")
@@ -1726,6 +1727,7 @@ def main():
 
         prep = render_data_sidebar()
         contour = render_contouring_sidebar()
+        prep = replace(prep, coord_mode=contour.coord_mode)   # one coordinate choice for all
 
         st.divider()
         st.markdown("**Output files are available for download after processing.**")

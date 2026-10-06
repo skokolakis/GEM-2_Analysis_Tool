@@ -15,6 +15,7 @@ import pandas as pd
 import gem_io
 
 DISTANCE_COL = gem_io.DISTANCE_COL   # column added by prepare_gem_table
+READING_ORDER_METHODS = ("sample", "markers")   # distances that count every logged reading
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,14 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
     messages: list[str] = []
     df = raw.copy()
 
+    # Reading-order distances count every logged reading, so they are computed
+    # before flagged, filtered or excluded readings are dropped.
+    order_based = prep.distance_method in READING_ORDER_METHODS
+    if order_based:
+        df[DISTANCE_COL] = gem_io.along_track_distance(
+            df, prep.distance_method, prep.distance_spacing, prep.coord_mode
+        )
+
     if prep.drop_flagged:
         df, n_flagged = gem_io.drop_flagged_rows(df)
         if n_flagged:
@@ -44,9 +53,12 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
                 "(the instrument reports a problem such as ADC overload)."
             )
 
-    distance = gem_io.along_track_distance(
-        df, prep.distance_method, prep.distance_spacing, prep.coord_mode
-    )
+    if order_based:
+        distance = df[DISTANCE_COL].to_numpy(dtype=float)
+    else:
+        distance = gem_io.along_track_distance(
+            df, prep.distance_method, prep.distance_spacing, prep.coord_mode
+        )
     if prep.distance_method != "Y":
         n_blank = int(np.isnan(distance).sum())
         if n_blank:

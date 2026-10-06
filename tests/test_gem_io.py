@@ -73,6 +73,11 @@ def test_marker_rows_for_both_mark_styles(marks):
     assert np.nonzero(G.marker_rows(df))[0].tolist() == [2, 5, 8]
 
 
+def test_marker_rows_ignore_missing_marks():
+    df = _export(lines=1, n=6, mark=[0, 0, np.nan, 0, 5, 5])
+    assert np.nonzero(G.marker_rows(df))[0].tolist() == [4]
+
+
 def test_marker_distances_deduplicated():
     df = _export(lines=2, mark=[0, 0, 7, 0, 0, 8, 0, 0, 0, 9, 0] * 2)
     assert G.marker_distances(df, df["Y"].to_numpy()) == [2.0, 5.0, 9.0]
@@ -93,6 +98,12 @@ def test_projection_distance_shares_axis_for_reverse_passes():
     d = G.along_track_distance(pd.concat([a, b], ignore_index=True), "projection", coord_mode="metres")
     np.testing.assert_allclose(d[:31], t, atol=0.2)
     np.testing.assert_allclose(d[31:], t[::-1], atol=0.2)
+
+
+def test_projection_follows_line_direction_on_wide_grids():
+    rows = [pd.DataFrame({"Line": k, "X": float(k), "Y": np.linspace(0, 20, 41)}) for k in range(50)]
+    d = G.along_track_distance(pd.concat(rows, ignore_index=True), "projection", coord_mode="metres")
+    np.testing.assert_allclose(d.reshape(50, 41), np.tile(np.linspace(0, 20, 41), (50, 1)), atol=1e-9)
 
 
 def test_path_distance_restarts_on_each_line():

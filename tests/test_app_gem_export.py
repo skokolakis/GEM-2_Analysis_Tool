@@ -74,6 +74,13 @@ def test_excel_download_accepts_bracketed_channel_names():
     assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["TotalEC_mS_m_"]
 
 
+def test_batch_sheet_names_are_sanitised():
+    interp = pd.DataFrame({"a": [1.0, 2.0]}, index=[0.0, 1.0])
+    entry = {"stem": "site[1]", "mode": "EC", "output_data": {"x": interp}, "scores": {}}
+    xlsx = R.build_batch_xlsx([entry], include_scores=False)
+    assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["site_1__EC"]
+
+
 def test_scoring_off_shows_channels_not_ranking():
     at = AppTest.from_function(_full_export, kwargs={"scoring": False}, default_timeout=120)
     at.run()
