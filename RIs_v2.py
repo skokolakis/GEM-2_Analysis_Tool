@@ -131,21 +131,26 @@ def pivot_gem_frequency(
 
     Returns a DataFrame with column 0 = distance (Y values) and
     columns 1+ = one column per unique Line value.
+
+    Repeated readings at the same Y within a line keep only the first reading:
+    averaging them would lower that trace's noise alone (biasing the
+    between-trace σ) and silently merge a line walked out-and-back.
     """
     subset = df[[distance_col, line_col, value_col]].copy()
     subset[distance_col] = pd.to_numeric(subset[distance_col], errors="coerce")
     subset[value_col] = pd.to_numeric(subset[value_col], errors="coerce")
     subset = subset.dropna(subset=[distance_col, value_col])
+    subset = subset.drop_duplicates(subset=[line_col, distance_col], keep="first")
 
     pivoted = subset.pivot_table(
         index=distance_col,
         columns=line_col,
         values=value_col,
-        aggfunc="mean",
+        aggfunc="first",
     )
 
-    # Rename columns to "Line_0", "Line_1", etc.
-    pivoted.columns = [f"Line_{int(c)}" for c in pivoted.columns]
+    # Rename columns to "Line_0", "Line_1", "Line_L1", etc.
+    pivoted.columns = [f"Line_{c}" for c in pivoted.columns]
 
     # Reset index so column 0 = distance (what process_sheet expects)
     pivoted = pivoted.reset_index()
@@ -154,15 +159,30 @@ def pivot_gem_frequency(
 
 def parse_gem_dataframe(
     df: pd.DataFrame,
+    warnings: list[str] | None = None,
 ) -> dict[str, dict[str, pd.DataFrame]]:
     """
     Parse a GEM-format DataFrame into pivoted DataFrames per mode and frequency.
+
+    Pivoting messages (e.g. dropped duplicate readings) are appended to *warnings*.
 
     Returns
     -------
     {"EC": {"4525Hz": pivoted_df, ...}, "MS": {"4525Hz": pivoted_df, ...}}
     """
     result: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
+
+    if warnings is not None:
+        y = pd.to_numeric(df["Y"], errors="coerce")
+        keyed = pd.DataFrame({"Line": df["Line"], "Y": y}).dropna(subset=["Y"])
+        dup = keyed.duplicated(keep="first")
+        if dup.any():
+            warnings.append(
+                f"{int(dup.sum())} repeated reading(s) at the same Y within "
+                f"{keyed.loc[dup, 'Line'].nunique()} line(s): kept the first reading "
+                "of each. If a line was walked out-and-back under one Line number, "
+                "give each direction its own Line."
+            )
 
     for col in df.columns:
         col_str = str(col)
@@ -237,7 +257,7 @@ def process_gem_file(
                 "Use the XLSX file for full instrument precision."
             )
 
-    gem_data = parse_gem_dataframe(raw_df)
+    gem_data = parse_gem_dataframe(raw_df, warnings)
 
     output_data: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
     scores: dict[str, dict[str, dict]] = {"EC": {}, "MS": {}}
@@ -369,17 +389,17 @@ def process_sheet(
             log.debug("  Column %s: fewer than 2 valid points, skipped.", col)
             continue
 
-        df_xy = (
-            pd.DataFrame({"d": distance[mask], "y": y[mask]})
-            .groupby("d", as_index=False)
-            .mean()
-            .sort_values("d")
-            .drop_duplicates(subset="d")
+        # Keep the first reading at a repeated distance rather than averaging:
+        # averaging lowers this trace's noise alone and biases the between-trace σ.
+        df_xy = pd.DataFrame({"d": distance[mask], "y": y[mask]}).sort_values(
+            "d", kind="stable"
         )
-
-        if not df_xy["d"].is_monotonic_increasing:
-            col_warnings.append(f"column '{col}': distance not monotonic after dedup, skipped")
-            continue
+        n_dup = int(df_xy["d"].duplicated().sum())
+        if n_dup:
+            col_warnings.append(
+                f"column '{col}': {n_dup} repeated distance value(s), kept the first reading"
+            )
+            df_xy = df_xy.drop_duplicates(subset="d", keep="first")
 
         if df_xy.shape[0] < 2:
             continue
