@@ -71,3 +71,34 @@ def test_plot_axes_carry_correct_units(mode, is_gem, expected):
     fig = R.make_sheet_figure("f", interp, mode, is_gem=is_gem)
     assert fig.axes[0].get_ylabel() == expected
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Batch export registration (#9)
+# ---------------------------------------------------------------------------
+
+def _offset_sheets():
+    a = pd.DataFrame({"d": np.arange(0, 50.5, 0.5), "L": np.arange(101.0)})
+    b = pd.DataFrame({"d": np.arange(10, 60.5, 0.5), "L": np.arange(101.0)})
+    oa, sa, *_ = R.process_sheet(a, 0.5, "linear")
+    ob, sb, *_ = R.process_sheet(b, 0.5, "linear")
+    return {"s1": oa, "s2": ob}, {"s1": sa, "s2": sb}
+
+
+def test_batch_export_keeps_each_frequency_on_its_own_distances():
+    out, sc = _offset_sheets()
+    xlsx = R.build_batch_xlsx([{"stem": "f", "mode": "EC", "output_data": out, "scores": sc}])
+    sheet = pd.read_excel(io.BytesIO(xlsx), sheet_name="f_EC").set_index("Distance (m)")
+    assert sheet.index.min() == 0 and sheet.index.max() == 60
+    assert sheet.loc[10.0, "s2_mean"] == 0.0         # s2 starts at 10 m
+    assert np.isnan(sheet.loc[5.0, "s2_mean"])
+    assert np.isnan(sheet.loc[55.0, "s1_mean"])
+
+
+def test_batch_export_handles_grids_of_different_length():
+    out, sc = _offset_sheets()
+    short = pd.DataFrame({"d": np.arange(0, 20.5, 0.5), "L": np.arange(41.0)})
+    out["s3"], sc["s3"], *_ = R.process_sheet(short, 0.5, "linear")
+    xlsx = R.build_batch_xlsx([{"stem": "f", "mode": "EC", "output_data": out, "scores": sc}])
+    sheet = pd.read_excel(io.BytesIO(xlsx), sheet_name="f_EC")
+    assert len(sheet) == 121 and sheet["s3_mean"].notna().sum() == 41

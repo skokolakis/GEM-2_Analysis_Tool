@@ -647,6 +647,25 @@ def build_scores_csv(scores: dict[str, dict]) -> bytes:
     return df.to_csv().encode()
 
 
+def mean_profiles_table(output_data: dict[str, pd.DataFrame], label_len: int) -> pd.DataFrame:
+    """
+    One "Distance (m)" column plus one "{freq}_mean" column per frequency/sheet.
+
+    Each frequency keeps its own distance grid: profiles are outer-joined on
+    distance, so a frequency is blank where it has no data rather than being
+    written against another frequency's distances.
+    """
+    profiles = {}
+    for freq, interp_df in output_data.items():
+        prof = interp_df.mean(axis=1, skipna=True)
+        # Round so grids that coincide up to float noise share rows
+        prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
+        profiles[f"{freq[:label_len]}_mean"] = prof
+    table = pd.concat(profiles, axis=1).sort_index()
+    table.index.name = "Distance (m)"
+    return table.reset_index()
+
+
 def build_batch_xlsx(
     all_results: list[dict],
 ) -> bytes:
@@ -692,17 +711,7 @@ def build_batch_xlsx(
             if not output_data:
                 continue
 
-            # All frequencies share the same distance grid within a file/mode
-            first_df = next(iter(output_data.values()))
-            dist_col = first_df.index.values
-
-            data_sheet: dict[str, np.ndarray] = {"Distance (m)": dist_col}
-            for freq, interp_df in output_data.items():
-                rep_prof = interp_df.mean(axis=1, skipna=True).values
-                col_label = f"{freq[:20]}_mean"
-                data_sheet[col_label] = rep_prof
-
-            data_df = pd.DataFrame(data_sheet)
+            data_df = mean_profiles_table(output_data, label_len=20)
 
             # Sheet name: "{stem}_{mode}", truncated to 31 chars
             raw_sheet = f"{stem}_{mode}"
@@ -801,14 +810,11 @@ def build_all_methods_batch_xlsx(
                     # Data sheet: Distance + one mean column per frequency
                     if not output_data:
                         continue
-                    first_df = next(iter(output_data.values()))
-                    data: dict[str, np.ndarray] = {"Distance (m)": first_df.index.values}
-                    for freq, interp_df in output_data.items():
-                        data[f"{freq[:18]}_mean"] = interp_df.mean(axis=1, skipna=True).values
-
                     raw = f"{stem[:10]}_{mode_key}_{method}"
                     sheet_name = _unique_sheet(raw, writer.sheets.keys())
-                    pd.DataFrame(data).to_excel(writer, sheet_name=sheet_name, index=False)
+                    mean_profiles_table(output_data, label_len=18).to_excel(
+                        writer, sheet_name=sheet_name, index=False
+                    )
 
         # Scores summary — written last (openpyxl appends; reorder below)
         if score_rows:
