@@ -95,6 +95,24 @@ Applied to the EC, MS, I and Q channels of GEM files, before profiles and maps, 
 
 > Despiking, the running mean and PCA lower the noise σ, so with scoring on the scores rise; the sidebar warns when they are combined.
 
+---
+
+## Sensor physics
+
+The physics tools use a layered-earth forward model of the GEM-2 (`emphysics.py`): vertical magnetic dipoles (horizontal co-planar coils) over horizontal layers, quasi-static, with the bucking coil subtracted (Won et al., 1996; Ward & Hohmann, 1988). The Hankel integral is evaluated by Gauss–Legendre quadrature with its large-wavenumber limit integrated analytically; tests check it against a brute-force integral, McNeill's (1980) low-induction-number limit and the analytic static response of a susceptible half-space.
+
+**Sensor geometry** (sidebar): Tx–Rx separation (1.66 m), Tx–bucking-coil distance (1.035 m) and sensor height. Check the coil distances against your sensor's `.gem` configuration.
+
+| Tool | Where | What it does |
+|---|---|---|
+| Recompute EC / MS from I / Q | Sensor geometry → checkbox | For every frequency with `I_` and `Q_` columns, finds the homogeneous half-space (conductivity and susceptibility) that reproduces each reading (Huang & Won, 2000), for your geometry and height. Overwrites exported EC / MS; adds them to I/Q-only exports. Readings with quadrature ≤ 0 are left blank |
+| Frequency information | EC tab | Skin depth, induction number and depth of investigation (depth above which 70 % of the quadrature response originates, from the forward model) for the median EC of each frequency, with cumulative-sensitivity curves |
+| Forward model | Main page | Background and target layered models → in-phase, quadrature and apparent EC per frequency; a difference over 3 × the noise level is marked detectable. Works without an upload — use it to choose frequencies before a survey |
+| Multi-height calibration | Under each GEM file | Readings over one spot at several heights (own line(s), `Height` column) → half-space plus one additive offset per frequency and component (after Minsley et al., 2014). Download the offsets and load them as **Calibration offsets** in the sidebar |
+| Lines to leave out | GEM data | Removes calibration or test lines from profiles and maps |
+
+> Above about 40 kHz the in-phase response can include a dielectric-permittivity contribution (Benech et al., 2016); the MS and I tabs say so when such frequencies are present.
+
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
 - Column 0 = distance (metres), Columns 1+ = one per survey line/trace
@@ -257,6 +275,8 @@ The **all-methods** batch export adds a `Method` column to the `Scores` sheet an
 gem_io.py      — GEM-2 export channels, Status flags, event markers, distance along line
 pipeline.py    — PrepSettings and prepare_gem_table(): the raw table before profiles and maps
 corrections.py — despike, clip, height, drift, temperature, calibration, EC25, PCA, GPS lag, heading
+emphysics.py   — layered-earth forward model, I/Q ↔ EC/MS conversion, skin depth, sensitivity, multi-height fit
+ui_tools.py    — Streamlit panels for the physics tools
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
 ├── Configuration & constants
@@ -371,6 +391,14 @@ RIs_v2.py
 26. Dragonetti, G., Comegna, A., Ajeel, A., Deidda, G.P., Lamaddalena, N., Rodriguez, G., Vignoli, G. & Coppola, A. (2018). Calibrating electromagnetic induction conductivities with time-domain reflectometry measurements. *Hydrology and Earth System Sciences*, **22**, 1509–1523. https://doi.org/10.5194/hess-22-1509-2018
 
 27. Sheets, K.R. & Hendrickx, J.M.H. (1995). Noninvasive soil water content measurement using electromagnetic induction. *Water Resources Research*, **31**(10), 2401–2409. https://doi.org/10.1029/95WR01949
+
+28. Huang, H. & Won, I.J. (2000). Conductivity and susceptibility mapping using broadband electromagnetic sensors. *Journal of Environmental and Engineering Geophysics*, **5**(4), 31–41. https://doi.org/10.4133/JEEG5.4.31
+
+29. Ward, S.H. & Hohmann, G.W. (1988). Electromagnetic theory for geophysical applications. In M.N. Nabighian (ed.), *Electromagnetic Methods in Applied Geophysics*, Vol. 1, 131–311. Society of Exploration Geophysicists.
+
+30. Minsley, B.J., Kass, M.A., Hodges, G. & Smith, B.D. (2014). Multielevation calibration of frequency-domain electromagnetic data. *Geophysics*, **79**(5), E201–E216. https://doi.org/10.1190/GEO2013-0320.1
+
+31. Benech, C., Lombard, P., Rejiba, F. & Tabbagh, A. (2016). Demonstrating the contribution of dielectric permittivity to the in-phase EMI response of soils: example from an archaeological site in Bahrain. *Near Surface Geophysics*, **14**, 337–344. https://doi.org/10.3997/1873-0604.2016023
 
 ---
 
