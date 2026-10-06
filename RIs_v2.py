@@ -1118,8 +1118,11 @@ def _render_mode_section(
     col_table, col_best = st.columns([3, 1])
     with col_table:
         st.markdown("### Frequency Ranking")
+        styled = rank_df.style
+        if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
+            styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn")
         st.dataframe(
-            rank_df.style.background_gradient(subset=["Score"], cmap="RdYlGn"),
+            styled,
             use_container_width=True,
             hide_index=True,
         )
