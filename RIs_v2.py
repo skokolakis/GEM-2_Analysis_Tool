@@ -1454,7 +1454,8 @@ def render_lag_estimate(
 ) -> None:
     """Expander that estimates the GPS time lag from crossings of neighbouring lines."""
     with st.expander("Estimate GPS lag", expanded=False):
-        no_lag = replace(prep, corrections=replace(prep.corrections, lag_seconds=0.0))
+        no_lag = replace(prep, corrections=replace(prep.corrections, lag_seconds=0.0,
+                                                   bearing_center=None))
         try:
             table, _ = prepared_table(file_bytes, file_name, no_lag)
         except ValueError as exc:

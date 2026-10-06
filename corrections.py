@@ -24,7 +24,7 @@ import gem_io
 
 LAG_SEARCH = np.round(np.arange(-2.0, 2.0001, 0.1), 3)   # s, candidate GPS lags
 LAG_MAX_POINTS = 5000                                    # subsample for the lag search
-LAG_NEIGHBOURS = 64                                      # candidates searched for another line
+LAG_NEIGHBOURS = 64                                      # first neighbour search for another line
 MIN_OCCUPATIONS = 2                                      # base-station visits for drift
 MIN_TEMPERATURE_OCCUPATIONS = 3                          # ... for a temperature coefficient
 
@@ -120,7 +120,13 @@ def despike_series(v: np.ndarray, window: int = 5, threshold: float = 4.0) -> tu
     dev = (s - med).abs()
     scale = robust_noise(s.to_numpy())
     if not np.isfinite(scale) or scale == 0:
-        return s.to_numpy(), 0
+        # Coarsely rounded data (e.g. integer EC in CSV exports): use the
+        # rounding noise of the smallest step instead.
+        steps = np.abs(np.diff(s.dropna().to_numpy()))
+        steps = steps[steps > 0]
+        if steps.size == 0:
+            return s.to_numpy(), 0
+        scale = float(steps.min()) / math.sqrt(12.0)
     spikes = (dev > threshold * scale).to_numpy()
     out = s.to_numpy().copy()
     out[spikes] = np.nan
@@ -206,7 +212,7 @@ def correct_height(v: np.ndarray, h: np.ndarray, reference: float) -> tuple[np.n
 
 def base_station_occupations(df: pd.DataFrame, lines: tuple[str, ...]) -> list[np.ndarray]:
     """Row positions of each base-station occupation (one per listed Line label present)."""
-    labels = df["Line"].astype(str)
+    labels = gem_io.line_labels(df["Line"])
     return [np.nonzero((labels == str(lb)).to_numpy())[0] for lb in lines
             if (labels == str(lb)).any()]
 
@@ -334,6 +340,8 @@ def fit_reference_calibration(
         if pair.sum() < 3:
             continue
         m, r = measured[pair], ref[pair]
+        if np.std(m) == 0 or np.std(r) == 0:
+            continue                      # constant values: no gain can be fitted
         if method == "moments":
             gain = float(np.std(r, ddof=1) / np.std(m, ddof=1))
             offset = float(np.mean(r) - gain * np.mean(m))
@@ -377,48 +385,98 @@ def pca_denoise(values: np.ndarray, n_components: int) -> tuple[np.ndarray, floa
 # ---------------------------------------------------------------------------
 
 
+def _coordinate_pairs(df: pd.DataFrame) -> list[tuple[str, str, bool]]:
+    """Every coordinate pair in the table as (x column, y column, is degrees): Lon/Lat, then X/Y."""
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    pairs = []
+    lat = next((lower[n] for n in ctr.LAT_NAMES if n in lower), None)
+    lon = next((lower[n] for n in ctr.LON_NAMES if n in lower), None)
+    if lat is not None and lon is not None:
+        pairs.append((lon, lat, True))
+    if "x" in lower and "y" in lower:
+        x, y = _numeric(df, lower["x"]), _numeric(df, lower["y"])
+        pairs.append((lower["x"], lower["y"], ctr.looks_like_degrees(x, y)))
+    return pairs
+
+
+def _interp_extrapolate(t_new: np.ndarray, t: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Linear interpolation in sorted t that continues the first and last segments beyond the ends."""
+    out = np.interp(t_new, t, v)
+    if len(t) >= 2:
+        before, after = t_new < t[0], t_new > t[-1]
+        if before.any() and t[1] > t[0]:
+            out[before] = v[0] + (t_new[before] - t[0]) * (v[1] - v[0]) / (t[1] - t[0])
+        if after.any() and t[-1] > t[-2]:
+            out[after] = v[-1] + (t_new[after] - t[-1]) * (v[-1] - v[-2]) / (t[-1] - t[-2])
+    return out
+
+
 def shift_positions(df: pd.DataFrame, t: np.ndarray, lag: float) -> pd.DataFrame:
     """
     Corrects a GPS/sensor time lag: a reading logged at time t was measured
     where the sensor was at t - lag, so its coordinates are replaced by the
-    track position at t - lag (interpolated within each line).
+    track position at t - lag (interpolated within each line, extrapolated
+    along its end segments). Lat/Lon and X/Y are both shifted when present;
+    GPS no-fix rows (0, 0 in degrees) are left as they are.
     """
-    x_col, y_col, _ = ctr.find_coordinate_columns(df, "auto")
+    pairs = _coordinate_pairs(df)
+    if not pairs:
+        raise ctr.ContouringError("No coordinate columns (X/Y or Lat/Lon) found in this file.")
     out = df.copy()
-    x = _numeric(df, x_col)
-    y = _numeric(df, y_col)
-    nx, ny = x.copy(), y.copy()
-    for idx in _by_line(df):
-        ok = idx[np.isfinite(t[idx]) & np.isfinite(x[idx]) & np.isfinite(y[idx])]
-        if len(ok) < 2:
-            continue
-        order = ok[np.argsort(t[ok], kind="stable")]
-        nx[ok] = np.interp(t[ok] - lag, t[order], x[order])
-        ny[ok] = np.interp(t[ok] - lag, t[order], y[order])
-    out[x_col] = nx
-    out[y_col] = ny
+    for x_col, y_col, is_deg in pairs:
+        x, y = _numeric(df, x_col), _numeric(df, y_col)
+        valid = np.isfinite(t) & np.isfinite(x) & np.isfinite(y)
+        if is_deg:
+            valid &= ~((x == 0) & (y == 0))
+        nx, ny = x.copy(), y.copy()
+        for idx in _by_line(df):
+            ok = idx[valid[idx]]
+            if len(ok) < 2:
+                continue
+            order = ok[np.argsort(t[ok], kind="stable")]
+            nx[ok] = _interp_extrapolate(t[ok] - lag, t[order], x[order])
+            ny[ok] = _interp_extrapolate(t[ok] - lag, t[order], y[order])
+        out[x_col] = nx
+        out[y_col] = ny
     return out
 
 
 def _cross_line_difference(
     x: np.ndarray, y: np.ndarray, v: np.ndarray, lines: np.ndarray, probe: np.ndarray
 ) -> float:
-    """Mean |v - v_nearest| over probe readings, nearest = closest reading on another line."""
+    """
+    Mean |v - v_nearest| over probe readings, nearest = closest reading on
+    another line. The neighbour search widens until such a reading is found,
+    so dense sampling along a line cannot hide the neighbouring lines. Pairs
+    farther apart than twice the median pair distance (line ends, gaps) are
+    ignored. inf when no reading has a neighbour on another line.
+    """
     ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
     idx = np.nonzero(ok)[0]
-    probe = probe[ok[probe]]
-    if len(idx) < 2 or len(probe) == 0:
+    pending = probe[ok[probe]]
+    if len(idx) < 2 or len(pending) == 0:
         return float("inf")
     tree = cKDTree(np.column_stack([x[idx], y[idx]]))
-    k = min(LAG_NEIGHBOURS, len(idx))
-    _, j = tree.query(np.column_stack([x[probe], y[probe]]), k=k)
-    j = j.reshape(len(probe), k)
-    other = lines[idx[j]] != lines[probe][:, None]
-    found = other.any(axis=1)
-    if not found.any():
+    dists, diffs = [], []
+    k = LAG_NEIGHBOURS
+    while len(pending):
+        k_eff = min(k, len(idx))
+        d, j = tree.query(np.column_stack([x[pending], y[pending]]), k=k_eff)
+        d, j = d.reshape(len(pending), k_eff), j.reshape(len(pending), k_eff)
+        other = lines[idx[j]] != lines[pending][:, None]
+        found = other.any(axis=1)
+        first = np.argmax(other, axis=1)
+        rows = np.nonzero(found)[0]
+        dists.append(d[rows, first[rows]])
+        diffs.append(np.abs(v[idx[j[rows, first[rows]]]] - v[pending[rows]]))
+        pending = pending[~found]
+        if k_eff == len(idx):
+            break
+        k *= 4
+    d, diff = np.concatenate(dists), np.concatenate(diffs)
+    if d.size == 0:
         return float("inf")
-    first = idx[j[np.arange(len(probe)), np.argmax(other, axis=1)]]
-    return float(np.mean(np.abs(v[first[found]] - v[probe[found]])))
+    return float(np.mean(diff[d <= 2.0 * np.median(d)]))
 
 
 def estimate_lag(
@@ -429,6 +487,7 @@ def estimate_lag(
     reading and its nearest reading on another line (González Jiménez et
     al., 2022). Works best when neighbouring lines were walked in opposite
     directions. Returns (best lag, mean difference for every candidate).
+    Raises ValueError when no reading has a neighbour on another line.
     """
     t = _require_time(df, "Lag estimation")
     v = _numeric(df, column)
@@ -441,19 +500,29 @@ def estimate_lag(
         x, y, _ = xy_metres(shift_positions(df, t, float(lag)))
         cost.append(_cross_line_difference(x, y, v, lines, probe))
     cost = np.asarray(cost, dtype=float)
+    if not np.isfinite(cost).any():
+        raise ValueError("No reading has a neighbour on another line, so the lag cannot be estimated.")
     return float(lags[int(np.argmin(cost))]), cost
 
 
 def headings(df: pd.DataFrame) -> np.ndarray:
-    """Direction of travel of each reading, degrees clockwise from north (or from the +Y axis)."""
+    """
+    Walking direction of each line, from its first to its last reading, in
+    degrees clockwise from north (or from the +Y axis), given to all of its
+    readings. A per-line direction is not upset by GPS jitter or by readings
+    logged while standing still; a line walked out and back has no single
+    direction, so give each direction its own Line.
+    """
     x, y, _ = xy_metres(df)
     out = np.full(len(df), np.nan)
     for idx in _by_line(df):
-        if len(idx) < 2:
+        ok = idx[np.isfinite(x[idx]) & np.isfinite(y[idx])]
+        if len(ok) < 2:
             continue
-        dx = np.gradient(x[idx])
-        dy = np.gradient(y[idx])
-        out[idx] = np.degrees(np.arctan2(dx, dy)) % 360.0
+        dx, dy = x[ok[-1]] - x[ok[0]], y[ok[-1]] - y[ok[0]]
+        if dx == 0 and dy == 0:
+            continue
+        out[idx] = math.degrees(math.atan2(dx, dy)) % 360.0
     return out
 
 
@@ -553,7 +622,7 @@ def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataF
         ref = pd.read_csv(io.BytesIO(s.reference))
         fits = fit_reference_calibration(out, ref, s.reference_radius, s.reference_method)
         if not fits:
-            msgs.append("Reference calibration: no channel had 3 or more matched points; nothing applied.")
+            msgs.append("Reference calibration: no channel had 3 or more matched, non-constant points; nothing applied.")
         for f in fits:
             out[f["column"]] = f["gain"] * _numeric(out, f["column"]) + f["offset"]
             msgs.append(
@@ -570,6 +639,11 @@ def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataF
         for mode in gem_io.FREQUENCY_MODES:
             mcols = channel_columns(out, (mode,))
             if len(mcols) <= s.pca_components:
+                if mcols:
+                    msgs.append(
+                        f"PCA noise reduction on {mode} skipped: {len(mcols)} channel(s) for "
+                        f"{s.pca_components} component(s)."
+                    )
                 continue
             values, kept = pca_denoise(out[mcols].apply(pd.to_numeric, errors="coerce").to_numpy(),
                                        s.pca_components)

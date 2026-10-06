@@ -88,7 +88,7 @@ def time_seconds(df: pd.DataFrame) -> np.ndarray | None:
         t = hours * 3600.0 + minutes * 60.0 + (v - hours * 10000.0 - minutes * 100.0)
     else:
         return None
-    steps = np.diff(np.nan_to_num(t, nan=0.0))
+    steps = np.diff(pd.Series(t).ffill().bfill().to_numpy())   # NaN never fakes midnight
     days = np.concatenate([[0.0], np.cumsum(steps < -43200.0)])
     return t + 86400.0 * days
 
@@ -234,3 +234,13 @@ def along_track_distance(
         step = np.hypot(np.diff(x[i]), np.diff(y[i]))
         out[i] = np.concatenate([[0.0], np.cumsum(step)])
     return out
+
+
+def line_labels(lines: pd.Series) -> pd.Series:
+    """Line labels as text, whole-number floats without '.0' (7.0 -> '7'), as typed by users."""
+    def label(v):
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v)
+
+    return lines.map(label)

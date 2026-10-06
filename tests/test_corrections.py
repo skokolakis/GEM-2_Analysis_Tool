@@ -39,6 +39,13 @@ def test_despike_series_blanks_spike_only():
     assert n == 1 and np.isnan(out[20])
 
 
+def test_despike_handles_integer_rounded_data():
+    v = np.round(20 + 2 * np.sin(np.linspace(0, 3, 60)))
+    v[30] += 20
+    out, n = C.despike_series(v, 5, 4.0)
+    assert n == 1 and np.isnan(out[30])
+
+
 def test_clip_and_running_mean():
     v, n = C.clip_to_percentiles(np.arange(100.0), 5, 95)
     assert n == 10 and np.isnan(v[0]) and v[50] == 50
@@ -100,6 +107,14 @@ def test_drift_needs_two_occupations_and_time():
         C.correct_drift(table.drop(columns="Time[ms]"), ("B0", "B1"), "linear")
 
 
+def test_base_station_lines_match_float_labels():
+    table, _ = _with_base_station()
+    numbers = {"B0": 100.0, "B1": 101.0, "B2": 102.0}
+    table["Line"] = [numbers[v] if v in numbers else float(v) for v in table["Line"]]
+    _, msgs = C.correct_drift(table, ("100", "101", "102"), "piecewise")
+    assert "3 base-station occupation" in msgs[0]
+
+
 def test_temperature_coefficient_from_base_station():
     table, _ = _with_base_station(drift_per_hour=0.0, temp=[10.0, 20.0, 15.0])
     table["EC9825Hz[mS/m]"] += 0.4 * (table["Temp"] - 15.0)
@@ -121,6 +136,13 @@ def test_reference_calibration_recovers_gain_and_offset():
     assert fits[0]["offset"] == pytest.approx(-4.0, abs=0.5)
     moments = C.fit_reference_calibration(df, pts, radius=0.3, method="moments")
     assert moments[0]["gain"] == pytest.approx(1.5, rel=0.05)
+
+
+def test_reference_calibration_skips_constant_channels():
+    df = _survey(serpentine=False)
+    pts = df.iloc[::20][["X", "Y"]].copy()
+    pts["EC1525Hz[mS/m]"] = 25.0
+    assert C.fit_reference_calibration(df, pts, radius=0.3) == []
 
 
 # ── PCA ──────────────────────────────────────────────────────────────────────
@@ -153,6 +175,42 @@ def test_heading_filter_keeps_one_direction():
     df = _survey()                                     # even lines north, odd lines south
     keep = C.heading_mask(df, 0.0, 30.0)
     assert set(df.loc[keep, "Line"]) == {0, 2, 4}
+
+
+def test_estimate_lag_with_dense_sampling():
+    df = _survey(n=2001, dt=0.04)                      # 25 Hz at 0.5 m/s, lines 2 m apart
+    t = gem_io.time_seconds(df)
+    true_y = np.empty(len(df))
+    for idx in df.groupby("Line").indices.values():
+        true_y[idx] = np.interp(t[idx] - 0.5, t[idx], df["Y"].to_numpy()[idx])
+    df["EC1525Hz[mS/m]"] = 20 + 5 * np.sin(true_y / 6.0)
+    lag, _ = C.estimate_lag(df, "EC1525Hz[mS/m]")
+    assert lag == pytest.approx(0.5, abs=0.11)
+
+
+def test_estimate_lag_without_neighbouring_lines_raises():
+    with pytest.raises(ValueError, match="neighbour on another line"):
+        C.estimate_lag(_survey(n_lines=1), "EC1525Hz[mS/m]")
+
+
+def test_shift_positions_keeps_gps_no_fix_rows_and_extrapolates():
+    n = 20
+    df = pd.DataFrame({"Line": 0, "Lat": 37.9 + 1e-5 * np.arange(n), "Lon": 23.7,
+                       "X": 0.0, "Y": np.arange(n, dtype=float), "Time[ms]": 1000.0 * np.arange(n)})
+    df.loc[10, ["Lat", "Lon"]] = 0.0
+    out = C.shift_positions(df, gem_io.time_seconds(df), 1.0)
+    assert (out.loc[10, ["Lat", "Lon"]] == 0.0).all()
+    assert out["Lat"].drop(index=10).between(37.89, 37.91).all()
+    assert out["Lat"].iloc[5] == pytest.approx(37.9 + 4e-5)
+    assert out["Y"].iloc[5] == pytest.approx(4.0)           # X/Y shifted too
+    assert out["Y"].iloc[0] == pytest.approx(-1.0)          # extrapolated, not clamped
+
+
+def test_headings_use_whole_line_direction():
+    rng = np.random.default_rng(3)
+    y = np.concatenate([[0.0, 0.0, 0.0], np.arange(0, 20, 0.1)])  # stands still, then walks north
+    df = pd.DataFrame({"Line": 0, "X": rng.normal(0, 0.3, y.size), "Y": y + rng.normal(0, 0.3, y.size)})
+    assert C.heading_mask(df, 0.0, 30.0).all()
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────

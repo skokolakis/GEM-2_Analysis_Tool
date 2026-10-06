@@ -131,4 +131,6 @@ def test_time_seconds_from_ms_and_hhmmss_with_midnight():
     assert G.time_seconds(pd.DataFrame({"x": [1]})) is None
 
 
-# ── filters ─────────────────────────────────────────────────────────────────
+def test_time_seconds_ignores_missing_values():
+    df = pd.DataFrame({"Time[ms]": [5e7, np.nan, 50_001_000.0, 50_002_000.0]})
+    np.testing.assert_allclose(G.time_seconds(df), [50000, np.nan, 50001, 50002])

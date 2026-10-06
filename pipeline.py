@@ -94,7 +94,7 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
             )
 
     if prep.exclude_lines:
-        drop = df["Line"].astype(str).isin(prep.exclude_lines).to_numpy()
+        drop = gem_io.line_labels(df["Line"]).isin(prep.exclude_lines).to_numpy()
         df = df.loc[~drop].reset_index(drop=True)
         messages.append(f"Left out {int(drop.sum())} reading(s) of line(s) {', '.join(prep.exclude_lines)}.")
 
