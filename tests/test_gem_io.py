@@ -78,3 +78,35 @@ def test_marker_distances_deduplicated():
     assert G.marker_distances(df, df["Y"].to_numpy()) == [2.0, 5.0, 9.0]
 
 
+def test_marker_distance_dead_reckoning():
+    df = _export(lines=1, mark=[0, 0, 7, 0, 0, 8, 0, 0, 0, 9, 0])
+    d = G.along_track_distance(df, "markers", spacing=10.0)
+    assert np.isnan(d[:2]).all() and np.isnan(d[10])
+    np.testing.assert_allclose(d[2:10], [0, 10 / 3, 20 / 3, 10, 12.5, 15, 17.5, 20])
+
+
+def test_projection_distance_shares_axis_for_reverse_passes():
+    t = np.linspace(0, 30, 31)
+    ang = np.radians(30)
+    a = pd.DataFrame({"Line": 0, "X": t * np.cos(ang), "Y": t * np.sin(ang)})
+    b = pd.DataFrame({"Line": 1, "X": t[::-1] * np.cos(ang) + 0.2, "Y": t[::-1] * np.sin(ang)})
+    d = G.along_track_distance(pd.concat([a, b], ignore_index=True), "projection", coord_mode="metres")
+    np.testing.assert_allclose(d[:31], t, atol=0.2)
+    np.testing.assert_allclose(d[31:], t[::-1], atol=0.2)
+
+
+def test_path_distance_restarts_on_each_line():
+    df = pd.DataFrame({"Line": [0, 0, 0, 1, 1], "X": [0, 3, 3, 10, 10], "Y": [0, 4, 8, 0, 1]})
+    d = G.along_track_distance(df, "path", coord_mode="metres")
+    np.testing.assert_allclose(d, [0, 5, 9, 0, 1])
+
+
+def test_sample_distance():
+    d = G.along_track_distance(_export(lines=2, n=3), "sample", spacing=0.5)
+    np.testing.assert_allclose(d, [0, 0.5, 1.0, 0, 0.5, 1.0])
+
+
+def test_projection_without_coordinates_raises():
+    df = pd.DataFrame({"Line": [0, 1], "Y": [0.0, 1.0]})
+    with pytest.raises(ctr.ContouringError):
+        G.along_track_distance(df, "projection")

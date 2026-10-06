@@ -101,3 +101,85 @@ def marker_distances(df: pd.DataFrame, distance: np.ndarray, line_col: str = "Li
     return sorted(set(np.round(d[np.isfinite(d)], 3).tolist()))
 
 
+def _local_xy(df: pd.DataFrame, coord_mode: str) -> tuple[np.ndarray, np.ndarray]:
+    """Coordinates in metres; GPS no-fix rows (0, 0 in degrees) become NaN."""
+    x_col, y_col, is_deg = ctr.find_coordinate_columns(df, coord_mode)
+    x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
+    if is_deg:
+        nofix = (x == 0) & (y == 0)
+        x[nofix] = np.nan
+        y[nofix] = np.nan
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.any():
+            x[ok], y[ok], _ = ctr.project_to_local_metres(x[ok], y[ok])
+    return x, y
+
+
+def _marker_distance(df: pd.DataFrame, spacing: float, line_col: str) -> np.ndarray:
+    """
+    Dead reckoning: the k-th event marker of a line is at k * spacing and
+    readings between markers are spaced evenly. Readings before the first or
+    after the last marker of a line are left blank (NaN).
+    """
+    out = np.full(len(df), np.nan)
+    marks = marker_rows(df, line_col)
+    for idx in df.groupby(line_col, sort=False).indices.values():
+        fid = idx[marks[idx]]
+        if len(fid) < 2:
+            continue
+        pos = np.arange(len(idx))
+        at = np.searchsorted(idx, fid)
+        inside = (pos >= at[0]) & (pos <= at[-1])
+        out[idx[inside]] = np.interp(pos[inside], at, np.arange(len(fid)) * spacing)
+    return out
+
+
+def along_track_distance(
+    df: pd.DataFrame,
+    method: str = "Y",
+    spacing: float = 1.0,
+    coord_mode: str = "auto",
+    line_col: str = "Line",
+) -> np.ndarray:
+    """
+    Distance of every reading along its survey line, in metres.
+
+    Y          : the Y column as exported (WinGEM grid surveys).
+    projection : coordinates projected on the main axis of the survey, so
+                 repeat passes walked in either direction share distances.
+    path       : cumulative path length from each line's first reading.
+    sample     : reading number within the line x spacing.
+    markers    : dead reckoning between event markers placed `spacing` apart.
+    """
+    if method == "Y":
+        return pd.to_numeric(df["Y"], errors="coerce").to_numpy(dtype=float)
+    if method == "sample":
+        return df.groupby(line_col, sort=False).cumcount().to_numpy(dtype=float) * spacing
+    if method == "markers":
+        return _marker_distance(df, spacing, line_col)
+    if method not in ("projection", "path"):
+        raise ValueError(f"Unknown distance method: {method!r}")
+
+    x, y = _local_xy(df, coord_mode)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 2:
+        raise ctr.ContouringError("Not enough coordinates to compute distances.")
+    out = np.full(len(df), np.nan)
+    if method == "projection":
+        pts = np.column_stack([x[ok], y[ok]])
+        centred = pts - pts.mean(axis=0)
+        _, vecs = np.linalg.eigh(np.cov(centred.T))
+        axis = vecs[:, -1]
+        if axis[np.argmax(np.abs(axis))] < 0:     # increase eastward / northward
+            axis = -axis
+        proj = centred @ axis
+        out[ok] = proj - proj.min()
+        return out
+    for idx in df.groupby(line_col, sort=False).indices.values():
+        i = idx[ok[idx]]
+        if len(i) == 0:
+            continue
+        step = np.hypot(np.diff(x[i]), np.diff(y[i]))
+        out[i] = np.concatenate([[0.0], np.cumsum(step)])
+    return out
