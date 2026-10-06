@@ -62,3 +62,59 @@ def test_merge_rejects_mixed_coordinates():
         G.merge_tables([a, b], "v", 1.0)
 
 
+def test_line_axis_angle():
+    rows = [pd.DataFrame({"Line": k, "X": np.arange(20.0) * np.cos(np.radians(30)) + 3 * k,
+                          "Y": np.arange(20.0) * np.sin(np.radians(30))}) for k in range(4)]
+    assert G.line_axis_angle(pd.concat(rows, ignore_index=True)) == pytest.approx(30.0, abs=1e-6)
+
+
+def test_process_map_filters_and_messages():
+    z, cell = _bump()
+    out, msgs = G.process_map(z, cell, "low-pass", 3)
+    assert out.shape == z.shape and "Low-pass" in msgs[0]
+    out, msgs = G.process_map(z, cell, "none", deconvolve_footprint=True)
+    assert "Deconvolved" in msgs[0]
+    with pytest.raises(ValueError):
+        G.process_map(z, cell, "median")
+
+
+@pytest.mark.parametrize("depth", [0.25, 0.5, 2.0, 4.0])
+def test_sensitivity_integrates_to_mcneill_depth_function(depth):
+    """Over a horizontal plane at depth d the kernel is proportional to d / (4 d^2 + s^2)^1.5."""
+    s = 1.66
+
+    def plane(d):
+        ax = np.linspace(-40 * max(d, s), 40 * max(d, s), 1201)
+        xx, yy = np.meshgrid(ax + s / 2, ax)
+        return G.lin_sensitivity(xx, yy, d, s, 0.0).sum() * (ax[1] - ax[0]) ** 2
+
+    phi = lambda d: d / (4 * d * d + s * s) ** 1.5
+    assert plane(depth) / plane(1.0) == pytest.approx(phi(depth) / phi(1.0), rel=2e-3)
+
+
+def test_footprint_sums_to_one_and_follows_angle():
+    k0 = G.footprint(0.2, angle_deg=0)
+    k90 = G.footprint(0.2, angle_deg=90)
+    assert k0.sum() == pytest.approx(1.0)
+    np.testing.assert_allclose(k90, np.rot90(k0, -1), atol=1e-12)
+    # symmetric across the coil axis; negative lobes between the coils are physical
+    np.testing.assert_allclose(k0, k0[::-1, :], atol=1e-15)
+    assert k0.min() < 0
+
+
+def test_deconvolution_sharpens_a_blurred_anomaly():
+    truth, cell = _bump()
+    k = G.footprint(cell, E.Sensor(height=0.5))
+    blurred = G.convolve(truth, k)
+    sharp = G.deconvolve(blurred, k, regularisation=1e-4)
+    err = lambda m: np.sqrt(np.mean((m - truth) ** 2))
+    assert err(sharp) < 0.6 * err(blurred)
+
+
+def test_deconvolution_keeps_blanks():
+    truth, cell = _bump()
+    truth[:5, :5] = np.nan
+    out = G.deconvolve(truth, G.footprint(cell), 1e-2)
+    assert np.isnan(out[:5, :5]).all() and np.isfinite(out[10:, 10:]).all()
+
+

@@ -135,3 +135,158 @@ def merge_tables(
     return pd.concat(parts, ignore_index=True), offsets
 
 
+# ---------------------------------------------------------------------------
+# Lateral footprint of the GEM-2 and deconvolution
+# ---------------------------------------------------------------------------
+
+
+def lin_sensitivity(x, y, z, r: float, height: float) -> np.ndarray:
+    """
+    Unnormalised low-induction-number sensitivity of a horizontal co-planar
+    pair (Tx at the origin, Rx at (r, 0), both `height` above ground) to
+    conductivity at (x, y, depth z): the dot product of the two dipoles'
+    quasi-static electric fields, which circle each vertical dipole
+    (reciprocity / Born approximation).
+    """
+    zz = np.asarray(z, dtype=float) + height
+    rt = np.sqrt(x ** 2 + y ** 2 + zz ** 2)
+    rr = np.sqrt((x - r) ** 2 + y ** 2 + zz ** 2)
+    return (x * (x - r) + y * y) / (rt ** 3 * rr ** 3)
+
+
+def _depth_nodes(height: float, max_depth: float, n: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Depth samples (log-spaced, finer near the surface) and trapezoid weights."""
+    z = np.concatenate([[0.0], np.geomspace(1e-3, max_depth, n)])
+    w = np.zeros_like(z)
+    dz = np.diff(z)
+    w[:-1] += dz / 2
+    w[1:] += dz / 2
+    return z, w
+
+
+def footprint(
+    cell: float, sensor: E.Sensor = E.GEM2, angle_deg: float = 0.0, half_width: float | None = None
+) -> np.ndarray:
+    """
+    Lateral footprint of the sensor on a map grid with spacing `cell`:
+    depth-integrated sensitivity of Rx minus bucking coil, each scaled to its
+    low-induction-number total, centred on the Tx-Rx midpoint with the coil
+    axis at `angle_deg` from the grid x axis. Sums to 1.
+    """
+    s, h = sensor.separation, sensor.height
+    if half_width is None:
+        half_width = 3.0 * s + 4.0 * h
+    n = int(math.ceil(half_width / cell))
+    ax = np.arange(-n, n + 1) * cell
+    gx, gy = np.meshgrid(ax, ax)
+    a = math.radians(angle_deg)
+    # grid -> sensor frame (coil axis along +x', Tx at x' = -s/2)
+    xs = gx * math.cos(a) + gy * math.sin(a) + s / 2
+    ys = -gx * math.sin(a) + gy * math.cos(a)
+    z, wz = _depth_nodes(h, max_depth=10.0 * s + 10.0 * h)
+
+    def radius_term(r):
+        k = sum(w * lin_sensitivity(xs, ys, zi, r, h) for zi, w in zip(z, wz))
+        total = r * r / (4.0 * math.sqrt(4.0 * (h / r) ** 2 + 1.0))
+        return k / k.sum() * total
+
+    k = radius_term(s)
+    if sensor.bucking:
+        k = k - radius_term(sensor.bucking)
+    return k / k.sum()
+
+
+def line_axis_angle(df: pd.DataFrame) -> float:
+    """Survey-line direction, degrees counter-clockwise from the map x axis in [0, 180)."""
+    x, y, _ = corrections.xy_metres(df)
+    angles = []
+    for idx in df.groupby("Line", sort=False).indices.values():
+        ok = idx[np.isfinite(x[idx]) & np.isfinite(y[idx])]
+        if len(ok) >= 2:
+            angles.append(math.degrees(math.atan2(y[ok[-1]] - y[ok[0]], x[ok[-1]] - x[ok[0]])) % 180.0)
+    if not angles:
+        return 0.0
+    # median of axial angles via doubled-angle vectors
+    a = np.radians(2 * np.asarray(angles))
+    return float(math.degrees(math.atan2(np.median(np.sin(a)), np.median(np.cos(a)))) / 2 % 180.0)
+
+
+MAP_FILTERS = ("none", "despike", "low-pass", "high-pass")
+
+
+def process_map(
+    z: np.ndarray,
+    cell: float,
+    kind: str = "none",
+    size: int = 3,
+    threshold: float = 4.0,
+    deconvolve_footprint: bool = False,
+    regularisation: float = 1e-2,
+    angle_deg: float = 0.0,
+    sensor: E.Sensor = E.GEM2,
+) -> tuple[np.ndarray, list[str]]:
+    """Optional footprint deconvolution, then one grid filter. Returns (grid, messages)."""
+    msgs = []
+    out = np.asarray(z, dtype=float)
+    if deconvolve_footprint:
+        out = deconvolve(out, footprint(cell, sensor, angle_deg), regularisation)
+        msgs.append(
+            f"Deconvolved the sensor footprint (coil axis {angle_deg:.0f}° from x, "
+            f"regularisation {regularisation:g})."
+        )
+    if kind == "despike":
+        out, n = despike(out, size, threshold)
+        msgs.append(f"Despiked {n} cell(s).")
+    elif kind == "low-pass":
+        out = lowpass(out, size)
+        msgs.append(f"Low-pass: moving average over {size} × {size} cells.")
+    elif kind == "high-pass":
+        out = highpass(out, size)
+        msgs.append(f"High-pass: regional trend over {size} × {size} cells removed.")
+    elif kind != "none":
+        raise ValueError(f"Unknown map filter: {kind!r}")
+    return out, msgs
+
+
+def _fill_nan(z: np.ndarray) -> np.ndarray:
+    """Fills NaN cells with the value of the nearest finite cell."""
+    ok = np.isfinite(z)
+    if ok.all():
+        return z
+    idx = ndimage.distance_transform_edt(~ok, return_distances=False, return_indices=True)
+    return z[tuple(idx)]
+
+
+def deconvolve(z: np.ndarray, kernel: np.ndarray, regularisation: float = 1e-2) -> np.ndarray:
+    """
+    Tikhonov (Wiener-type) deconvolution of a map by a footprint kernel:
+    Z * conj(K) / (|K|^2 + regularisation * max|K|^2) in the Fourier domain.
+    Blank cells are filled from their nearest neighbour for the transform and
+    blanked again; edges are mirror-padded by the kernel half-width.
+    """
+    z = np.asarray(z, dtype=float)
+    blank = ~np.isfinite(z)
+    pad = kernel.shape[0] // 2
+    work = np.pad(_fill_nan(z), pad, mode="reflect")
+    mean = work.mean()
+    shape = work.shape
+    kpad = np.zeros(shape)
+    kpad[: kernel.shape[0], : kernel.shape[1]] = kernel
+    kpad = np.roll(kpad, (-(kernel.shape[0] // 2), -(kernel.shape[1] // 2)), axis=(0, 1))
+    K = np.fft.rfft2(kpad)
+    Z = np.fft.rfft2(work - mean)
+    lam = regularisation * float(np.max(np.abs(K)) ** 2)
+    out = np.fft.irfft2(Z * np.conj(K) / (np.abs(K) ** 2 + lam), s=shape) + mean
+    out = out[pad: pad + z.shape[0], pad: pad + z.shape[1]]
+    return np.where(blank, np.nan, out)
+
+
+def convolve(z: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """Forward model of deconvolve (same padding), for tests and previews."""
+    pad = kernel.shape[0] // 2
+    work = np.pad(np.asarray(z, dtype=float), pad, mode="reflect")
+    return ndimage.convolve(work, kernel[::-1, ::-1], mode="nearest")[
+        pad: pad + z.shape[0], pad: pad + z.shape[1]
+    ]
+
+
