@@ -110,3 +110,8 @@ def test_projection_distance_runs():
     assert not at.exception
 
 
+def test_main_page_defaults_to_scoring_off():
+    at = AppTest.from_file("RIs_v2.py", default_timeout=60)
+    at.run()
+    assert not at.exception
+    assert at.toggle(key="scoring").value is False

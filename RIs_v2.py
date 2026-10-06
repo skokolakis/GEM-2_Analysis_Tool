@@ -1335,6 +1335,30 @@ def compute_area_map_cached(
     return ctr.compute_area_map(table, value_col, **params)
 
 
+def render_data_sidebar() -> pipeline.PrepSettings:
+    """Sidebar controls for quality flags and along-line distance (GEM files)."""
+    st.divider()
+    st.subheader("GEM data")
+    drop_flagged = st.checkbox(
+        "Drop readings with a Status flag", value=True, key="prep_status",
+        help="The GEM-2 sets Status to a non-zero value when a reading has a "
+             "problem such as ADC overload.",
+    )
+    method = st.selectbox(
+        "Distance along line", list(gem_io.DISTANCE_METHODS),
+        format_func=gem_io.DISTANCE_METHODS.get, key="prep_distance", help=DISTANCE_HELP,
+    )
+    spacing = 1.0
+    if method in ("sample", "markers"):
+        spacing = st.number_input(
+            "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
+            min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
+        )
+    return pipeline.PrepSettings(
+        drop_flagged=drop_flagged, distance_method=method, distance_spacing=float(spacing),
+    )
+
+
 def render_contouring_sidebar() -> ContourSettings:
     """Sidebar controls for 2D contouring; call inside `with st.sidebar`."""
     st.divider()
@@ -1667,6 +1691,8 @@ def main():
     with st.sidebar:
         st.header("Settings")
 
+        scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
+
         mode = st.radio(
             "Measurement mode",
             list(MODES.keys()),
@@ -1689,7 +1715,7 @@ def main():
             index=0,
             format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
         )
-        if interp_kind in TREND_FIT_METHODS:
+        if scoring and interp_kind in TREND_FIT_METHODS:
             st.warning(TREND_FIT_WARNING)
 
         if distance_step > 10.0:
@@ -1698,6 +1724,7 @@ def main():
                 "If your data spans less than this, all sheets will be skipped."
             )
 
+        prep = render_data_sidebar()
         contour = render_contouring_sidebar()
 
         st.divider()
@@ -2066,9 +2093,9 @@ Switch on in the sidebar under **2D contouring**.
         # Collect processed data (cached — no extra computation cost)
         if is_gem:
             gem_output, gem_scores, _ = process_gem_file(
-                file_bytes, file_name, distance_step, interp_kind
+                file_bytes, file_name, distance_step, interp_kind, prep
             )
-            for mode_key in ("EC", "MS"):
+            for mode_key in gem_io.GEM_MODES:
                 if gem_output.get(mode_key):
                     batch_results.append({
                         "stem": stem,
@@ -2096,11 +2123,12 @@ Switch on in the sidebar under **2D contouring**.
         dl_col1, dl_col2 = st.columns(2)
 
         with dl_col1:
+            what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
             st.caption(
-                f"Interpolated profiles & scores for the **selected method** "
+                f"{what} for the **selected method** "
                 f"({interp_kind}) across {len(uploaded_files)} file(s)."
             )
-            batch_bytes = build_batch_xlsx(batch_results)
+            batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
             st.download_button(
                 label=f"Download — {interp_kind} method (.xlsx)",
                 data=batch_bytes,
@@ -2111,7 +2139,7 @@ Switch on in the sidebar under **2D contouring**.
 
         with dl_col2:
             st.caption(
-                f"Interpolated profiles & scores for **all {len(ALL_INTERP_METHODS)} methods** "
+                f"{what} for **all {len(ALL_INTERP_METHODS)} methods** "
                 f"across {len(uploaded_files)} file(s). May take a moment to generate."
             )
             if st.button("Generate all-methods export", key="btn_all_methods"):
@@ -2120,7 +2148,7 @@ Switch on in the sidebar under **2D contouring**.
                     f"across {len(uploaded_files)} file(s)…"
                 ):
                     all_methods_bytes = build_all_methods_batch_xlsx(
-                        uploaded_files, mode, distance_step
+                        uploaded_files, mode, distance_step, scoring, prep
                     )
                 st.download_button(
                     label="Download — all methods (.xlsx)",
@@ -2149,10 +2177,12 @@ Switch on in the sidebar under **2D contouring**.
             pass
 
         if is_gem:
-            render_gem_results(file_bytes, file_name, distance_step, interp_kind, contour)
+            render_gem_results(
+                file_bytes, file_name, distance_step, interp_kind, contour, scoring, prep
+            )
         else:
             render_legacy_results(
-                file_bytes, file_name, mode, distance_step, interp_kind, contour
+                file_bytes, file_name, mode, distance_step, interp_kind, contour, scoring
             )
 
 
