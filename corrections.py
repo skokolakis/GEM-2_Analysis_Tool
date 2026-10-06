@@ -197,3 +197,90 @@ def correct_height(v: np.ndarray, h: np.ndarray, reference: float) -> tuple[np.n
     corr = np.asarray(v, float) - height_response(model, params, h) + height_response(model, params, reference)
     return corr, model
 
+
+# ---------------------------------------------------------------------------
+# Base-station drift and temperature
+# ---------------------------------------------------------------------------
+
+
+def base_station_occupations(df: pd.DataFrame, lines: tuple[str, ...]) -> list[np.ndarray]:
+    """Row positions of each base-station occupation (one per listed Line label present)."""
+    labels = df["Line"].astype(str)
+    return [np.nonzero((labels == str(lb)).to_numpy())[0] for lb in lines
+            if (labels == str(lb)).any()]
+
+
+def drift_curve(t_occ: np.ndarray, v_occ: np.ndarray, t: np.ndarray, model: str) -> np.ndarray:
+    """Drift at times t from occupation means: piecewise linear (flat beyond the ends) or a straight line."""
+    if model == "linear":
+        slope, intercept = np.polyfit(t_occ, v_occ, 1)
+        return intercept + slope * t
+    order = np.argsort(t_occ)
+    return np.interp(t, t_occ[order], v_occ[order])
+
+
+def correct_drift(
+    df: pd.DataFrame, lines: tuple[str, ...], model: str
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Removes instrument drift measured by repeated base-station occupations
+    (USGS GEM-2 practice: mean of each occupation, trend in time, subtract),
+    relative to the first occupation, then drops the base-station lines.
+    """
+    t = _require_time(df, "Drift correction")
+    occ = base_station_occupations(df, lines)
+    if len(occ) < MIN_OCCUPATIONS:
+        raise ValueError(
+            f"Drift correction needs at least {MIN_OCCUPATIONS} base-station lines; "
+            f"found {len(occ)} of {', '.join(lines)}."
+        )
+    out = df.copy()
+    t_occ = np.array([np.nanmean(t[i]) for i in occ])
+    first = int(np.argmin(t_occ))
+    drifts = []
+    for col in channel_columns(df):
+        v = _numeric(df, col)
+        v_occ = np.array([np.nanmean(v[i]) for i in occ])
+        curve = drift_curve(t_occ, v_occ, t, model)
+        out[col] = v - (curve - v_occ[first])
+        drifts.append(f"{col}: {np.ptp(v_occ):.4g}")
+    base = np.concatenate(occ)
+    out = out.drop(index=out.index[base]).reset_index(drop=True)
+    return out, [
+        f"Drift corrected from {len(occ)} base-station occupation(s) ({model}); "
+        f"base-station lines removed ({len(base)} readings). Drift range — " + "; ".join(drifts)
+    ]
+
+
+def correct_temperature(
+    df: pd.DataFrame, column: str, lines: tuple[str, ...]
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Removes a linear temperature dependence estimated from base-station
+    occupations: value = c0 + c1 x temperature at a fixed location, so
+    c1 x (T - T_mean) is subtracted from every reading.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Temperature column '{column}' not found.")
+    occ = base_station_occupations(df, lines)
+    if len(occ) < MIN_TEMPERATURE_OCCUPATIONS:
+        raise ValueError(
+            f"Temperature correction needs at least {MIN_TEMPERATURE_OCCUPATIONS} "
+            "base-station lines."
+        )
+    temp = _numeric(df, column)
+    t_occ = np.array([np.nanmean(temp[i]) for i in occ])
+    if np.ptp(t_occ) == 0:
+        raise ValueError("Base-station temperatures do not vary; no coefficient can be fitted.")
+    out = df.copy()
+    coefs = []
+    for col in channel_columns(df):
+        v = _numeric(df, col)
+        v_occ = np.array([np.nanmean(v[i]) for i in occ])
+        c1 = float(np.polyfit(t_occ, v_occ, 1)[0])
+        out[col] = v - c1 * (temp - t_occ.mean())
+        coefs.append(f"{col}: {c1:.4g}/°C")
+    return out, ["Temperature drift removed — " + "; ".join(coefs)]
+
+
+

@@ -62,3 +62,51 @@ def test_height_correction_removes_exponential_trend():
     assert np.std(corr - geology) < 0.05
     assert np.mean(corr) == pytest.approx(100 + 300 * math.exp(-2.0), abs=0.1)
 
+
+# ── drift and temperature ────────────────────────────────────────────────────
+
+def _with_base_station(drift_per_hour=3.0, temp=None):
+    df = _survey()
+    t = gem_io.time_seconds(df)
+    df["EC1525Hz[mS/m]"] += drift_per_hour * (t - t[0]) / 3600.0
+    base = []
+    for k, tb in enumerate([t[0] - 60, t[len(t) // 2], t[-1] + 60]):
+        b = pd.DataFrame({"Line": f"B{k}", "X": 50.0, "Y": 0.0, "Time[ms]": 1000 * (tb + np.arange(5)),
+                          "EC1525Hz[mS/m]": 30 + drift_per_hour * (tb - t[0]) / 3600.0,
+                          "EC9825Hz[mS/m]": 33.0, "MSusc1525Hz[1/1000]": 0.5})
+        if temp is not None:
+            b["Temp"] = temp[k]
+        base.append(b)
+    if temp is not None:
+        df["Temp"] = np.interp(t, [t[0], t[len(t) // 2], t[-1]], temp)
+    return pd.concat([base[0], df, base[1], base[2]], ignore_index=True), df
+
+
+def test_drift_correction_flattens_and_drops_base_lines():
+    table, survey = _with_base_station()
+    out, msgs = C.correct_drift(table, ("B0", "B1", "B2"), "piecewise")
+    assert not out["Line"].astype(str).str.startswith("B").any()
+    clean = _survey()
+    resid = out["EC1525Hz[mS/m]"].to_numpy() - clean["EC1525Hz[mS/m]"].to_numpy()
+    assert np.ptp(resid) < 0.2                        # drift was ~0.1 mS/m per minute
+    assert "3 base-station occupation" in msgs[0]
+
+
+def test_drift_needs_two_occupations_and_time():
+    table, _ = _with_base_station()
+    with pytest.raises(ValueError, match="at least 2"):
+        C.correct_drift(table, ("B0",), "linear")
+    with pytest.raises(ValueError, match="Time"):
+        C.correct_drift(table.drop(columns="Time[ms]"), ("B0", "B1"), "linear")
+
+
+def test_temperature_coefficient_from_base_station():
+    table, _ = _with_base_station(drift_per_hour=0.0, temp=[10.0, 20.0, 15.0])
+    table["EC9825Hz[mS/m]"] += 0.4 * (table["Temp"] - 15.0)
+    out, msgs = C.correct_temperature(table, "Temp", ("B0", "B1", "B2"))
+    base = out[out["Line"].astype(str).str.startswith("B")]
+    assert np.ptp(base["EC9825Hz[mS/m]"]) < 1e-9
+    assert "0.4/°C" in msgs[0]
+
+
+
