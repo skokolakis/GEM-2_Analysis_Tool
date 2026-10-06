@@ -25,6 +25,7 @@ from scipy.interpolate import (
 )
 
 import contouring as ctr
+import corrections
 import gem_io
 import pipeline
 
@@ -72,6 +73,10 @@ GEM_REQUIRED_COLS = {'Line', 'Y'}
 SCORING_HELP = (
     "Rank frequencies by signal-to-noise score (amplitude / noise σ). Off: "
     "profiles, maps and exports are produced without scores."
+)
+SMOOTHING_SCORE_WARNING = (
+    "Despiking, smoothing or PCA noise reduction lower the noise σ, so scores "
+    "rise. Compare scores only between runs with the same filters."
 )
 DISTANCE_HELP = (
     "How the distance of each reading along its line is found. "
@@ -1357,7 +1362,123 @@ def render_data_sidebar() -> pipeline.PrepSettings:
         )
     return pipeline.PrepSettings(
         drop_flagged=drop_flagged, distance_method=method, distance_spacing=float(spacing),
+        corrections=render_corrections_sidebar(),
     )
+
+
+def _parse_labels(text: str) -> tuple[str, ...]:
+    """'B1, B2 ,7' -> ('B1', 'B2', '7')."""
+    return tuple(p.strip() for p in text.split(",") if p.strip())
+
+
+def render_corrections_sidebar() -> corrections.CorrectionSettings:
+    """Corrections & filters applied to GEM tables before profiles and maps."""
+    with st.expander("Corrections & filters", expanded=False):
+        st.markdown("**Filters**")
+        despike = st.checkbox("Despike (running median)", key="cor_despike")
+        window, threshold = 5, 4.0
+        if despike:
+            window = st.slider("Despike window (readings)", 3, 21, 5, step=2, key="cor_dwin")
+            threshold = st.number_input("Despike threshold (× noise σ)", 1.0, 20.0, 4.0,
+                                        step=0.5, key="cor_dthr")
+        clip = st.checkbox("Clip to percentiles", key="cor_clip")
+        clip_range = None
+        if clip:
+            lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key="cor_crange")
+            clip_range = (float(lo), float(hi))
+        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key="cor_smooth")
+        pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key="cor_pca",
+                              help="Minsley et al. (2010): channels of a mode are strongly "
+                                   "correlated, trailing components are mostly noise.")
+
+        st.markdown("**Drift and environment**")
+        drift_text = st.text_input("Base-station lines (comma-separated Line labels)",
+                                   key="cor_drift",
+                                   help="Lines recorded at a fixed base station during the "
+                                        "survey. Needs a Time column. They are removed after "
+                                        "the correction.")
+        drift_model = st.selectbox("Drift model", ["piecewise", "linear"], key="cor_dmodel")
+        temp_col = st.text_input("Temperature column (needs ≥ 3 base-station lines)",
+                                 key="cor_temp").strip()
+        alt_col = st.text_input("Sensor-height column (e.g. drone altitude above ground)",
+                                key="cor_alt").strip()
+        alt_ref = None
+        if alt_col:
+            alt_ref_value = st.number_input("Reference height (m, 0 = median)", 0.0, 100.0, 0.0,
+                                            step=0.1, key="cor_altref")
+            alt_ref = float(alt_ref_value) or None
+
+        st.markdown("**Calibration**")
+        background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
+                                     key="cor_bg")
+        ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key="cor_ref",
+                                    help="Same coordinate columns as the survey (X/Y or "
+                                         "Lat/Lon) plus one column per channel to calibrate, "
+                                         "named like the survey column, e.g. EC1525Hz[mS/m].")
+        ref_radius, ref_method = 2.0, "regression"
+        if ref_file is not None:
+            ref_radius = st.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key="cor_rrad")
+            ref_method = st.selectbox("Calibration fit", ["regression", "moments"], key="cor_rmeth")
+        soil_t = st.number_input("Soil temperature for EC at 25 °C (°C, 0 = off)", 0.0, 50.0, 0.0,
+                                 key="cor_soilt")
+
+        st.markdown("**Positioning**")
+        lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key="cor_lag",
+                              help="Positive: readings were logged after the position. Use "
+                                   "'Estimate GPS lag' under a file to find it.")
+        heading = st.checkbox("Keep one walking direction", key="cor_head")
+        bearing_center, bearing_tol = None, 30.0
+        if heading:
+            bearing_center = float(st.number_input("Heading (° from north)", 0.0, 359.0, 0.0,
+                                                    key="cor_hdir"))
+            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key="cor_htol"))
+
+    return corrections.CorrectionSettings(
+        despike=despike, despike_window=int(window), despike_threshold=float(threshold),
+        clip_percentiles=clip_range,
+        altitude_column=alt_col, altitude_reference=alt_ref,
+        temperature_column=temp_col,
+        drift_lines=_parse_labels(drift_text), drift_model=drift_model,
+        ec_background=float(background) or None,
+        reference=ref_file.getvalue() if ref_file is not None else None,
+        reference_radius=float(ref_radius), reference_method=ref_method,
+        soil_temperature=float(soil_t) or None,
+        pca_components=int(pca), smooth_window=int(smooth),
+        lag_seconds=float(lag),
+        bearing_center=bearing_center, bearing_tolerance=bearing_tol,
+    )
+
+
+def render_lag_estimate(
+    file_bytes: bytes, file_name: str, file_key: str, prep: pipeline.PrepSettings
+) -> None:
+    """Expander that estimates the GPS time lag from crossings of neighbouring lines."""
+    with st.expander("Estimate GPS lag", expanded=False):
+        no_lag = replace(prep, corrections=replace(prep.corrections, lag_seconds=0.0))
+        try:
+            table, _ = prepared_table(file_bytes, file_name, no_lag)
+        except ValueError as exc:
+            st.info(str(exc))
+            return
+        columns = corrections.channel_columns(table)
+        if not columns:
+            return
+        column = st.selectbox("Channel", columns, key=f"lag_col_{file_key}")
+        if st.button("Estimate", key=f"lag_btn_{file_key}"):
+            try:
+                with st.spinner("Searching lags from −2 s to +2 s…"):
+                    lag, cost = corrections.estimate_lag(table, column)
+            except (ValueError, ctr.ContouringError) as exc:
+                st.info(str(exc))
+                return
+            st.write(f"Best lag **{lag:+.1f} s** — enter it as 'GPS lag' in the sidebar.")
+            fig, ax = plt.subplots(figsize=(6, 2.5))
+            ax.plot(corrections.LAG_SEARCH, cost, marker=".")
+            ax.set_xlabel("Lag (s)")
+            ax.set_ylabel("Mean |difference|")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
 
 
 def render_contouring_sidebar() -> ContourSettings:
@@ -1649,6 +1770,7 @@ def render_gem_results(
         markers = []
 
     st.caption("GEM format detected — showing every channel in the file")
+    render_lag_estimate(file_bytes, file_name, stem, prep or pipeline.PrepSettings())
 
     tabs = st.tabs([
         f"{m} ({len(output_data[m])} {'channels' if m == 'AUX' else 'frequencies'})"
@@ -1726,6 +1848,8 @@ def main():
             )
 
         prep = render_data_sidebar()
+        if scoring and prep.corrections.lowers_noise:
+            st.warning(SMOOTHING_SCORE_WARNING)
         contour = render_contouring_sidebar()
         prep = replace(prep, coord_mode=contour.coord_mode)   # one coordinate choice for all
 
