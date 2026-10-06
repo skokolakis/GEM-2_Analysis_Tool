@@ -102,3 +102,102 @@ def test_batch_export_handles_grids_of_different_length():
     xlsx = R.build_batch_xlsx([{"stem": "f", "mode": "EC", "output_data": out, "scores": sc}])
     sheet = pd.read_excel(io.BytesIO(xlsx), sheet_name="f_EC")
     assert len(sheet) == 121 and sheet["s3_mean"].notna().sum() == 41
+
+
+# ---------------------------------------------------------------------------
+# Scoring: extrapolation (#5), ddof (#10), single-trace noise (#11),
+# mixed estimators (#7)
+# ---------------------------------------------------------------------------
+
+X = np.arange(0, 100.5, 0.5)
+STEP = 20 + 10 * np.tanh((X - 50) / 5)      # true amplitude ≈ 20
+
+
+def _trace(rng, lo=0.0, hi=100.0, noise=0.5):
+    m = (X >= lo) & (X <= hi)
+    s = np.full_like(X, np.nan)
+    s[m] = STEP[m] + rng.normal(0, noise, m.sum())
+    return s
+
+
+@pytest.mark.parametrize("method", [m for m in R.ALL_INTERP_METHODS if m != "polynomial"])
+def test_traces_are_not_extrapolated(method):
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"d": X, "L1": _trace(rng, 0, 100), "L2": _trace(rng, 3, 97),
+                       "L3": _trace(rng, 0, 95)})
+    interp, sc, error, _ = R.process_sheet(df, 0.5, method)
+    assert error is None
+    assert interp.loc[interp.index < 3, "L2"].isna().all()
+    assert interp.loc[interp.index > 95, "L3"].isna().all()
+    assert sc["amplitude"] < 22                      # was up to 294 for cubic
+    assert 0.4 < sc["mean_std"] < 0.6
+
+
+def test_between_trace_noise_uses_sample_std_and_matches_plot_envelope():
+    rng = np.random.default_rng(1)
+    x = np.arange(0, 1000.0, 0.5)
+    df = pd.DataFrame({"d": x, "a": rng.normal(0, 1, x.size), "b": rng.normal(0, 1, x.size)})
+    interp, sc, *_ = R.process_sheet(df, 0.5, "linear")
+    assert sc["mean_std"] == pytest.approx(1.0, abs=0.05)   # ddof=0 gave ≈ 0.71
+    envelope = interp.std(axis=1, ddof=1)
+    assert np.sqrt(np.nanmean(envelope ** 2)) == pytest.approx(sc["mean_std"])
+
+
+def test_single_trace_noise_independent_of_distance_step():
+    rng = np.random.default_rng(0)
+    xs = np.arange(0, 101, 1.0)
+    df = pd.DataFrame({"d": xs, "L1": 20 + 10 * np.tanh((xs - 50) / 5) + rng.normal(0, .5, xs.size)})
+    noises = [R.process_sheet(df, step, "linear")[1]["mean_std"] for step in (0.1, 0.5, 1.0, 2.0)]
+    assert max(noises) == min(noises)
+
+
+def test_single_trace_noise_is_unbiased_on_a_step_profile():
+    xs = np.arange(0, 101, 1.0)
+    trend = 20 + 10 * np.tanh((xs - 50) / 5)
+    est = [R._intra_profile_noise(trend + np.random.default_rng(s).normal(0, .5, xs.size))
+           for s in range(200)]
+    assert np.mean(est) == pytest.approx(0.5, rel=0.03)
+
+
+def test_single_and_multi_trace_scores_agree_and_are_labelled():
+    ratios = []
+    for seed in range(30):
+        rng = np.random.default_rng(seed)
+        a = pd.DataFrame({"d": X, **{f"L{i}": STEP + rng.normal(0, 0.5, X.size) for i in range(3)}})
+        b = a.copy()
+        b["L1"] = np.nan
+        b["L2"] = np.nan
+        sa = R.process_sheet(a, 0.5, "linear")[1]
+        sb = R.process_sheet(b, 0.5, "linear")[1]
+        ratios.append(sb["score"] / sa["score"])
+    assert (sa["noise_method"], sa["n_traces"]) == (R.NOISE_BETWEEN, 3)
+    assert (sb["noise_method"], sb["n_traces"]) == (R.NOISE_INTRA, 1)
+    # Same signal and noise: the estimators agree on average (was 38 vs 64)
+    assert np.mean(ratios) == pytest.approx(1.0, abs=0.1)
+
+
+def test_mixed_noise_methods_warn_in_legacy_file():
+    rng = np.random.default_rng(0)
+    multi = pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)})
+    single = pd.DataFrame({"d": X, "a": _trace(rng)})
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        multi.to_excel(w, sheet_name="1000", index=False)
+        single.to_excel(w, sheet_name="5000", index=False)
+    _, scores, warnings = R.process_file.__wrapped__(buf.getvalue(), "EC", 0.5, "linear")
+    assert scores["5000"]["noise_method"] == R.NOISE_INTRA
+    assert any("Only one usable pass for 5000" in w for w in warnings)
+
+
+def test_zero_noise_gives_blank_score_ranked_last():
+    flat = pd.DataFrame({"d": X, "a": np.ones_like(X), "b": np.ones_like(X)})
+    _, sc, error, col_warnings = R.process_sheet(flat, 0.5, "linear")
+    assert error is None and np.isnan(sc["score"])
+    assert any("score left blank" in w for w in col_warnings)
+    ranked = R.rank_scores({"flat": sc, "ok": {"score": 3.0}, "better": {"score": 5.0}})
+    assert [name for name, _ in ranked] == ["better", "ok", "flat"]
+
+
+def test_non_overlapping_traces_are_reported():
+    df = pd.DataFrame({"d": X, "a": np.where(X < 40, 1.0, np.nan), "b": np.where(X > 60, 2.0, np.nan)})
+    assert R.process_sheet(df, 0.5, "linear")[2] == "traces do not overlap in distance"
