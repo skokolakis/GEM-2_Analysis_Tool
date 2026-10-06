@@ -344,4 +344,31 @@ def fit_reference_calibration(
     return fits
 
 
+# ---------------------------------------------------------------------------
+# PCA noise reduction
+# ---------------------------------------------------------------------------
+
+
+def pca_denoise(values: np.ndarray, n_components: int) -> tuple[np.ndarray, float]:
+    """
+    Keeps the first n principal components of standardised channels
+    (Minsley et al., 2010: FDEM channels are strongly correlated, so the
+    trailing components are mostly noise). Rows with any NaN are returned
+    unchanged. Returns (values, fraction of variance kept).
+    """
+    v = np.asarray(values, dtype=float)
+    out = v.copy()
+    rows = np.all(np.isfinite(v), axis=1)
+    if rows.sum() < 3 or n_components >= v.shape[1]:
+        return out, 1.0
+    a = v[rows]
+    mean, std = a.mean(axis=0), a.std(axis=0, ddof=1)
+    std[std == 0] = 1.0
+    z = (a - mean) / std
+    u, s, vt = np.linalg.svd(z, full_matrices=False)
+    k = max(1, int(n_components))
+    out[rows] = (u[:, :k] * s[:k]) @ vt[:k] * std + mean
+    return out, float(np.sum(s[:k] ** 2) / np.sum(s ** 2))
+
+
 

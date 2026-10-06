@@ -123,4 +123,15 @@ def test_reference_calibration_recovers_gain_and_offset():
     assert moments[0]["gain"] == pytest.approx(1.5, rel=0.05)
 
 
+# ── PCA ──────────────────────────────────────────────────────────────────────
+
+def test_pca_denoise_reduces_independent_noise():
+    rng = np.random.default_rng(2)
+    signal = rng.normal(0, 1, (500, 1)) * np.array([[1.0, 0.9, 0.8, 0.7]])
+    noisy = signal + rng.normal(0, 0.1, signal.shape)
+    out, kept = C.pca_denoise(noisy, 1)
+    assert np.std(out - signal) < np.std(noisy - signal)
+    assert kept > 0.95
+
+
 
