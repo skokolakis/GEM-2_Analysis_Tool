@@ -152,3 +152,48 @@ def ec_at_25(ec: np.ndarray, temperature: float) -> np.ndarray:
     """
     return np.asarray(ec, dtype=float) * (0.4470 + 1.4034 * math.exp(-temperature / 26.815))
 
+
+# ---------------------------------------------------------------------------
+# Sensor height
+# ---------------------------------------------------------------------------
+
+
+def _height_model(h, a, b, c):
+    return a + b * np.exp(c * h)
+
+
+def fit_height_response(h: np.ndarray, v: np.ndarray) -> tuple[str, np.ndarray]:
+    """
+    Signal as a function of sensor height: a + b exp(c h) (Vilhelmsen &
+    Døssing, 2022), falling back to a straight line when the fit fails.
+    Returns (model name, parameters).
+    """
+    ok = np.isfinite(h) & np.isfinite(v)
+    h, v = h[ok], v[ok]
+    if h.size < 4 or np.ptp(h) == 0:
+        raise ValueError("Not enough distinct sensor heights to fit a height correction.")
+    slope, intercept = np.polyfit(h, v, 1)
+    span = float(np.ptp(h))
+    try:
+        p0 = [float(np.median(v)), float(slope) * span, -1.0 / span]
+        p, _ = curve_fit(_height_model, h, v, p0=p0, maxfev=20000)
+        if np.all(np.isfinite(p)):
+            return "exponential", np.asarray(p, dtype=float)
+    except (RuntimeError, ValueError):
+        pass
+    return "linear", np.array([intercept, slope])
+
+
+def height_response(model: str, params: np.ndarray, h) -> np.ndarray:
+    h = np.asarray(h, dtype=float)
+    if model == "exponential":
+        return _height_model(h, *params)
+    return params[0] + params[1] * h
+
+
+def correct_height(v: np.ndarray, h: np.ndarray, reference: float) -> tuple[np.ndarray, str]:
+    """v - f(h) + f(reference), with f fitted by fit_height_response."""
+    model, params = fit_height_response(np.asarray(h, float), np.asarray(v, float))
+    corr = np.asarray(v, float) - height_response(model, params, h) + height_response(model, params, reference)
+    return corr, model
+

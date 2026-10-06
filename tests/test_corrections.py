@@ -49,3 +49,16 @@ def test_ec_at_25_is_identity_at_25_and_lowers_warm_soil():
     assert C.ec_at_25(np.array([10.0]), 25.0)[0] == pytest.approx(10.0, abs=0.01)
     assert C.ec_at_25(np.array([10.0]), 35.0)[0] < 10.0
 
+
+# ── sensor height ────────────────────────────────────────────────────────────
+
+def test_height_correction_removes_exponential_trend():
+    rng = np.random.default_rng(1)
+    h = rng.uniform(0.5, 1.5, 400)
+    geology = rng.normal(0, 0.2, 400)
+    v = 100 + 300 * np.exp(-2.0 * h) + geology
+    corr, model = C.correct_height(v, h, reference=1.0)
+    assert model == "exponential"
+    assert np.std(corr - geology) < 0.05
+    assert np.mean(corr) == pytest.approx(100 + 300 * math.exp(-2.0), abs=0.1)
+
