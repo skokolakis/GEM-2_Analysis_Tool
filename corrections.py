@@ -41,6 +41,7 @@ class CorrectionSettings:
     temperature_column: str = ""             # "" = off (needs base-station lines)
     drift_lines: tuple[str, ...] = ()        # Line labels of base-station occupations
     drift_model: str = "piecewise"           # "piecewise" | "linear"
+    iq_offsets: bytes | None = None          # CSV column,offset (e.g. multi-height calibration)
     ec_background: float | None = None       # mS/m; shift EC channels so their median matches
     reference: bytes | None = None           # CSV of reference values (calibration)
     reference_radius: float = 2.0            # m, matching distance for reference points
@@ -480,8 +481,9 @@ def _per_line(df: pd.DataFrame, col: str, func) -> tuple[np.ndarray, int]:
 def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataFrame, list[str]]:
     """
     Runs the enabled corrections in this order: despike, clip, sensor height,
-    temperature, drift, background offset, reference calibration, EC at
-    25 °C, PCA, smoothing, GPS lag, heading filter. Returns (table, messages).
+    temperature, drift, I/Q offsets, background offset, reference
+    calibration, EC at 25 °C, PCA, smoothing, GPS lag, heading filter.
+    Returns (table, messages).
     Raises ValueError when an enabled step cannot run (missing columns).
     """
     out = df.copy()
@@ -526,6 +528,17 @@ def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataF
     if s.drift_lines:
         out, m = correct_drift(out, s.drift_lines, s.drift_model)
         msgs += m
+
+    if s.iq_offsets:
+        table = pd.read_csv(io.BytesIO(s.iq_offsets))
+        if not {"column", "offset"}.issubset(table.columns):
+            raise ValueError("The offsets file needs 'column' and 'offset' columns.")
+        applied = []
+        for col, off in zip(table["column"].astype(str), pd.to_numeric(table["offset"], errors="coerce")):
+            if col in out.columns and np.isfinite(off):
+                out[col] = _numeric(out, col) - off
+                applied.append(f"{col}: {-off:+.4g}")
+        msgs.append("Subtracted calibration offsets — " + ("; ".join(applied) or "no matching columns"))
 
     if s.ec_background is not None:
         shifts = []
