@@ -109,4 +109,18 @@ def test_temperature_coefficient_from_base_station():
     assert "0.4/°C" in msgs[0]
 
 
+# ── calibration ──────────────────────────────────────────────────────────────
+
+def test_reference_calibration_recovers_gain_and_offset():
+    df = _survey(serpentine=False)
+    pts = df.iloc[::20][["X", "Y", "EC1525Hz[mS/m]"]].copy()
+    pts["EC1525Hz[mS/m]"] = 1.5 * pts["EC1525Hz[mS/m]"] - 4.0
+    fits = C.fit_reference_calibration(df, pts, radius=0.3)
+    assert len(fits) == 1
+    assert fits[0]["gain"] == pytest.approx(1.5, rel=0.02)
+    assert fits[0]["offset"] == pytest.approx(-4.0, abs=0.5)
+    moments = C.fit_reference_calibration(df, pts, radius=0.3, method="moments")
+    assert moments[0]["gain"] == pytest.approx(1.5, rel=0.05)
+
+
 

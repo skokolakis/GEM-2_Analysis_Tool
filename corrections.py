@@ -283,4 +283,65 @@ def correct_temperature(
     return out, ["Temperature drift removed — " + "; ".join(coefs)]
 
 
+# ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
+
+
+def xy_metres(df: pd.DataFrame, origin=None):
+    """(x, y, origin) in metres; degrees are projected about `origin` (or the data centroid)."""
+    x_col, y_col, is_deg = ctr.find_coordinate_columns(df, "auto")
+    x = _numeric(df, x_col)
+    y = _numeric(df, y_col)
+    if not is_deg:
+        return x, y, None
+    nofix = (x == 0) & (y == 0)
+    x[nofix] = np.nan
+    y[nofix] = np.nan
+    px, py, origin = ctr.project_to_local_metres(x, y, origin)
+    return px, py, origin
+
+
+def fit_reference_calibration(
+    df: pd.DataFrame, reference: pd.DataFrame, radius: float, method: str = "regression"
+) -> list[dict]:
+    """
+    Gain and offset per channel so the measured values match reference
+    values (Lavoué et al., 2010; Mester et al., 2011: apparent conductivity
+    predicted from ERT; Dragonetti et al., 2018: TDR). The reference table
+    has the same coordinate columns as the survey and one column per channel
+    it calibrates (named like the survey column). Each reference point is
+    matched to the median of the survey readings within `radius` metres.
+
+    method "regression": least-squares line reference = gain x measured + offset.
+    method "moments"   : gain and offset that match the mean and standard deviation.
+    """
+    x, y, origin = xy_metres(df)
+    rx, ry, _ = xy_metres(reference, origin)
+    ok = np.isfinite(x) & np.isfinite(y)
+    tree = cKDTree(np.column_stack([x[ok], y[ok]]))
+    rows = np.nonzero(ok)[0]
+    near = tree.query_ball_point(np.column_stack([rx, ry]), r=radius)
+    fits = []
+    for col in channel_columns(df):
+        if col not in reference.columns:
+            continue
+        v = _numeric(df, col)
+        measured = np.array([np.nanmedian(v[rows[i]]) if i else np.nan for i in near])
+        ref = _numeric(reference, col)
+        pair = np.isfinite(measured) & np.isfinite(ref)
+        if pair.sum() < 3:
+            continue
+        m, r = measured[pair], ref[pair]
+        if method == "moments":
+            gain = float(np.std(r, ddof=1) / np.std(m, ddof=1))
+            offset = float(np.mean(r) - gain * np.mean(m))
+        else:
+            gain, offset = (float(c) for c in np.polyfit(m, r, 1))
+        resid = r - (gain * m + offset)
+        r2 = 1.0 - float(np.sum(resid ** 2) / np.sum((r - r.mean()) ** 2))
+        fits.append({"column": col, "gain": gain, "offset": offset, "r2": r2, "n": int(pair.sum())})
+    return fits
+
+
 

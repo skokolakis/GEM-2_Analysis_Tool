@@ -140,13 +140,19 @@ def find_coordinate_columns(df: pd.DataFrame, mode: str = "auto") -> tuple[str, 
 
 
 def project_to_local_metres(
-    lon: np.ndarray, lat: np.ndarray
+    lon: np.ndarray, lat: np.ndarray, origin: tuple[float, float] | None = None
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
-    """Equirectangular projection about the centroid. Returns (x, y, (lon0, lat0))."""
+    """
+    Equirectangular projection about *origin* (lon0, lat0), by default the
+    centroid. Returns (x, y, (lon0, lat0)).
+    """
     lon = np.asarray(lon, dtype=float)
     lat = np.asarray(lat, dtype=float)
-    lon0 = float(np.nanmean(lon))
-    lat0 = float(np.nanmean(lat))
+    if origin is None:
+        lon0 = float(np.nanmean(lon))
+        lat0 = float(np.nanmean(lat))
+    else:
+        lon0, lat0 = (float(v) for v in origin)
     x = EARTH_RADIUS_M * math.cos(math.radians(lat0)) * np.radians(lon - lon0)
     y = EARTH_RADIUS_M * np.radians(lat - lat0)
     return x, y, (lon0, lat0)
