@@ -74,3 +74,39 @@ def test_excel_download_accepts_bracketed_channel_names():
     assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["TotalEC_mS_m_"]
 
 
+def test_scoring_off_shows_channels_not_ranking():
+    at = AppTest.from_function(_full_export, kwargs={"scoring": False}, default_timeout=120)
+    at.run()
+    assert not at.exception
+    texts = _texts(at)
+    assert "### Channels" in texts and "Frequency Ranking" not in texts
+    assert [t.label for t in at.tabs][:5] == [
+        "EC (2 frequencies)", "MS (2 frequencies)", "I (2 frequencies)",
+        "Q (2 frequencies)", "AUX (2 channels)",
+    ]
+
+
+def test_scoring_on_ranks_frequency_modes_only():
+    at = AppTest.from_function(_full_export, kwargs={"scoring": True}, default_timeout=120)
+    at.run()
+    assert not at.exception
+    texts = _texts(at)
+    assert texts.count("Frequency Ranking") == 4      # EC, MS, I, Q — not AUX
+    assert "### Channels" in texts                    # AUX channels are listed
+
+
+def test_flagged_readings_are_reported():
+    at = AppTest.from_function(_full_export, kwargs={"status_bad": 4}, default_timeout=120)
+    at.run()
+    assert not at.exception
+    assert any("Dropped 4 reading(s)" in w.value for w in at.warning)
+
+
+def test_projection_distance_runs():
+    at = AppTest.from_function(
+        _full_export, kwargs={"distance_method": "projection"}, default_timeout=120
+    )
+    at.run()
+    assert not at.exception
+
+

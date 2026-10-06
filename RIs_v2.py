@@ -1124,9 +1124,11 @@ def _render_mode_section(
     file_name: str,
     file_key: str,
     is_gem: bool = False,
+    scoring: bool = True,
+    markers: list[float] | None = None,
 ) -> None:
     """
-    Render ranking table, graph editor, plots, and downloads for one mode.
+    Render ranking table (or channel list), graph editor, plots, and downloads for one mode.
 
     Parameters
     ----------
@@ -1136,19 +1138,113 @@ def _render_mode_section(
     file_name   : original uploaded filename (for plot titles)
     file_key    : unique string for Streamlit widget key namespacing
     is_gem      : True for GEM files (known units); False for legacy files
+    scoring     : show the frequency ranking and scores (never for AUX channels)
+    markers     : event-marker distances drawn on the profiles
     """
     if not output_data:
         st.error("No usable frequencies / sheets found.")
         return
 
-    # ── Ranking table ───────────────────────────────────────────────────
-    ranking = rank_scores(scores)
+    stem = Path(file_name).stem
+    show_scores = scoring and mode != "AUX"
+    if show_scores:
+        _render_ranking(scores)
+    else:
+        _render_channel_list(output_data, scores, mode, is_gem)
 
+    # ── Graph editor ─────────────────────────────────────────────────────
+    opts = render_graph_editor(output_data, file_key=file_key)
+
+    # ── Overview plot ────────────────────────────────────────────────────
+    st.markdown("### All representative profiles")
+    overview_fig = make_overview_figure(
+        output_data, scores, mode, file_name, opts, is_gem, show_scores, markers
+    )
+    st.pyplot(overview_fig, use_container_width=True)
+    plt.close(overview_fig)
+
+    # ── Per-sheet detail ─────────────────────────────────────────────────
+    with st.expander("Per-frequency detail plots", expanded=False):
+        visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
+        for sheet_name in visible:
+            interp_df = output_data.get(sheet_name)
+            if interp_df is None:
+                continue
+            sc = scores[sheet_name]
+            if show_scores:
+                st.markdown(
+                    f"**{sheet_name}** — score `{sc['score']:.2f}` | "
+                    f"amp `{sc['amplitude']:.4g}` | σ `{sc['mean_std']:.4g}` "
+                    f"({sc['noise_method']}, {sc['n_traces']} trace(s))"
+                )
+            else:
+                st.markdown(f"**{sheet_name}** — {sc['n_traces']} trace(s)")
+            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem, markers)
+            st.pyplot(sheet_fig, use_container_width=True)
+            plt.close(sheet_fig)
+
+    # ── Downloads ────────────────────────────────────────────────────────
+    st.markdown("### Downloads")
+    columns = st.columns(3 if show_scores else 2)
+
+    with columns[0]:
+        st.download_button(
+            label="Interpolated profiles (.xlsx)",
+            data=build_excel_download(output_data),
+            file_name=f"{stem}_{mode}_interpolated.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"dl_xlsx_{file_key}",
+        )
+
+    if show_scores:
+        with columns[1]:
+            st.download_button(
+                label="Scores (.csv)",
+                data=build_scores_csv(scores),
+                file_name=f"{stem}_{mode}_scores.csv",
+                mime="text/csv",
+                key=f"dl_csv_{file_key}",
+            )
+
+    with columns[-1]:
+        download_fig = make_overview_figure(
+            output_data, scores, mode, file_name, opts, is_gem, show_scores, markers
+        )
+        png_bytes = fig_to_png(download_fig)
+        plt.close(download_fig)
+        st.download_button(
+            label="Overview plot (.png)",
+            data=png_bytes,
+            file_name=f"{stem}_{mode}_overview.png",
+            mime="image/png",
+            key=f"dl_png_{file_key}",
+        )
+
+
+def _render_channel_list(
+    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str, is_gem: bool
+) -> None:
+    """Channels of one mode without scores: passes and covered distance."""
+    st.markdown("### Channels")
+    rows = [
+        {
+            "Channel": name,
+            "Units": ctr.value_label(mode, is_gem, name),
+            "Traces": scores[name]["n_traces"],
+            "From (m)": round(float(df.index.min()), 3),
+            "To (m)": round(float(df.index.max()), 3),
+        }
+        for name, df in output_data.items()
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def _render_ranking(scores: dict[str, dict]) -> None:
+    """Frequency ranking table and best-frequency metrics."""
+    ranking = rank_scores(scores)
     if not ranking:
         st.error("No sheets could be scored.")
         return
-
-    stem = Path(file_name).stem
 
     rank_df = pd.DataFrame(
         [
@@ -1195,74 +1291,14 @@ def _render_mode_section(
         st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
         st.metric("Noise (σ)", f"{best_metrics['mean_std']:.4g}")
 
-    # ── Graph editor ─────────────────────────────────────────────────────
-    opts = render_graph_editor(output_data, file_key=file_key)
-
-    # ── Overview plot ────────────────────────────────────────────────────
-    st.markdown("### All representative profiles")
-    overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
-    st.pyplot(overview_fig, use_container_width=True)
-    plt.close(overview_fig)
-
-    # ── Per-sheet detail ─────────────────────────────────────────────────
-    with st.expander("Per-frequency detail plots", expanded=False):
-        visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
-        for sheet_name in visible:
-            interp_df = output_data.get(sheet_name)
-            if interp_df is None:
-                continue
-            sc = scores[sheet_name]
-            st.markdown(
-                f"**{sheet_name}** — score `{sc['score']:.2f}` | "
-                f"amp `{sc['amplitude']:.4g}` | σ `{sc['mean_std']:.4g}` "
-                f"({sc['noise_method']}, {sc['n_traces']} trace(s))"
-            )
-            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem)
-            st.pyplot(sheet_fig, use_container_width=True)
-            plt.close(sheet_fig)
-
-    # ── Downloads ────────────────────────────────────────────────────────
-    st.markdown("### Downloads")
-    dl1, dl2, dl3 = st.columns(3)
-
-    with dl1:
-        st.download_button(
-            label="Interpolated profiles (.xlsx)",
-            data=build_excel_download(output_data),
-            file_name=f"{stem}_{mode}_interpolated.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_xlsx_{file_key}",
-        )
-
-    with dl2:
-        st.download_button(
-            label="Scores (.csv)",
-            data=build_scores_csv(scores),
-            file_name=f"{stem}_{mode}_scores.csv",
-            mime="text/csv",
-            key=f"dl_csv_{file_key}",
-        )
-
-    with dl3:
-        download_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
-        png_bytes = fig_to_png(download_fig)
-        plt.close(download_fig)
-        st.download_button(
-            label="Overview plot (.png)",
-            data=png_bytes,
-            file_name=f"{stem}_{mode}_overview.png",
-            mime="image/png",
-            key=f"dl_png_{file_key}",
-        )
-
 
 # ---------------------------------------------------------------------------
 # 2D contouring (area maps & pseudo-sections)
 # ---------------------------------------------------------------------------
 
 def gem_value_column(mode: str, freq_label: str) -> str:
-    """Raw GEM column name for a mode and frequency label such as '4525Hz'."""
-    return f"EC{freq_label}[mS/m]" if mode == "EC" else f"MSusc{freq_label}[1/1000]"
+    """Raw GEM column name for a mode and channel label such as '4525Hz'."""
+    return gem_io.channel_column(mode, freq_label)
 
 
 @st.cache_data(show_spinner=False)
@@ -1291,10 +1327,12 @@ def compute_area_map_cached(
     file_bytes: bytes,
     file_name: str,
     value_col: str,
+    prep: pipeline.PrepSettings | None = None,
     **params,
 ) -> ctr.AreaMapResult:
-    """Cached wrapper around contouring.compute_area_map; *params* from grid_params()."""
-    return ctr.compute_area_map(read_raw_table(file_bytes, file_name), value_col, **params)
+    """Cached contouring.compute_area_map on the prepared table; *params* from grid_params()."""
+    table, _ = prepared_table(file_bytes, file_name, prep)
+    return ctr.compute_area_map(table, value_col, **params)
 
 
 def render_contouring_sidebar() -> ContourSettings:
@@ -1397,6 +1435,7 @@ def _render_area_map(
     contour: ContourSettings,
     file_bytes: bytes,
     is_gem: bool,
+    prep: pipeline.PrepSettings | None = None,
 ) -> None:
     st.markdown("### Area map")
     if not is_gem:
@@ -1406,12 +1445,12 @@ def _render_area_map(
         )
         return
 
-    freq = st.selectbox("Frequency", list(output_data.keys()), key=f"ct_freq_{file_key}")
-    label = ctr.value_label(mode, is_gem)
+    freq = st.selectbox("Channel", list(output_data.keys()), key=f"ct_freq_{file_key}")
+    label = ctr.value_label(mode, is_gem, freq)
     try:
         with st.spinner("Gridding…"):
             result = compute_area_map_cached(
-                file_bytes, file_name, gem_value_column(mode, freq),
+                file_bytes, file_name, gem_value_column(mode, freq), prep,
                 **grid_params(contour),
             )
         fig = ctr.make_area_map_figure(
@@ -1492,14 +1531,15 @@ def render_contouring(
     contour: ContourSettings,
     file_bytes: bytes,
     is_gem: bool,
+    prep: pipeline.PrepSettings | None = None,
 ) -> None:
     """Render the enabled 2D contouring sections for one file and mode."""
     if not output_data:
         return
-    if contour.pseudosection:
+    if contour.pseudosection and mode != "AUX":   # AUX channels are not frequencies
         _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
     if contour.area_map:
-        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem)
+        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
 
 
 # ---------------------------------------------------------------------------
@@ -1513,6 +1553,7 @@ def render_legacy_results(
     distance_step: float,
     interp_kind: str,
     contour: ContourSettings | None = None,
+    scoring: bool = True,
 ) -> None:
     """Process and render a legacy multi-sheet Excel file."""
     stem = Path(file_name).stem
@@ -1535,7 +1576,7 @@ def render_legacy_results(
             st.info("Try reducing the distance step in the sidebar.")
         return
 
-    _render_mode_section(output_data, scores, mode, file_name, file_key=stem)
+    _render_mode_section(output_data, scores, mode, file_name, file_key=stem, scoring=scoring)
     if contour is not None:
         render_contouring(
             output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
@@ -1548,6 +1589,8 @@ def render_gem_results(
     distance_step: float,
     interp_kind: str,
     contour: ContourSettings | None = None,
+    scoring: bool = True,
+    prep: pipeline.PrepSettings | None = None,
 ) -> None:
     """Process and render a GEM instrument file (CSV or XLSX)."""
     stem = Path(file_name).stem
@@ -1557,6 +1600,7 @@ def render_gem_results(
             file_bytes, file_name,
             distance_step=distance_step,
             interp_kind=interp_kind,
+            prep=prep,
         )
 
     if warnings:
@@ -1565,7 +1609,7 @@ def render_gem_results(
                 st.warning(w)
 
     # Determine which modes have data
-    available_modes = [m for m in ("EC", "MS") if output_data.get(m)]
+    available_modes = [m for m in gem_io.GEM_MODES if output_data.get(m)]
 
     if not available_modes:
         st.error("No usable frequencies found in this GEM file.")
@@ -1573,9 +1617,18 @@ def render_gem_results(
             st.info("Try reducing the distance step in the sidebar.")
         return
 
-    st.caption("GEM format detected — showing all frequencies for both EC and MS")
+    try:
+        table, _ = prepared_table(file_bytes, file_name, prep)
+        markers = gem_io.marker_distances(table, table[pipeline.DISTANCE_COL].to_numpy())
+    except Exception:  # preparation problems are already listed in the warnings
+        markers = []
 
-    tabs = st.tabs([f"{m} ({len(output_data[m])} frequencies)" for m in available_modes])
+    st.caption("GEM format detected — showing every channel in the file")
+
+    tabs = st.tabs([
+        f"{m} ({len(output_data[m])} {'channels' if m == 'AUX' else 'frequencies'})"
+        for m in available_modes
+    ])
 
     for tab, mode_key in zip(tabs, available_modes):
         with tab:
@@ -1586,11 +1639,13 @@ def render_gem_results(
                 file_name,
                 file_key=f"{stem}_{mode_key}",
                 is_gem=True,
+                scoring=scoring,
+                markers=markers,
             )
             if contour is not None:
                 render_contouring(
                     output_data[mode_key], mode_key, file_name,
-                    f"{stem}_{mode_key}", contour, file_bytes, is_gem=True,
+                    f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
                 )
 
 
