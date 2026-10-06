@@ -36,8 +36,8 @@ SCORE_EPSILON = 1e-8
 EXCEL_SHEET_NAME_MAX = 31
 
 MODES = {
-    "EC": "Mean EC Response (S/m)",
-    "MS": "Mean MS Response (10⁻⁵ SI)",
+    "EC": "Electrical conductivity",
+    "MS": "Magnetic susceptibility",
 }
 
 ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
@@ -75,7 +75,7 @@ class GraphOptions:
     show_envelope: bool = True
     plot_title: str = ""   # empty → use auto-generated default
     x_label: str = ""      # empty → "Distance (m)"
-    y_label: str = ""      # empty → MODES[mode]
+    y_label: str = ""      # empty → profile_label(mode, is_gem)
 
 
 @dataclass(frozen=True)
@@ -507,12 +507,18 @@ def process_file(
 # Plot helpers (return Figure objects, never touch global pyplot state)
 # ---------------------------------------------------------------------------
 
+def profile_label(mode: str, is_gem: bool) -> str:
+    """Y-axis label for mean profiles: GEM units are known, legacy units are not."""
+    return f"Mean {ctr.value_label(mode, is_gem)}"
+
+
 def make_overview_figure(
     output_data: dict[str, pd.DataFrame],
     scores: dict[str, dict],
     mode: str,
     file_name: str,
     opts: GraphOptions | None = None,
+    is_gem: bool = False,
 ) -> plt.Figure:
     """All representative profiles on one axes."""
     if opts is None:
@@ -521,7 +527,7 @@ def make_overview_figure(
     visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    y_label = MODES[mode]
+    y_label = profile_label(mode, is_gem)
 
     for sheet_name in visible:
         interp_df = output_data.get(sheet_name)
@@ -557,6 +563,7 @@ def make_sheet_figure(
     interp_df: pd.DataFrame,
     mode: str,
     opts: GraphOptions | None = None,
+    is_gem: bool = False,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean +/- 1 sigma envelope."""
     if opts is None:
@@ -601,7 +608,7 @@ def make_sheet_figure(
         )
 
     ax.set_xlabel(opts.x_label or "Distance (m)")
-    ax.set_ylabel(opts.y_label or MODES[mode])
+    ax.set_ylabel(opts.y_label or profile_label(mode, is_gem))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
     ax.grid(opts.show_grid, alpha=0.4)
@@ -952,7 +959,7 @@ def render_graph_editor(
         opts.y_label = lc3.text_input(
             "Y axis label",
             value="",
-            placeholder=f"{next(iter(MODES.values()))} …",
+            placeholder="Automatic (units from file)",
             key=f"ge_ylabel_{file_key}",
         )
 
@@ -969,6 +976,7 @@ def _render_mode_section(
     mode: str,
     file_name: str,
     file_key: str,
+    is_gem: bool = False,
 ) -> None:
     """
     Render ranking table, graph editor, plots, and downloads for one mode.
@@ -980,6 +988,7 @@ def _render_mode_section(
     mode        : "EC" or "MS"
     file_name   : original uploaded filename (for plot titles)
     file_key    : unique string for Streamlit widget key namespacing
+    is_gem      : True for GEM files (known units); False for legacy files
     """
     if not output_data:
         st.error("No usable frequencies / sheets found.")
@@ -1038,7 +1047,7 @@ def _render_mode_section(
 
     # ── Overview plot ────────────────────────────────────────────────────
     st.markdown("### All representative profiles")
-    overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts)
+    overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
     st.pyplot(overview_fig, use_container_width=True)
     plt.close(overview_fig)
 
@@ -1054,7 +1063,7 @@ def _render_mode_section(
                 f"**{sheet_name}** — score `{sc['score']:.2f}` | "
                 f"amp `{sc['amplitude']:.4g}` | std `{sc['mean_std']:.4g}`"
             )
-            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts)
+            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem)
             st.pyplot(sheet_fig, use_container_width=True)
             plt.close(sheet_fig)
 
@@ -1081,7 +1090,7 @@ def _render_mode_section(
         )
 
     with dl3:
-        download_fig = make_overview_figure(output_data, scores, mode, file_name, opts)
+        download_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
         png_bytes = fig_to_png(download_fig)
         plt.close(download_fig)
         st.download_button(
@@ -1422,6 +1431,7 @@ def render_gem_results(
                 mode_key,
                 file_name,
                 file_key=f"{stem}_{mode_key}",
+                is_gem=True,
             )
             if contour is not None:
                 render_contouring(
@@ -1506,7 +1516,7 @@ secondary field decouple cleanly:
 | Component | Physical quantity | Unit |
 |---|---|---|
 | **Quadrature** (out-of-phase) | Apparent electrical conductivity (EC) | mS/m |
-| **In-phase** | Apparent magnetic susceptibility (MS) | ×10⁻⁵ SI (dimensionless) |
+| **In-phase** | Apparent magnetic susceptibility (MS) | 10⁻³ SI (ppt, dimensionless) |
 
 This separation means a single instrument pass simultaneously
 maps two independent subsurface properties.
@@ -1701,7 +1711,7 @@ Switch on in the sidebar under **2D contouring**.
 | Term | Definition |
 |---|---|
 | **EC** | Apparent electrical conductivity (mS/m) — quadrature EMI response |
-| **MS** | Apparent magnetic susceptibility (×10⁻⁵ SI) — in-phase EMI response |
+| **MS** | Apparent magnetic susceptibility (10⁻³ SI, ppt) — in-phase EMI response |
 | **EMI** | Frequency-domain electromagnetic induction |
 | **LIN** | Low induction number approximation — the condition under which EC and MS decouple linearly (McNeill, 1980) |
 | **Skin depth (δ)** | Depth at which primary field amplitude falls to 1/e; decreases with frequency and conductivity |

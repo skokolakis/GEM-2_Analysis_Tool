@@ -46,3 +46,28 @@ def test_process_sheet_keeps_first_reading_at_repeated_distance():
     assert error is None
     assert interp.loc[1.0, "a"] == 1.0
     assert any("repeated distance" in w for w in col_warnings)
+
+
+# ---------------------------------------------------------------------------
+# Units (#8)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "mode, is_gem, expected",
+    [
+        ("EC", True, "Mean EC (mS/m)"),
+        ("MS", True, "Mean MS (10⁻³ SI)"),
+        ("EC", False, "Mean EC (input units)"),
+    ],
+)
+def test_plot_axes_carry_correct_units(mode, is_gem, expected):
+    import matplotlib.pyplot as plt
+
+    interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
+    scores = {"f": {"score": 1.0}}
+    fig = R.make_overview_figure({"f": interp}, scores, mode, "x", is_gem=is_gem)
+    assert fig.axes[0].get_ylabel() == expected
+    plt.close(fig)
+    fig = R.make_sheet_figure("f", interp, mode, is_gem=is_gem)
+    assert fig.axes[0].get_ylabel() == expected
+    plt.close(fig)
