@@ -134,4 +134,24 @@ def test_pca_denoise_reduces_independent_noise():
     assert kept > 0.95
 
 
+# ── positioning ──────────────────────────────────────────────────────────────
+
+def test_estimate_lag_recovers_injected_lag():
+    df = _survey(n=161, dt=0.25)
+    t = gem_io.time_seconds(df)
+    # Data recorded 0.5 s late: each value belongs to where the sensor was 0.5 s earlier.
+    true_y = np.empty(len(df))
+    for idx in df.groupby("Line").indices.values():
+        true_y[idx] = np.interp(t[idx] - 0.5, t[idx], df["Y"].to_numpy()[idx])
+    df["EC1525Hz[mS/m]"] = 20 + 5 * np.sin(true_y / 6.0)
+    lag, cost = C.estimate_lag(df, "EC1525Hz[mS/m]")
+    assert lag == pytest.approx(0.5, abs=0.11)
+    assert cost.argmin() == np.argmin(np.abs(C.LAG_SEARCH - lag))
+
+
+def test_heading_filter_keeps_one_direction():
+    df = _survey()                                     # even lines north, odd lines south
+    keep = C.heading_mask(df, 0.0, 30.0)
+    assert set(df.loc[keep, "Line"]) == {0, 2, 4}
+
 

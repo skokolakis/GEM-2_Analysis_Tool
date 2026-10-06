@@ -371,4 +371,95 @@ def pca_denoise(values: np.ndarray, n_components: int) -> tuple[np.ndarray, floa
     return out, float(np.sum(s[:k] ** 2) / np.sum(s ** 2))
 
 
+# ---------------------------------------------------------------------------
+# Positioning
+# ---------------------------------------------------------------------------
+
+
+def shift_positions(df: pd.DataFrame, t: np.ndarray, lag: float) -> pd.DataFrame:
+    """
+    Corrects a GPS/sensor time lag: a reading logged at time t was measured
+    where the sensor was at t - lag, so its coordinates are replaced by the
+    track position at t - lag (interpolated within each line).
+    """
+    x_col, y_col, _ = ctr.find_coordinate_columns(df, "auto")
+    out = df.copy()
+    x = _numeric(df, x_col)
+    y = _numeric(df, y_col)
+    nx, ny = x.copy(), y.copy()
+    for idx in _by_line(df):
+        ok = idx[np.isfinite(t[idx]) & np.isfinite(x[idx]) & np.isfinite(y[idx])]
+        if len(ok) < 2:
+            continue
+        order = ok[np.argsort(t[ok], kind="stable")]
+        nx[ok] = np.interp(t[ok] - lag, t[order], x[order])
+        ny[ok] = np.interp(t[ok] - lag, t[order], y[order])
+    out[x_col] = nx
+    out[y_col] = ny
+    return out
+
+
+def _cross_line_difference(
+    x: np.ndarray, y: np.ndarray, v: np.ndarray, lines: np.ndarray, probe: np.ndarray
+) -> float:
+    """Mean |v - v_nearest| over probe readings, nearest = closest reading on another line."""
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
+    idx = np.nonzero(ok)[0]
+    probe = probe[ok[probe]]
+    if len(idx) < 2 or len(probe) == 0:
+        return float("inf")
+    tree = cKDTree(np.column_stack([x[idx], y[idx]]))
+    k = min(LAG_NEIGHBOURS, len(idx))
+    _, j = tree.query(np.column_stack([x[probe], y[probe]]), k=k)
+    j = j.reshape(len(probe), k)
+    other = lines[idx[j]] != lines[probe][:, None]
+    found = other.any(axis=1)
+    if not found.any():
+        return float("inf")
+    first = idx[j[np.arange(len(probe)), np.argmax(other, axis=1)]]
+    return float(np.mean(np.abs(v[first[found]] - v[probe[found]])))
+
+
+def estimate_lag(
+    df: pd.DataFrame, column: str, lags: np.ndarray = LAG_SEARCH, seed: int = 0
+) -> tuple[float, np.ndarray]:
+    """
+    GPS time lag that minimises the mean absolute difference between each
+    reading and its nearest reading on another line (González Jiménez et
+    al., 2022). Works best when neighbouring lines were walked in opposite
+    directions. Returns (best lag, mean difference for every candidate).
+    """
+    t = _require_time(df, "Lag estimation")
+    v = _numeric(df, column)
+    lines = df["Line"].astype(str).to_numpy()
+    probe = np.arange(len(df))
+    if len(probe) > LAG_MAX_POINTS:
+        probe = np.sort(np.random.default_rng(seed).choice(probe, LAG_MAX_POINTS, replace=False))
+    cost = []
+    for lag in lags:
+        x, y, _ = xy_metres(shift_positions(df, t, float(lag)))
+        cost.append(_cross_line_difference(x, y, v, lines, probe))
+    cost = np.asarray(cost, dtype=float)
+    return float(lags[int(np.argmin(cost))]), cost
+
+
+def headings(df: pd.DataFrame) -> np.ndarray:
+    """Direction of travel of each reading, degrees clockwise from north (or from the +Y axis)."""
+    x, y, _ = xy_metres(df)
+    out = np.full(len(df), np.nan)
+    for idx in _by_line(df):
+        if len(idx) < 2:
+            continue
+        dx = np.gradient(x[idx])
+        dy = np.gradient(y[idx])
+        out[idx] = np.degrees(np.arctan2(dx, dy)) % 360.0
+    return out
+
+
+def heading_mask(df: pd.DataFrame, center: float, tolerance: float) -> np.ndarray:
+    """True for readings whose heading is within `tolerance` degrees of `center`."""
+    h = headings(df)
+    diff = np.abs((h - center + 180.0) % 360.0 - 180.0)
+    return np.isfinite(h) & (diff <= tolerance)
+
 
