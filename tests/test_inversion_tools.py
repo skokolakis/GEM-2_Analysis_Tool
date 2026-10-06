@@ -88,3 +88,32 @@ def test_emagpy_reads_the_export():
         k.createSurvey(path)
         assert k.surveys[0].freqs == [1525.0, 5325.0]
 
+
+def _inversion_app():
+    import numpy as np
+    import pandas as pd
+
+    import emphysics as E
+    import RIs_v2 as R
+
+    freqs = [1525.0, 5325.0, 18325.0, 63025.0]
+    rows = []
+    for line in range(2):
+        ys = np.arange(0.0, 10.0, 0.25)
+        part = pd.DataFrame({"Line": line, "X": 0.0, "Y": ys})
+        for f in freqs:
+            q = E.forward_ppm([f], [0.01], [0.0]).imag[0]
+            part[f"I_{f:g}Hz"] = 0.0
+            part[f"Q_{f:g}Hz"] = q * (1 + 0.01 * np.sin(ys + line))
+        rows.append(part)
+    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+    R.render_gem_results(data, "inv.csv", 0.25, "linear", None, False, None)
+
+
+def test_inversion_panel_runs_and_offers_model_download():
+    at = AppTest.from_function(_inversion_app, default_timeout=300)
+    at.run()
+    at.number_input(key="inv_s_inv").set_value(2.0).run()
+    at.button(key="inv_btn_inv").click().run()
+    assert not at.exception
+    assert any("stations" in c.value for c in at.caption)

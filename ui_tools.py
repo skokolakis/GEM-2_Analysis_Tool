@@ -1,7 +1,8 @@
 """
 Streamlit panels for the physics tools: forward modelling for survey
 planning, frequency information (skin depth, induction number, depth of
-investigation) and multi-height calibration of I/Q offsets.
+investigation), multi-height calibration of I/Q offsets, and layered-earth
+inversion with EMagPy export.
 
 Numerical work lives in emphysics.py; the small table helpers here are pure
 and tested on their own.
@@ -16,6 +17,7 @@ import streamlit as st
 import contouring as ctr
 import emphysics
 import gem_io
+import inversion
 
 DEFAULT_FREQUENCIES = "475, 1525, 5325, 18325, 63025"
 PERMITTIVITY_FREQUENCY = 40_000.0     # Hz; above this, permittivity can reach the in-phase
@@ -237,3 +239,106 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
             "Offsets (.csv)", offsets.to_csv(index=False).encode(),
             file_name=f"{file_key}_iq_offsets.csv", mime="text/csv", key=f"mh_dl_{file_key}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Inversion and export
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def run_inversion(
+    frequencies: np.ndarray,
+    data_q: np.ndarray,
+    errors: np.ndarray,
+    n_layers: int,
+    max_depth: float,
+    first: float,
+    alpha: float,
+    lateral: float,
+    sensor: emphysics.Sensor,
+) -> inversion.InversionResult:
+    """Cached inversion.invert on a fresh layer grid."""
+    grid = inversion.make_layer_grid(max_depth, n_layers, first)
+    return inversion.invert(frequencies, data_q, errors, grid, sensor, alpha, lateral)
+
+
+def render_inversion(
+    output_data: dict[str, dict[str, pd.DataFrame]],
+    scores: dict[str, dict[str, dict]],
+    table: pd.DataFrame | None,
+    file_key: str,
+    sensor: emphysics.Sensor,
+) -> None:
+    """Smooth 1D / laterally constrained inversion of the mean profiles, and EMagPy export."""
+    with st.expander("Layered-earth inversion (1D / laterally constrained)", expanded=False):
+        st.caption(
+            "Inverts the quadrature of the mean profiles for a smooth layered conductivity "
+            "model at stations along the line (Occam-style Gauss–Newton, Constable et al., "
+            "1987; lateral constraints as in Auken & Christiansen, 2004). EC-only files are "
+            "converted to quadrature with the half-space model. Calibrate first: offsets "
+            "in I/Q bias the result (Minsley et al., 2014)."
+        )
+        c1, c2, c3 = st.columns(3)
+        n_layers = c1.slider("Layers", 5, 30, 15, key=f"inv_n_{file_key}")
+        max_depth = c1.number_input("Depth to half-space (m)", 0.5, 50.0, 6.0, key=f"inv_d_{file_key}")
+        first = c1.number_input("First layer (m)", 0.01, 5.0, 0.1, key=f"inv_f_{file_key}")
+        alpha = c2.number_input("Regularisation (start)", 0.001, 10_000.0, 10.0, format="%.3g",
+                                key=f"inv_a_{file_key}")
+        lateral = c2.number_input("Lateral constraint (0 = independent 1D)", 0.0, 100.0, 1.0,
+                                  key=f"inv_l_{file_key}")
+        step = c2.number_input("Station spacing (m)", 0.1, 100.0, 1.0, key=f"inv_s_{file_key}")
+        rel = c3.number_input("Relative error (%)", 0.1, 50.0, 3.0, key=f"inv_r_{file_key}")
+        floor = c3.number_input("Error floor (ppm)", 0.0, 1000.0, 1.0, key=f"inv_fl_{file_key}")
+        use_noise = c3.checkbox("Use measured noise (between passes)", True, key=f"inv_n2_{file_key}")
+        try:
+            stations = inversion.station_data(output_data, scores, step, sensor)
+        except ValueError as exc:
+            st.info(str(exc))
+            return
+        st.caption(
+            f"{len(stations.distance)} stations × {len(stations.frequencies)} frequencies "
+            f"from the {stations.source} channels."
+        )
+        errors = inversion.data_errors(
+            np.nan_to_num(stations.quadrature, nan=0.0),
+            stations.noise if use_noise else None, rel / 100.0, floor,
+        )
+        run_key = f"inv_run_{file_key}"
+        if st.button("Invert", key=f"inv_btn_{file_key}"):
+            st.session_state[run_key] = True
+        if st.session_state.get(run_key):
+            try:
+                with st.spinner("Inverting…"):
+                    result = run_inversion(
+                        stations.frequencies, stations.quadrature, errors,
+                        int(n_layers), float(max_depth), float(first), float(alpha),
+                        float(lateral), sensor,
+                    )
+            except ValueError as exc:
+                st.info(str(exc))
+                return
+            fig = inversion.make_section_figure(result, stations.distance, f"Inverted EC — {file_key}")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+            st.download_button(
+                "Model (.csv)", inversion.model_table(result, stations.distance).to_csv(index=False).encode(),
+                file_name=f"{file_key}_inversion.csv", mime="text/csv", key=f"inv_dl_{file_key}",
+            )
+        if table is not None and output_data.get("EC"):
+            errors_ec = {
+                gem_io.channel_column("EC", lb): sc["mean_std"]
+                for lb, sc in scores.get("EC", {}).items() if sc["noise_method"] == "between-trace"
+            }
+            try:
+                data = inversion.emagpy_from_table(table, sensor, errors_ec or None)
+            except ValueError as exc:
+                st.info(str(exc))
+                return
+            st.download_button(
+                "EMagPy survey (.csv)", data, file_name=f"{file_key}_emagpy.csv",
+                mime="text/csv", key=f"inv_emagpy_{file_key}",
+                help="Coil columns HCP{separation}f{frequency}h{height} in mS/m with *_err "
+                     "columns from the between-pass noise. EMagPy models a plain loop pair: "
+                     "the GEM-2 bucking coil is not modelled there.",
+            )

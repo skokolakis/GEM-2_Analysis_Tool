@@ -1842,6 +1842,12 @@ def render_gem_results(
                     f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
                 )
 
+    try:
+        table, _ = prepared_table(file_bytes, file_name, prep)
+    except ValueError:
+        table = None
+    ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
+
 
 # ---------------------------------------------------------------------------
 # Streamlit UI
