@@ -74,6 +74,27 @@ The app opens in your browser at `http://localhost:8501`.
 
 - **Event markers** are drawn as dotted vertical lines on every profile.
 
+### Corrections & filters (sidebar)
+
+Applied to the EC, MS, I and Q channels of GEM files, before profiles and maps, in this order. Every step that runs is listed with the file's warnings.
+
+| Step | What it does | Needs |
+|---|---|---|
+| Despike | Blanks readings that differ from their running median by more than *threshold* × the robust noise σ (1.4826 · MAD of second differences / √6). Readings within half a window of a line end are not tested | — |
+| Clip to percentiles | Blanks values outside the chosen percentile range of each channel | — |
+| Sensor-height correction | Fits *a + b·exp(c·h)* of each channel against the height column (Vilhelmsen & Døssing, 2022), falling back to a straight line, and moves every reading to the reference height. Assumes geology is not correlated with height | Height column (e.g. drone altitude above ground) |
+| Temperature drift | Linear coefficient per channel from the base-station occupations, subtracted relative to their mean temperature | Temperature column and ≥ 3 base-station lines |
+| Base-station drift | Mean of each base-station occupation, trend in time (piecewise linear or straight line), subtracted relative to the first occupation; base-station lines are then removed (USGS GEM-2 practice) | Time column and ≥ 2 base-station lines |
+| Background EC | Shifts each EC channel so its median equals a known background value (GEM-2 Manual) | — |
+| Reference calibration | Gain and offset per channel from reference values (e.g. apparent conductivity predicted from ERT, Lavoué et al., 2010; Mester et al., 2011, or TDR, Dragonetti et al., 2018): least-squares line, or matched mean and standard deviation | CSV with the survey's coordinate columns and one column per channel |
+| EC at 25 °C | EC × (0.4470 + 1.4034·e^(−T/26.815)) (Sheets & Hendrickx, 1995; Corwin & Lesch, 2005) | Soil temperature |
+| PCA noise reduction | Keeps the first *k* principal components of the standardised channels of each mode (Minsley et al., 2010) | — |
+| Running mean | Centred moving average along each line | — |
+| GPS lag | Each reading takes the track position *lag* seconds earlier. **Estimate GPS lag** (under each file) picks the lag that minimises differences between neighbouring lines (González Jiménez et al., 2022) | Time column, coordinates |
+| Heading filter | Keeps readings walked within ± tolerance of a heading — e.g. to check for heading error on zig-zag surveys | Coordinates |
+
+> Despiking, the running mean and PCA lower the noise σ, so with scoring on the scores rise; the sidebar warns when they are combined.
+
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
 - Column 0 = distance (metres), Columns 1+ = one per survey line/trace
@@ -235,6 +256,7 @@ The **all-methods** batch export adds a `Method` column to the `Scores` sheet an
 ```
 gem_io.py      — GEM-2 export channels, Status flags, event markers, distance along line
 pipeline.py    — PrepSettings and prepare_gem_table(): the raw table before profiles and maps
+corrections.py — despike, clip, height, drift, temperature, calibration, EC25, PCA, GPS lag, heading
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
 ├── Configuration & constants
@@ -333,6 +355,22 @@ RIs_v2.py
 18. Huang, H. (2005). Depth of investigation for small broadband electromagnetic sensors. *Geophysics*, **70**(6), G135–G142. https://doi.org/10.1190/1.2122412
 
 19. Cressie, N. (1985). Fitting variogram models by weighted least squares. *Mathematical Geology*, **17**(5), 563–586. https://doi.org/10.1007/BF01032109
+
+20. Geophex Ltd. (2004). *GEM-2 Manual*, version 3.8. Raleigh, NC.
+
+21. Minsley, B.J., Smith, B.D., Hammack, R., Sams, J.I. & Veloski, G. (2010). Calibration and filtering strategies for frequency domain electromagnetic data. *SAGEEP 2010*. https://doi.org/10.4133/1.3445431
+
+22. Vilhelmsen, T.B. & Døssing, A. (2022). Drone-towed controlled-source electromagnetic (CSEM) system for near-surface geophysical prospecting. *Geoscientific Instrumentation, Methods and Data Systems*, **11**, 435–450. https://doi.org/10.5194/gi-11-435-2022
+
+23. González Jiménez, A. et al. (2022). Correcting on-the-go field measurement–coordinate mismatch by minimizing nearest neighbor difference. *Sensors*, **22**(4), 1496. https://doi.org/10.3390/s22041496
+
+24. Lavoué, F., van der Kruk, J., Rings, J., André, F., Moghadas, D., Huisman, J.A., Lambot, S. & Weihermüller, L. (2010). Electromagnetic induction calibration using apparent electrical conductivity modelling based on electrical resistivity tomography. *Near Surface Geophysics*, **8**(6), 553–561. https://doi.org/10.3997/1873-0604.2010037
+
+25. Mester, A., van der Kruk, J., Zimmermann, E. & Vereecken, H. (2011). Quantitative two-layer conductivity inversion of multi-configuration electromagnetic induction measurements. *Vadose Zone Journal*, **10**(4), 1319–1330. https://doi.org/10.2136/vzj2011.0035
+
+26. Dragonetti, G., Comegna, A., Ajeel, A., Deidda, G.P., Lamaddalena, N., Rodriguez, G., Vignoli, G. & Coppola, A. (2018). Calibrating electromagnetic induction conductivities with time-domain reflectometry measurements. *Hydrology and Earth System Sciences*, **22**, 1509–1523. https://doi.org/10.5194/hess-22-1509-2018
+
+27. Sheets, K.R. & Hendrickx, J.M.H. (1995). Noninvasive soil water content measurement using electromagnetic induction. *Water Resources Research*, **31**(10), 2401–2409. https://doi.org/10.1029/95WR01949
 
 ---
 

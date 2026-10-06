@@ -2006,7 +2006,7 @@ ranked last, with a warning.
 
 | Step | What happens |
 |---|---|
-| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`, `I_*Hz`, `Q_*Hz`). Readings with a non-zero `Status` are dropped (optional) and the distance of each reading along its line is found (sidebar **Distance along line**). The flat GEM table is pivoted: each channel becomes a matrix with distance as rows and survey lines as columns. |
+| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`, `I_*Hz`, `Q_*Hz`). Readings with a non-zero `Status` are dropped (optional), the enabled **Corrections & filters** run (despike, height, drift, calibration, GPS lag, …), and the distance of each reading along its line is found (sidebar **Distance along line**). The flat GEM table is pivoted: each channel becomes a matrix with distance as rows and survey lines as columns. |
 | **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). At a repeated distance within a trace only the first reading is kept. Each trace is left blank outside its own measured range. |
 | **3. Score** (optional) | With **Frequency scoring** on, the mean profile and noise metric are computed as above and frequencies are ranked by descending score. |
 | **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
