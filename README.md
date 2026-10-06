@@ -113,6 +113,19 @@ The physics tools use a layered-earth forward model of the GEM-2 (`emphysics.py`
 
 > Above about 40 kHz the in-phase response can include a dielectric-permittivity contribution (Benech et al., 2016); the MS and I tabs say so when such frequencies are present.
 
+### Layered-earth inversion and export
+
+Under each GEM file, **Layered-earth inversion** inverts the quadrature of the mean profiles for a smooth layered conductivity model at stations along the line:
+
+- Fixed layers growing geometrically from the first thickness to the depth of the half-space; parameters are log₁₀ conductivity.
+- Gauss–Newton with vertical smoothing (Occam-style, Constable et al., 1987) and, between neighbouring stations, lateral smoothing (laterally constrained inversion, Auken & Christiansen, 2004). Lateral constraint 0 gives independent 1D inversions.
+- The regularisation weight starts at the chosen value and is halved each iteration until χ² per datum reaches 1.
+- Data errors: the larger of *relative error × |data| + floor* and, optionally, the **measured between-pass noise** of each frequency — the same σ the scoring uses (converted to ppm for EC data).
+- EC-only files are converted to quadrature with the half-space model, which undoes a half-space conversion like the one in WinGEM.
+- Downloads: the model as CSV (distance, depth from / to, EC) and an **EMagPy survey file** (McLachlan et al., 2021): coordinates in metres, one column per frequency named `HCP{separation}f{frequency}h{height}` in mS/m, with `_err` columns from the between-pass noise. EMagPy models a plain loop pair, so the GEM-2 bucking coil is not modelled there.
+
+> Calibrate first (multi-height offsets, reference calibration): offsets in I/Q bias inverted models (Minsley et al., 2014).
+
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
 - Column 0 = distance (metres), Columns 1+ = one per survey line/trace
@@ -276,7 +289,8 @@ gem_io.py      — GEM-2 export channels, Status flags, event markers, distance 
 pipeline.py    — PrepSettings and prepare_gem_table(): the raw table before profiles and maps
 corrections.py — despike, clip, height, drift, temperature, calibration, EC25, PCA, GPS lag, heading
 emphysics.py   — layered-earth forward model, I/Q ↔ EC/MS conversion, skin depth, sensitivity, multi-height fit
-ui_tools.py    — Streamlit panels for the physics tools
+inversion.py   — smooth 1D / laterally constrained inversion, stations, EMagPy export
+ui_tools.py    — Streamlit panels for the physics and inversion tools
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
 ├── Configuration & constants
@@ -399,6 +413,12 @@ RIs_v2.py
 30. Minsley, B.J., Kass, M.A., Hodges, G. & Smith, B.D. (2014). Multielevation calibration of frequency-domain electromagnetic data. *Geophysics*, **79**(5), E201–E216. https://doi.org/10.1190/GEO2013-0320.1
 
 31. Benech, C., Lombard, P., Rejiba, F. & Tabbagh, A. (2016). Demonstrating the contribution of dielectric permittivity to the in-phase EMI response of soils: example from an archaeological site in Bahrain. *Near Surface Geophysics*, **14**, 337–344. https://doi.org/10.3997/1873-0604.2016023
+
+32. Constable, S.C., Parker, R.L. & Constable, C.G. (1987). Occam's inversion: a practical algorithm for generating smooth models from electromagnetic sounding data. *Geophysics*, **52**(3), 289–300. https://doi.org/10.1190/1.1442303
+
+33. Auken, E. & Christiansen, A.V. (2004). Layered and laterally constrained 2D inversion of resistivity data. *Geophysics*, **69**(3), 752–761. https://doi.org/10.1190/1.1759461
+
+34. McLachlan, P., Blanchy, G. & Binley, A. (2021). EMagPy: open-source standalone software for processing, forward modeling and inversion of electromagnetic induction data. *Computers & Geosciences*, **146**, 104561. https://doi.org/10.1016/j.cageo.2020.104561
 
 ---
 
