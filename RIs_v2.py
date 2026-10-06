@@ -25,6 +25,8 @@ from scipy.interpolate import (
 )
 
 import contouring as ctr
+import gem_io
+import pipeline
 
 # ---------------------------------------------------------------------------
 # Configuration (all in one place, easily overridden via Streamlit widgets)
@@ -62,10 +64,22 @@ LINE_STYLES = {
     "Dotted": ":",
 }
 
-# GEM instrument format detection
-GEM_EC_PATTERN = re.compile(r'^EC(\d+)Hz\[mS/m\]$')
-GEM_MS_PATTERN = re.compile(r'^MSusc(\d+)Hz\[1/1000\]$')
+# GEM instrument format detection (column patterns live in gem_io)
+GEM_EC_PATTERN = gem_io.CHANNEL_PATTERNS["EC"]
+GEM_MS_PATTERN = gem_io.CHANNEL_PATTERNS["MS"]
 GEM_REQUIRED_COLS = {'Line', 'Y'}
+
+SCORING_HELP = (
+    "Rank frequencies by signal-to-noise score (amplitude / noise σ). Off: "
+    "profiles, maps and exports are produced without scores."
+)
+DISTANCE_HELP = (
+    "How the distance of each reading along its line is found. "
+    "Projection: coordinates projected on the main survey axis — use for "
+    "repeat passes walked in either direction. Path length: restarts at the "
+    "first reading of each line. Event markers: markers placed every "
+    "'spacing' metres, readings spaced evenly between them."
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -128,9 +142,8 @@ def is_gem_format(df: pd.DataFrame) -> bool:
     cols = set(str(c) for c in df.columns)
     if not GEM_REQUIRED_COLS.issubset(cols):
         return False
-    has_ec = any(GEM_EC_PATTERN.match(str(c)) for c in df.columns)
-    has_ms = any(GEM_MS_PATTERN.match(str(c)) for c in df.columns)
-    return has_ec or has_ms
+    channels = gem_io.find_channels(df.columns)
+    return any(channels[m] for m in gem_io.FREQUENCY_MODES)
 
 
 def pivot_gem_frequency(
@@ -173,47 +186,41 @@ def pivot_gem_frequency(
 def parse_gem_dataframe(
     df: pd.DataFrame,
     warnings: list[str] | None = None,
+    distance_col: str = "Y",
 ) -> dict[str, dict[str, pd.DataFrame]]:
     """
-    Parse a GEM-format DataFrame into pivoted DataFrames per mode and frequency.
+    Parse a GEM-format DataFrame into pivoted DataFrames per mode and channel.
 
     Pivoting messages (e.g. dropped duplicate readings) are appended to *warnings*.
 
     Returns
     -------
-    {"EC": {"4525Hz": pivoted_df, ...}, "MS": {"4525Hz": pivoted_df, ...}}
+    {mode: {label: pivoted_df}} for every mode in gem_io.GEM_MODES, e.g.
+    {"EC": {"4525Hz": pivoted_df, ...}, "Q": {...}, "AUX": {"PowerLn": ...}}
     """
-    result: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
+    result: dict[str, dict[str, pd.DataFrame]] = {m: {} for m in gem_io.GEM_MODES}
 
     if warnings is not None:
-        y = pd.to_numeric(df["Y"], errors="coerce")
-        keyed = pd.DataFrame({"Line": df["Line"], "Y": y}).dropna(subset=["Y"])
+        d = pd.to_numeric(df[distance_col], errors="coerce")
+        keyed = pd.DataFrame({"Line": df["Line"], "d": d}).dropna(subset=["d"])
         dup = keyed.duplicated(keep="first")
         if dup.any():
             warnings.append(
-                f"{int(dup.sum())} repeated reading(s) at the same Y within "
+                f"{int(dup.sum())} repeated reading(s) at the same distance within "
                 f"{keyed.loc[dup, 'Line'].nunique()} line(s): kept the first reading "
                 "of each. If a line was walked out-and-back under one Line number, "
                 "give each direction its own Line."
             )
 
-    for col in df.columns:
-        col_str = str(col)
-
-        ec_match = GEM_EC_PATTERN.match(col_str)
-        if ec_match:
-            freq = ec_match.group(1)
-            label = f"{freq}Hz"
-            result["EC"][label] = pivot_gem_frequency(df, value_col=col_str)
-            continue
-
-        ms_match = GEM_MS_PATTERN.match(col_str)
-        if ms_match:
-            freq = ms_match.group(1)
-            label = f"{freq}Hz"
-            result["MS"][label] = pivot_gem_frequency(df, value_col=col_str)
+    for mode, channels in gem_io.find_channels(df.columns).items():
+        for label, col in channels.items():
+            result[mode][label] = pivot_gem_frequency(df, value_col=col, distance_col=distance_col)
 
     return result
+
+
+def _empty_modes() -> dict[str, dict]:
+    return {m: {} for m in gem_io.GEM_MODES}
 
 
 @st.cache_data(show_spinner=False)
@@ -222,14 +229,18 @@ def process_gem_file(
     file_name: str,
     distance_step: float = DEFAULT_DISTANCE_STEP,
     interp_kind: str = DEFAULT_INTERP_KIND,
+    prep: pipeline.PrepSettings | None = None,
 ) -> tuple[dict[str, dict[str, pd.DataFrame]], dict[str, dict[str, dict]], list[str]]:
     """
     Process a GEM-format file (CSV or XLSX).
 
+    *prep* selects quality filtering and how distance along each line is
+    found (default: drop flagged readings, distance = Y column).
+
     Returns
     -------
-    output_data : {"EC": {freq: interp_df, ...}, "MS": {freq: interp_df, ...}}
-    scores      : {"EC": {freq: score_dict, ...}, "MS": {freq: score_dict, ...}}
+    output_data : {mode: {channel: interp_df, ...}} for every mode in gem_io.GEM_MODES
+    scores      : {mode: {channel: score_dict, ...}}
     warnings    : list of warning strings
     """
     warnings: list[str] = []
@@ -240,13 +251,13 @@ def process_gem_file(
             raw_df = pd.read_csv(io.BytesIO(file_bytes))
         except Exception as exc:
             warnings.append(f"Could not read CSV: {exc}")
-            return {"EC": {}, "MS": {}}, {"EC": {}, "MS": {}}, warnings
+            return _empty_modes(), _empty_modes(), warnings
     else:
         try:
             raw_df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
         except Exception as exc:
             warnings.append(f"Could not read Excel: {exc}")
-            return {"EC": {}, "MS": {}}, {"EC": {}, "MS": {}}, warnings
+            return _empty_modes(), _empty_modes(), warnings
 
     # ── Precision check ─────────────────────────────────────────────────────
     # GEM CSV exports often round EC values to integers and MS to 1 d.p.,
@@ -270,12 +281,19 @@ def process_gem_file(
                 "Use the XLSX file for full instrument precision."
             )
 
-    gem_data = parse_gem_dataframe(raw_df, warnings)
+    try:
+        prepared, messages = pipeline.prepare_gem_table(raw_df, prep)
+    except ValueError as exc:
+        warnings.append(f"Could not prepare the data: {exc}")
+        return _empty_modes(), _empty_modes(), warnings
+    warnings.extend(messages)
 
-    output_data: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
-    scores: dict[str, dict[str, dict]] = {"EC": {}, "MS": {}}
+    gem_data = parse_gem_dataframe(prepared, warnings, distance_col=pipeline.DISTANCE_COL)
 
-    for mode_key in ("EC", "MS"):
+    output_data: dict[str, dict[str, pd.DataFrame]] = _empty_modes()
+    scores: dict[str, dict[str, dict]] = _empty_modes()
+
+    for mode_key in gem_io.GEM_MODES:
         for freq_label, pivoted_df in gem_data[mode_key].items():
             interp_df, score_dict, error, col_warnings = process_sheet(
                 pivoted_df, distance_step, interp_kind
@@ -296,6 +314,14 @@ def process_gem_file(
             warnings.append(f"{mode_key}: {mixed}")
 
     return output_data, scores, warnings
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def prepared_table(
+    file_bytes: bytes, file_name: str, prep: pipeline.PrepSettings | None = None
+) -> tuple[pd.DataFrame, list[str]]:
+    """Raw GEM table after pipeline.prepare_gem_table (raises on unreadable input)."""
+    return pipeline.prepare_gem_table(read_raw_table(file_bytes, file_name), prep)
 
 
 # ---------------------------------------------------------------------------
