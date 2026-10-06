@@ -749,6 +749,11 @@ def make_sheet_figure(
 # Export helpers
 # ---------------------------------------------------------------------------
 
+def excel_sheet_title(name: str) -> str:
+    """Excel-safe sheet title: [ ] : * ? / and backslash become '_', at most 31 characters."""
+    return re.sub(r"[\[\]:*?/\\]", "_", str(name))[:EXCEL_SHEET_NAME_MAX]
+
+
 def build_excel_download(output_data: dict[str, pd.DataFrame]) -> bytes:
     """Pack all interpolated sheets into a single Excel workbook."""
     buf = io.BytesIO()
@@ -762,7 +767,7 @@ def build_excel_download(output_data: dict[str, pd.DataFrame]) -> bytes:
                     col_label: rep_prof.values,
                 }
             )
-            out_df.to_excel(writer, sheet_name=sheet_name[:EXCEL_SHEET_NAME_MAX], index=False)
+            out_df.to_excel(writer, sheet_name=excel_sheet_title(sheet_name), index=False)
     return buf.getvalue()
 
 
@@ -793,6 +798,7 @@ def mean_profiles_table(output_data: dict[str, pd.DataFrame], label_len: int) ->
 
 def build_batch_xlsx(
     all_results: list[dict],
+    include_scores: bool = True,
 ) -> bytes:
     """
     Build a single xlsx containing all interpolated data and scores across every
@@ -809,7 +815,7 @@ def build_batch_xlsx(
     Workbook layout
     ---------------
     Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise,
-                       noise method and number of traces
+                       noise method and number of traces (only if *include_scores*)
     Per (file, mode) : distance column + one mean-profile column per frequency
     """
     buf = io.BytesIO()
@@ -823,7 +829,7 @@ def build_batch_xlsx(
             scores: dict[str, dict] = entry["scores"]
 
             # ── Scores accumulation ──────────────────────────────────────
-            for freq, sc in scores.items():
+            for freq, sc in (scores.items() if include_scores else ()):
                 score_rows.append({
                     "File": stem,
                     "Mode": mode,
@@ -869,6 +875,8 @@ def build_all_methods_batch_xlsx(
     uploaded_files: list,
     mode: str,
     distance_step: float,
+    include_scores: bool = True,
+    prep: pipeline.PrepSettings | None = None,
 ) -> bytes:
     """
     Run every interpolation method against every uploaded file and pack all
@@ -914,10 +922,10 @@ def build_all_methods_batch_xlsx(
             for method in ALL_INTERP_METHODS:
                 # Retrieve processed data (uses @st.cache_data — free if already computed)
                 if is_gem:
-                    out, sc, _ = process_gem_file(file_bytes, file_name, distance_step, method)
+                    out, sc, _ = process_gem_file(file_bytes, file_name, distance_step, method, prep)
                     entries = [
                         (mode_key, out[mode_key], sc[mode_key])
-                        for mode_key in ("EC", "MS")
+                        for mode_key in gem_io.GEM_MODES
                         if out.get(mode_key)
                     ]
                 else:
@@ -926,7 +934,7 @@ def build_all_methods_batch_xlsx(
 
                 for mode_key, output_data, scores in entries:
                     # Scores rows
-                    for freq, metrics in scores.items():
+                    for freq, metrics in (scores.items() if include_scores else ()):
                         score_rows.append({
                             "File": stem,
                             "Mode": mode_key,

@@ -59,3 +59,18 @@ def test_overview_legend_without_scores_and_markers():
     plt.close(fig)
 
 
+def test_batch_without_scores_has_no_scores_sheet():
+    interp = pd.DataFrame({"a": [1.0, 2.0]}, index=[0.0, 1.0])
+    entry = {"stem": "f", "mode": "EC", "output_data": {"x": interp},
+             "scores": {"x": {"score": 1.0, "amplitude": 1.0, "mean_std": 1.0,
+                              "noise_method": "between-trace", "n_traces": 1}}}
+    xlsx = R.build_batch_xlsx([entry], include_scores=False)
+    assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["f_EC"]
+
+
+def test_excel_download_accepts_bracketed_channel_names():
+    interp = pd.DataFrame({"a": [1.0, 2.0]}, index=[0.0, 1.0])
+    xlsx = R.build_excel_download({"TotalEC[mS/m]": interp})
+    assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["TotalEC_mS_m_"]
+
+
