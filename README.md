@@ -64,15 +64,18 @@ The app opens in your browser at `http://localhost:8501`.
 
 $$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
 
-- **A (Amplitude)** = max − min of the representative (mean) profile across all passes
+- **A (Amplitude)** = max − min of the representative (mean) profile, taken where at least two passes overlap (single-pass files: the whole profile)
 - **σ_noise** depends on the number of passes:
-  - **Multi-trace (≥ 2 passes)** — population standard deviation across traces at each distance step (ddof = 0); captures instrument noise, positioning uncertainty, and short-term drift
-  - **Single-trace fallback** — residual std after subtracting a rolling-mean smoother (window = max(5, N/10)); decomposes the profile into a geological trend and high-frequency noise component
-  - **Near-zero noise** — if σ < 10⁻⁸, score collapses to raw amplitude A to avoid numerical instability
+  - **Multi-trace (≥ 2 passes)** — sample standard deviation across passes (ddof = 1) at each distance step where ≥ 2 passes were measured, pooled as √(mean variance); captures instrument noise, positioning uncertainty, and short-term drift
+  - **Single-trace fallback** — estimated from the *measured* samples (not the interpolated grid) by second differences, which cancel a locally linear trend: σ ≈ 1.4826 · MAD(Δ²y) / √6. It does not depend on the distance step or interpolation method
+  - **Zero or undefined noise** — the score is left blank and ranked last, with a warning
+- Each trace is only used inside its own measured distance range — nothing is extrapolated
+
+The ranking table and exports show the **noise method** and number of **traces** behind each score. When some frequencies in a file fall back to the single-trace estimate, a warning says their scores are not strictly comparable with the others.
 
 **Higher score = cleaner, larger-contrast signal** → better for detailed profiling.
 
-> **Why population std (ddof = 0)?** The survey passes represent the complete set of measurements — not a sample from a larger population — so the population formula is statistically appropriate.
+> **Why sample std (ddof = 1)?** The passes are a finite sample of the measurement process whose noise is being estimated, so the sample formula applies. With two passes the population formula (ddof = 0) would understate σ by a factor of √½ ≈ 0.71.
 
 ### Customization
 
@@ -115,15 +118,15 @@ The app **automatically detects and warns** when a CSV has reduced precision. Fo
 ### Single-Trace Files
 
 Files with only one line (one trace per frequency) still produce valid scores:
-- Between-trace std = NaN → fallback to intra-profile SNR via rolling-window residuals
-- Ranking still works correctly; high score = large amplitude with low residual noise
+- Between-trace std is undefined → fallback to the second-difference noise estimate on the measured samples
+- Ranking still works correctly; high score = large amplitude with low point-to-point noise
 - Single-trace scores are less reliable than multi-pass results — multiple passes are always preferable
 
 ---
 
 ## Interpolation Methods
 
-All methods create a common distance grid using `np.linspace` and interpolate each trace onto it. Duplicate distance values are averaged before interpolation.
+All methods create a common distance grid using `np.linspace` and interpolate each trace onto it; grid points outside a trace's own measured range are left blank for that trace. At a repeated distance within a trace only the first reading is kept (with a warning) — averaging would lower that trace's noise alone.
 
 | Method | Min. points | Characteristics |
 |---|---|---|
@@ -133,9 +136,9 @@ All methods create a common distance grid using `np.linspace` and interpolate ea
 | **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
 | **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial. Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
 | **akima** | 5 | Akima (1970) local spline. Derives slopes from neighbouring points only, making it robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | Global least-squares polynomial fit (degree = min(n − 1, 5)). Suitable for very smooth, low-point-count profiles; avoid for long profiles where Runge oscillations can appear. |
+| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. Shown as "polynomial (trend fit)" in the sidebar. |
 
-The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
+The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison. Its `Exact interpolant` column is `False` for `polynomial`, whose scores are not comparable with the others.
 
 ---
 
@@ -186,7 +189,9 @@ One sheet per frequency with columns:
 One row per frequency:
 - `mean_std` — noise level (σ) in same units as measurement
 - `amplitude` — dynamic range of the profile
-- `score` — final ranking metric (amplitude ÷ noise)
+- `score` — final ranking metric (amplitude ÷ noise); blank if σ is zero or undefined
+- `noise_method` — `between-trace` or `intra-profile`
+- `n_traces` — number of passes used
 
 **Overview plot (`.png`)**
 All frequencies on a single axes, legend showing score per frequency.
@@ -197,8 +202,8 @@ A single workbook combining all uploaded files:
 
 | Sheet | Contents |
 |---|---|
-| `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ) |
-| `{stem}_{mode}` | Distance column + one `{freq}_mean` column per frequency |
+| `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ), Noise method, Traces |
+| `{stem}_{mode}` | Distance column + one `{freq}_mean` column per frequency, joined on distance (a frequency is blank where it has no data) |
 
 The **all-methods** batch export adds a `Method` column to the `Scores` sheet and creates separate data sheets per (file, mode, method) combination.
 

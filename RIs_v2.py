@@ -23,7 +23,6 @@ from scipy.interpolate import (
     PchipInterpolator,
     make_interp_spline,
 )
-from numpy.polynomial.polynomial import polyfit, polyval
 
 import contouring as ctr
 
@@ -33,14 +32,28 @@ import contouring as ctr
 DEFAULT_DISTANCE_STEP = 0.5
 DEFAULT_INTERP_KIND = "linear"
 SCORE_EPSILON = 1e-8
+
+# Noise estimators recorded in each score_dict ("noise_method")
+NOISE_BETWEEN = "between-trace"   # ≥ 2 overlapping passes
+NOISE_INTRA = "intra-profile"     # single usable pass
 EXCEL_SHEET_NAME_MAX = 31
 
 MODES = {
-    "EC": "Mean EC Response (S/m)",
-    "MS": "Mean MS Response (10⁻⁵ SI)",
+    "EC": "Electrical conductivity",
+    "MS": "Magnetic susceptibility",
 }
 
 ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
+
+# Methods that fit a smooth trend instead of passing through every sample.
+# They remove short-wavelength variability from each trace, lowering σ and
+# inflating the score, so their scores are not comparable with interpolants.
+TREND_FIT_METHODS = {"polynomial"}
+TREND_FIT_WARNING = (
+    "`polynomial` is a least-squares trend fit (degree ≤ 5), not an interpolant: "
+    "it smooths each trace, which lowers σ and inflates the score. Use it to view "
+    "trends, not to compare scores with the other methods."
+)
 
 LINE_STYLES = {
     "Solid": "-",
@@ -75,7 +88,7 @@ class GraphOptions:
     show_envelope: bool = True
     plot_title: str = ""   # empty → use auto-generated default
     x_label: str = ""      # empty → "Distance (m)"
-    y_label: str = ""      # empty → MODES[mode]
+    y_label: str = ""      # empty → profile_label(mode, is_gem)
 
 
 @dataclass(frozen=True)
@@ -131,21 +144,26 @@ def pivot_gem_frequency(
 
     Returns a DataFrame with column 0 = distance (Y values) and
     columns 1+ = one column per unique Line value.
+
+    Repeated readings at the same Y within a line keep only the first reading:
+    averaging them would lower that trace's noise alone (biasing the
+    between-trace σ) and silently merge a line walked out-and-back.
     """
     subset = df[[distance_col, line_col, value_col]].copy()
     subset[distance_col] = pd.to_numeric(subset[distance_col], errors="coerce")
     subset[value_col] = pd.to_numeric(subset[value_col], errors="coerce")
     subset = subset.dropna(subset=[distance_col, value_col])
+    subset = subset.drop_duplicates(subset=[line_col, distance_col], keep="first")
 
     pivoted = subset.pivot_table(
         index=distance_col,
         columns=line_col,
         values=value_col,
-        aggfunc="mean",
+        aggfunc="first",
     )
 
-    # Rename columns to "Line_0", "Line_1", etc.
-    pivoted.columns = [f"Line_{int(c)}" for c in pivoted.columns]
+    # Rename columns to "Line_0", "Line_1", "Line_L1", etc.
+    pivoted.columns = [f"Line_{c}" for c in pivoted.columns]
 
     # Reset index so column 0 = distance (what process_sheet expects)
     pivoted = pivoted.reset_index()
@@ -154,15 +172,30 @@ def pivot_gem_frequency(
 
 def parse_gem_dataframe(
     df: pd.DataFrame,
+    warnings: list[str] | None = None,
 ) -> dict[str, dict[str, pd.DataFrame]]:
     """
     Parse a GEM-format DataFrame into pivoted DataFrames per mode and frequency.
+
+    Pivoting messages (e.g. dropped duplicate readings) are appended to *warnings*.
 
     Returns
     -------
     {"EC": {"4525Hz": pivoted_df, ...}, "MS": {"4525Hz": pivoted_df, ...}}
     """
     result: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
+
+    if warnings is not None:
+        y = pd.to_numeric(df["Y"], errors="coerce")
+        keyed = pd.DataFrame({"Line": df["Line"], "Y": y}).dropna(subset=["Y"])
+        dup = keyed.duplicated(keep="first")
+        if dup.any():
+            warnings.append(
+                f"{int(dup.sum())} repeated reading(s) at the same Y within "
+                f"{keyed.loc[dup, 'Line'].nunique()} line(s): kept the first reading "
+                "of each. If a line was walked out-and-back under one Line number, "
+                "give each direction its own Line."
+            )
 
     for col in df.columns:
         col_str = str(col)
@@ -237,7 +270,7 @@ def process_gem_file(
                 "Use the XLSX file for full instrument precision."
             )
 
-    gem_data = parse_gem_dataframe(raw_df)
+    gem_data = parse_gem_dataframe(raw_df, warnings)
 
     output_data: dict[str, dict[str, pd.DataFrame]] = {"EC": {}, "MS": {}}
     scores: dict[str, dict[str, dict]] = {"EC": {}, "MS": {}}
@@ -257,6 +290,10 @@ def process_gem_file(
 
             output_data[mode_key][freq_label] = interp_df
             scores[mode_key][freq_label] = score_dict
+
+        mixed = noise_method_warning(scores[mode_key])
+        if mixed:
+            warnings.append(f"{mode_key}: {mixed}")
 
     return output_data, scores, warnings
 
@@ -302,9 +339,10 @@ def _interpolate_with_method(
         return make_interp_spline(xp, yp, k=2)(target_x)
 
     if method == "polynomial":
+        # Least-squares trend fit (exact only for ≤ 6 points). Polynomial.fit
+        # maps x onto [-1, 1], keeping projected coordinates well-conditioned.
         degree = min(len(xp) - 1, 5)
-        coeffs = polyfit(xp, yp, degree)
-        return polyval(target_x, coeffs)
+        return np.polynomial.Polynomial.fit(xp, yp, degree)(target_x)
 
     if method == "akima":
         return Akima1DInterpolator(xp, yp)(target_x)
@@ -329,8 +367,11 @@ def process_sheet(
 
     Returns
     -------
-    interpolated_df : DataFrame indexed by common distance, columns = original trace columns
-    score_dict      : {"mean_std": float, "amplitude": float, "score": float}
+    interpolated_df : DataFrame indexed by common distance, columns = original trace
+                      columns; NaN outside each trace's own measured range
+    score_dict      : {"mean_std": σ_noise, "amplitude": float, "score": float,
+                       "noise_method": NOISE_BETWEEN | NOISE_INTRA, "n_traces": int}
+                      score is NaN when the noise is zero or undefined
     error           : human-readable reason for failure, or None on success
     col_warnings    : list of per-column warning strings surfaced to the UI
     """
@@ -360,6 +401,7 @@ def process_sheet(
     common_dist = np.linspace(min_dist, max_dist, n_points)
 
     interpolated_lines: dict[str, np.ndarray] = {}
+    raw_samples: dict[str, np.ndarray] = {}
 
     for col in line_data.columns:
         y = line_data[col].values
@@ -369,17 +411,17 @@ def process_sheet(
             log.debug("  Column %s: fewer than 2 valid points, skipped.", col)
             continue
 
-        df_xy = (
-            pd.DataFrame({"d": distance[mask], "y": y[mask]})
-            .groupby("d", as_index=False)
-            .mean()
-            .sort_values("d")
-            .drop_duplicates(subset="d")
+        # Keep the first reading at a repeated distance rather than averaging:
+        # averaging lowers this trace's noise alone and biases the between-trace σ.
+        df_xy = pd.DataFrame({"d": distance[mask], "y": y[mask]}).sort_values(
+            "d", kind="stable"
         )
-
-        if not df_xy["d"].is_monotonic_increasing:
-            col_warnings.append(f"column '{col}': distance not monotonic after dedup, skipped")
-            continue
+        n_dup = int(df_xy["d"].duplicated().sum())
+        if n_dup:
+            col_warnings.append(
+                f"column '{col}': {n_dup} repeated distance value(s), kept the first reading"
+            )
+            df_xy = df_xy.drop_duplicates(subset="d", keep="first")
 
         if df_xy.shape[0] < 2:
             continue
@@ -394,10 +436,14 @@ def process_sheet(
                     f"column '{col}': need ≥{min_pts} points for {interp_kind} interpolation, skipped"
                 )
                 continue
-            interpolated_lines[col] = _interpolate_with_method(xp, yp, common_dist, interp_kind)
+            values = _interpolate_with_method(xp, yp, common_dist, interp_kind)
         except Exception as exc:
             col_warnings.append(f"column '{col}': interpolation failed — {exc}")
             continue
+        # Never extrapolate: a pass only contributes where it was measured
+        inside = (common_dist >= xp[0]) & (common_dist <= xp[-1])
+        interpolated_lines[col] = np.where(inside, values, np.nan)
+        raw_samples[col] = yp
 
     if not interpolated_lines:
         return None, None, "no columns survived interpolation", col_warnings
@@ -406,32 +452,84 @@ def process_sheet(
     interpolated_df.index.name = "Distance (m)"
 
     rep_prof = interpolated_df.mean(axis=1, skipna=True)
-    # Population std (ddof=0): the traces ARE the full population of survey
-    # passes, not a sample from a larger population.
-    std_prof = interpolated_df.std(axis=1, skipna=True, ddof=0)
+    n_traces = interpolated_df.shape[1]
 
-    mean_std = float(std_prof.mean())
-    amplitude = float(np.nanmax(rep_prof) - np.nanmin(rep_prof))
-
-    if np.isnan(mean_std) or mean_std < SCORE_EPSILON:
-        # Single trace or near-identical traces: between-trace std is meaningless.
-        # Fall back to intra-profile SNR: amplitude / within-profile noise.
-        # Noise is estimated as the std of residuals from a rolling-mean smoother,
-        # which separates low-frequency signal from high-frequency noise.
-        window = max(5, len(rep_prof) // 10)
-        smoothed = rep_prof.rolling(window=window, center=True, min_periods=1).mean()
-        intra_noise = float((rep_prof - smoothed).std())
-        mean_std = intra_noise  # store noise level so it appears in the UI
-        if intra_noise < SCORE_EPSILON:
-            score = amplitude  # perfectly smooth data: score is raw amplitude
-        else:
-            score = amplitude / intra_noise
+    if n_traces >= 2:
+        # Between-trace noise, only where ≥ 2 passes were measured. The passes
+        # are a finite sample of the measurement process, hence ddof=1; the
+        # point-wise variances are pooled as sqrt(mean(var)).
+        overlap = interpolated_df.notna().sum(axis=1) >= 2
+        if not overlap.any():
+            return None, None, "traces do not overlap in distance", col_warnings
+        var_prof = interpolated_df[overlap].var(axis=1, skipna=True, ddof=1)
+        noise = float(np.sqrt(np.nanmean(var_prof)))
+        amp_prof = rep_prof[overlap]
+        noise_method = NOISE_BETWEEN
     else:
-        # Multi-trace: score = signal range / between-trace variability (SNR)
-        score = amplitude / mean_std if mean_std > SCORE_EPSILON else amplitude
+        noise = _intra_profile_noise(next(iter(raw_samples.values())))
+        amp_prof = rep_prof
+        noise_method = NOISE_INTRA
 
-    score_dict = {"mean_std": mean_std, "amplitude": amplitude, "score": score}
+    amplitude = float(np.nanmax(amp_prof) - np.nanmin(amp_prof))
+
+    if np.isfinite(noise) and noise >= SCORE_EPSILON:
+        score = amplitude / noise
+    else:
+        # Zero or undefined noise: a ratio would be meaningless, and falling
+        # back to the amplitude would rank a data-unit value against ratios.
+        score = np.nan
+        col_warnings.append(
+            f"{noise_method} noise is zero or undefined — score left blank"
+        )
+
+    score_dict = {
+        "mean_std": noise,
+        "amplitude": amplitude,
+        "score": score,
+        "noise_method": noise_method,
+        "n_traces": n_traces,
+    }
     return interpolated_df, score_dict, None, col_warnings
+
+
+def _intra_profile_noise(y: np.ndarray) -> float:
+    """
+    Noise σ of a single pass, from its measured samples (not the interpolated
+    grid), so it does not depend on the distance step or interpolation method.
+
+    Second differences cancel a locally linear trend, and for white noise
+    var(Δ²y) = 6σ², so σ ≈ 1.4826·MAD(Δ²y)/√6 — the MAD ignores the few large
+    differences at sharp boundaries. Falls back to std(Δ²y)/√6 when the MAD
+    is zero (e.g. coarsely rounded data). NaN if there are too few samples.
+    """
+    d2 = np.diff(np.asarray(y, dtype=float), n=2)
+    if d2.size < 3:
+        return float("nan")
+    mad = float(np.median(np.abs(d2 - np.median(d2))))
+    if mad > 0:
+        return 1.4826 * mad / np.sqrt(6)
+    return float(np.std(d2, ddof=1) / np.sqrt(6))
+
+
+def noise_method_warning(scores: dict[str, dict]) -> str | None:
+    """Message when frequencies in one ranking were scored with different noise estimators."""
+    intra = [name for name, sc in scores.items() if sc["noise_method"] == NOISE_INTRA]
+    if not intra or len(intra) == len(scores):
+        return None
+    return (
+        f"Only one usable pass for {', '.join(map(str, intra))}: noise was estimated "
+        "within that profile rather than between passes, so its score is not "
+        "strictly comparable with the others."
+    )
+
+
+def rank_scores(scores: dict[str, dict]) -> list[tuple[str, dict]]:
+    """Scores sorted best first; blank (NaN) scores go last."""
+    return sorted(
+        scores.items(),
+        key=lambda kv: (np.isfinite(kv[1]["score"]), np.nan_to_num(kv[1]["score"])),
+        reverse=True,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -480,6 +578,10 @@ def process_file(
         output_data[sheet_name] = interp_df
         scores[sheet_name] = score_dict
 
+    mixed = noise_method_warning(scores)
+    if mixed:
+        warnings.append(mixed)
+
     return output_data, scores, warnings
 
 
@@ -487,12 +589,18 @@ def process_file(
 # Plot helpers (return Figure objects, never touch global pyplot state)
 # ---------------------------------------------------------------------------
 
+def profile_label(mode: str, is_gem: bool) -> str:
+    """Y-axis label for mean profiles: GEM units are known, legacy units are not."""
+    return f"Mean {ctr.value_label(mode, is_gem)}"
+
+
 def make_overview_figure(
     output_data: dict[str, pd.DataFrame],
     scores: dict[str, dict],
     mode: str,
     file_name: str,
     opts: GraphOptions | None = None,
+    is_gem: bool = False,
 ) -> plt.Figure:
     """All representative profiles on one axes."""
     if opts is None:
@@ -501,7 +609,7 @@ def make_overview_figure(
     visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    y_label = MODES[mode]
+    y_label = profile_label(mode, is_gem)
 
     for sheet_name in visible:
         interp_df = output_data.get(sheet_name)
@@ -537,6 +645,7 @@ def make_sheet_figure(
     interp_df: pd.DataFrame,
     mode: str,
     opts: GraphOptions | None = None,
+    is_gem: bool = False,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean +/- 1 sigma envelope."""
     if opts is None:
@@ -545,7 +654,8 @@ def make_sheet_figure(
     fig, ax = plt.subplots(figsize=(10, 4))
     common_dist = interp_df.index.values
     rep_prof = interp_df.mean(axis=1, skipna=True).values
-    std_prof = interp_df.std(axis=1, skipna=True).values
+    # Same estimator as the score's σ (ddof=1); blank where only one pass exists
+    std_prof = interp_df.std(axis=1, skipna=True, ddof=1).values
 
     # Individual traces (thin, semi-transparent)
     if opts.show_traces:
@@ -581,7 +691,7 @@ def make_sheet_figure(
         )
 
     ax.set_xlabel(opts.x_label or "Distance (m)")
-    ax.set_ylabel(opts.y_label or MODES[mode])
+    ax.set_ylabel(opts.y_label or profile_label(mode, is_gem))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
     ax.grid(opts.show_grid, alpha=0.4)
@@ -620,6 +730,25 @@ def build_scores_csv(scores: dict[str, dict]) -> bytes:
     return df.to_csv().encode()
 
 
+def mean_profiles_table(output_data: dict[str, pd.DataFrame], label_len: int) -> pd.DataFrame:
+    """
+    One "Distance (m)" column plus one "{freq}_mean" column per frequency/sheet.
+
+    Each frequency keeps its own distance grid: profiles are outer-joined on
+    distance, so a frequency is blank where it has no data rather than being
+    written against another frequency's distances.
+    """
+    profiles = {}
+    for freq, interp_df in output_data.items():
+        prof = interp_df.mean(axis=1, skipna=True)
+        # Round so grids that coincide up to float noise share rows
+        prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
+        profiles[f"{freq[:label_len]}_mean"] = prof
+    table = pd.concat(profiles, axis=1).sort_index()
+    table.index.name = "Distance (m)"
+    return table.reset_index()
+
+
 def build_batch_xlsx(
     all_results: list[dict],
 ) -> bytes:
@@ -637,7 +766,8 @@ def build_batch_xlsx(
 
     Workbook layout
     ---------------
-    Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise
+    Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise,
+                       noise method and number of traces
     Per (file, mode) : distance column + one mean-profile column per frequency
     """
     buf = io.BytesIO()
@@ -659,23 +789,15 @@ def build_batch_xlsx(
                     "Score": round(sc["score"], 4),
                     "Amplitude": round(sc["amplitude"], 6),
                     "Noise (σ)": round(sc["mean_std"], 6),
+                    "Noise method": sc["noise_method"],
+                    "Traces": sc["n_traces"],
                 })
 
             # ── Interpolated data sheet ──────────────────────────────────
             if not output_data:
                 continue
 
-            # All frequencies share the same distance grid within a file/mode
-            first_df = next(iter(output_data.values()))
-            dist_col = first_df.index.values
-
-            data_sheet: dict[str, np.ndarray] = {"Distance (m)": dist_col}
-            for freq, interp_df in output_data.items():
-                rep_prof = interp_df.mean(axis=1, skipna=True).values
-                col_label = f"{freq[:20]}_mean"
-                data_sheet[col_label] = rep_prof
-
-            data_df = pd.DataFrame(data_sheet)
+            data_df = mean_profiles_table(output_data, label_len=20)
 
             # Sheet name: "{stem}_{mode}", truncated to 31 chars
             raw_sheet = f"{stem}_{mode}"
@@ -712,7 +834,9 @@ def build_all_methods_batch_xlsx(
 
     Workbook layout
     ---------------
-    Sheet "Scores"            : File | Mode | Frequency | Method | Score | Amplitude | Noise(σ)
+    Sheet "Scores"            : File | Mode | Frequency | Method | Exact interpolant | Score
+                                | Amplitude | Noise(σ)
+                                | Noise method | Traces
     "{stem}_{mode}_{method}"  : Distance (m) + one {freq}_mean column per frequency
     """
     buf = io.BytesIO()
@@ -766,22 +890,22 @@ def build_all_methods_batch_xlsx(
                             "Mode": mode_key,
                             "Frequency / Sheet": freq,
                             "Method": method,
+                            "Exact interpolant": method not in TREND_FIT_METHODS,
                             "Score": round(metrics["score"], 4),
                             "Amplitude": round(metrics["amplitude"], 6),
                             "Noise (σ)": round(metrics["mean_std"], 6),
+                            "Noise method": metrics["noise_method"],
+                            "Traces": metrics["n_traces"],
                         })
 
                     # Data sheet: Distance + one mean column per frequency
                     if not output_data:
                         continue
-                    first_df = next(iter(output_data.values()))
-                    data: dict[str, np.ndarray] = {"Distance (m)": first_df.index.values}
-                    for freq, interp_df in output_data.items():
-                        data[f"{freq[:18]}_mean"] = interp_df.mean(axis=1, skipna=True).values
-
                     raw = f"{stem[:10]}_{mode_key}_{method}"
                     sheet_name = _unique_sheet(raw, writer.sheets.keys())
-                    pd.DataFrame(data).to_excel(writer, sheet_name=sheet_name, index=False)
+                    mean_profiles_table(output_data, label_len=18).to_excel(
+                        writer, sheet_name=sheet_name, index=False
+                    )
 
         # Scores summary — written last (openpyxl appends; reorder below)
         if score_rows:
@@ -932,7 +1056,7 @@ def render_graph_editor(
         opts.y_label = lc3.text_input(
             "Y axis label",
             value="",
-            placeholder=f"{next(iter(MODES.values()))} …",
+            placeholder="Automatic (units from file)",
             key=f"ge_ylabel_{file_key}",
         )
 
@@ -949,6 +1073,7 @@ def _render_mode_section(
     mode: str,
     file_name: str,
     file_key: str,
+    is_gem: bool = False,
 ) -> None:
     """
     Render ranking table, graph editor, plots, and downloads for one mode.
@@ -960,13 +1085,14 @@ def _render_mode_section(
     mode        : "EC" or "MS"
     file_name   : original uploaded filename (for plot titles)
     file_key    : unique string for Streamlit widget key namespacing
+    is_gem      : True for GEM files (known units); False for legacy files
     """
     if not output_data:
         st.error("No usable frequencies / sheets found.")
         return
 
     # ── Ranking table ───────────────────────────────────────────────────
-    ranking = sorted(scores.items(), key=lambda x: x[1]["score"], reverse=True)
+    ranking = rank_scores(scores)
 
     if not ranking:
         st.error("No sheets could be scored.")
@@ -982,6 +1108,8 @@ def _render_mode_section(
                 "Score": round(m["score"], 2),
                 "Amplitude": round(m["amplitude"], 6),
                 "Noise (σ)": round(m["mean_std"], 6),
+                "Noise method": m["noise_method"],
+                "Traces": m["n_traces"],
             }
             for i, (name, m) in enumerate(ranking, 1)
         ]
@@ -990,8 +1118,11 @@ def _render_mode_section(
     col_table, col_best = st.columns([3, 1])
     with col_table:
         st.markdown("### Frequency Ranking")
+        styled = rank_df.style
+        if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
+            styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn")
         st.dataframe(
-            rank_df.style.background_gradient(subset=["Score"], cmap="RdYlGn"),
+            styled,
             use_container_width=True,
             hide_index=True,
         )
@@ -1003,10 +1134,11 @@ def _render_mode_section(
             f"score {best_metrics['score']:.2f}",
             help=(
                 "Score = amplitude / noise (σ). "
-                "Multi-trace: noise = population std across traces (ddof=0). "
-                "Single-trace: noise = residual std after removing the trend "
-                "with a rolling-window smoother. "
-                "If noise is zero, score equals the raw amplitude. "
+                "Multi-trace: σ = pooled sample std across passes (ddof=1), "
+                "where ≥ 2 passes overlap. "
+                "Single-trace: σ from second differences of the measured "
+                "samples (robust MAD). "
+                "If σ is zero or undefined, the score is left blank. "
                 "Higher score = cleaner, larger signal."
             ),
         )
@@ -1018,7 +1150,7 @@ def _render_mode_section(
 
     # ── Overview plot ────────────────────────────────────────────────────
     st.markdown("### All representative profiles")
-    overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts)
+    overview_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
     st.pyplot(overview_fig, use_container_width=True)
     plt.close(overview_fig)
 
@@ -1032,9 +1164,10 @@ def _render_mode_section(
             sc = scores[sheet_name]
             st.markdown(
                 f"**{sheet_name}** — score `{sc['score']:.2f}` | "
-                f"amp `{sc['amplitude']:.4g}` | std `{sc['mean_std']:.4g}`"
+                f"amp `{sc['amplitude']:.4g}` | σ `{sc['mean_std']:.4g}` "
+                f"({sc['noise_method']}, {sc['n_traces']} trace(s))"
             )
-            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts)
+            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem)
             st.pyplot(sheet_fig, use_container_width=True)
             plt.close(sheet_fig)
 
@@ -1061,7 +1194,7 @@ def _render_mode_section(
         )
 
     with dl3:
-        download_fig = make_overview_figure(output_data, scores, mode, file_name, opts)
+        download_fig = make_overview_figure(output_data, scores, mode, file_name, opts, is_gem)
         png_bytes = fig_to_png(download_fig)
         plt.close(download_fig)
         st.download_button(
@@ -1402,6 +1535,7 @@ def render_gem_results(
                 mode_key,
                 file_name,
                 file_key=f"{stem}_{mode_key}",
+                is_gem=True,
             )
             if contour is not None:
                 render_contouring(
@@ -1446,9 +1580,12 @@ def main():
 
         interp_kind = st.selectbox(
             "Interpolation method",
-            ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"],
+            ALL_INTERP_METHODS,
             index=0,
+            format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
         )
+        if interp_kind in TREND_FIT_METHODS:
+            st.warning(TREND_FIT_WARNING)
 
         if distance_step > 10.0:
             st.warning(
@@ -1486,7 +1623,7 @@ secondary field decouple cleanly:
 | Component | Physical quantity | Unit |
 |---|---|---|
 | **Quadrature** (out-of-phase) | Apparent electrical conductivity (EC) | mS/m |
-| **In-phase** | Apparent magnetic susceptibility (MS) | ×10⁻⁵ SI (dimensionless) |
+| **In-phase** | Apparent magnetic susceptibility (MS) | 10⁻³ SI (ppt, dimensionless) |
 
 This separation means a single instrument pass simultaneously
 maps two independent subsurface properties.
@@ -1569,7 +1706,7 @@ $$\\text{Score} = \\frac{A}{\\sigma_{\\text{noise}}}$$
 
 | Symbol | Meaning |
 |---|---|
-| **A** | Signal amplitude — the peak-to-trough range of the mean profile: max(p̄) − min(p̄). Captures the total geophysical contrast resolved at that frequency. |
+| **A** | Signal amplitude — the peak-to-trough range of the mean profile: max(p̄) − min(p̄), taken where at least two passes overlap. Captures the total geophysical contrast resolved at that frequency. |
 | **σ_noise** | Noise — estimated from the data depending on how many passes were acquired (see below). |
 
 A higher score means the frequency resolves large subsurface
@@ -1580,31 +1717,30 @@ criterion for data quality (Sheriff & Geldart, 1995).
 **How noise is estimated:**
 
 **With ≥ 2 passes (recommended):**
-σ is the mean of the point-wise population standard deviation
-computed across all traces at each distance step. Because the
-traces represent the complete set of survey passes — not a
-sample from a larger population — the population formula
-(ddof = 0) is appropriate. This σ captures all sources of
-between-pass variability: instrument noise, positioning
-uncertainty, and short-term drift.
+At each distance step where at least two passes were measured,
+the sample variance across passes (ddof = 1) is computed; σ is
+the square root of the mean of these variances. The passes are a
+finite sample of the measurement process whose noise is being
+estimated, so the sample formula applies. This σ captures all
+sources of between-pass variability: instrument noise,
+positioning uncertainty, and short-term drift. Each pass is used
+only inside its own measured distance range — nothing is
+extrapolated.
 
 **With 1 pass only (single-trace fallback):**
-Between-trace σ is undefined, so the tool estimates intra-profile
-noise by subtracting a rolling-mean smoother (window =
-max(5, N/10) samples) from the profile and computing the
-standard deviation of the residuals. This decomposes the signal
-into a slowly varying geological trend and a high-frequency
-noise component, using only the latter as σ. This approach is
-analogous to the residual-noise estimators used in single-channel
-seismic quality assessment (Bakulin et al., 2022). Note that
-single-trace scores are less reliable — multiple passes are
-always preferable.
+Between-trace σ is undefined, so the tool estimates noise from
+the *measured* samples of that pass (not the interpolated grid).
+Second differences Δ²y cancel a locally linear geological trend;
+for white noise var(Δ²y) = 6σ², so σ ≈ 1.4826 · MAD(Δ²y) / √6.
+The median absolute deviation ignores the few large differences
+at sharp boundaries, and the estimate does not depend on the
+distance step or interpolation method. Single-trace scores are
+less reliable — multiple passes are always preferable — and the
+ranking warns when they are mixed with multi-pass scores.
 
-**Near-zero noise fallback:**
-When σ < 10⁻⁸ (effectively zero — e.g. a perfectly flat synthetic
-trace), the score collapses to the raw amplitude A to avoid
-numerical instability. This edge case does not arise with real
-field data.
+**Zero or undefined noise:**
+When σ < 10⁻⁸ or cannot be estimated, the score is left blank and
+ranked last, with a warning.
 
 ---
 
@@ -1613,7 +1749,7 @@ field data.
 | Step | What happens |
 |---|---|
 | **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`). The flat GEM table is pivoted: each frequency becomes a matrix with distance as rows and survey lines as columns. |
-| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). Duplicate distance values are averaged before interpolation. |
+| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). At a repeated distance within a trace only the first reading is kept. Each trace is left blank outside its own measured range. |
 | **3. Score** | The mean profile and noise metric are computed as above. Frequencies are ranked by descending score. |
 | **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
 | **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch Export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
@@ -1637,7 +1773,7 @@ Seven methods are available from the sidebar dropdown. Each is applied uniformly
 | **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth, low-noise profiles. May overshoot at sharp boundaries. |
 | **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial. Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
 | **akima** | 5 | Akima (1970) local spline. Uses only neighbouring points to set slopes, making it robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | Global least-squares polynomial fit (degree = min(n − 1, 5)). Suitable for very smooth, low-point-count profiles; avoid for long profiles where Runge oscillations can appear. |
+| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. |
 
 The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
 
@@ -1681,7 +1817,7 @@ Switch on in the sidebar under **2D contouring**.
 | Term | Definition |
 |---|---|
 | **EC** | Apparent electrical conductivity (mS/m) — quadrature EMI response |
-| **MS** | Apparent magnetic susceptibility (×10⁻⁵ SI) — in-phase EMI response |
+| **MS** | Apparent magnetic susceptibility (10⁻³ SI, ppt) — in-phase EMI response |
 | **EMI** | Frequency-domain electromagnetic induction |
 | **LIN** | Low induction number approximation — the condition under which EC and MS decouple linearly (McNeill, 1980) |
 | **Skin depth (δ)** | Depth at which primary field amplitude falls to 1/e; decreases with frequency and conductivity |
@@ -1689,8 +1825,8 @@ Switch on in the sidebar under **2D contouring**.
 | **SNR** | Signal-to-noise ratio |
 | **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
 | **Amplitude (A)** | max − min of the mean profile across all passes |
-| **σ_noise** | Population std across traces (multi-pass) or residual std from smoother (single-pass) |
-| **ddof = 0** | Population standard deviation; used because the survey passes are the full measurement ensemble, not a sample |
+| **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single-pass) |
+| **ddof = 1** | Sample standard deviation; used because the passes are a finite sample of the measurement process |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Piecewise Cubic Hermite Interpolating Polynomial — shape-preserving spline that avoids overshoot |
 | **Akima spline** | Local spline that derives slopes from neighbouring points only, reducing sensitivity to outliers |
