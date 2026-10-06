@@ -38,3 +38,53 @@ def test_height_levels_bins_and_averages():
     np.testing.assert_allclose(i[:, 0], [2, 6])
     np.testing.assert_allclose(q[:, 0], [3, 7])
 
+
+def _app_with_heights():
+    import numpy as np
+    import pandas as pd
+
+    import emphysics as E
+    import pipeline
+    import RIs_v2 as R
+
+    freqs = [1525.0, 18325.0]
+    rows = []
+    for line in range(3):
+        ys = np.arange(0.0, 20.0, 0.5)
+        z = E.forward_ppm(freqs, [0.03], [1e-3])
+        part = pd.DataFrame({"Line": line, "X": 0.0, "Y": ys, "Height": 1.0})
+        for f, zi in zip(freqs, z):
+            part[f"I_{f:g}Hz"] = zi.real + 0.5 * np.sin(ys)
+            part[f"Q_{f:g}Hz"] = zi.imag + np.cos(ys)
+        rows.append(part)
+    cal = []
+    for h in (0.5, 1.0, 1.5, 2.0):
+        z = E.forward_ppm(freqs, [0.03], [1e-3], sensor=E.Sensor(height=h))
+        part = pd.DataFrame({"Line": "CAL", "X": 0.0, "Y": [0.0, 0.1], "Height": h})
+        for f, zi in zip(freqs, z):
+            part[f"I_{f:g}Hz"] = zi.real + 25.0
+            part[f"Q_{f:g}Hz"] = zi.imag - 10.0
+        cal.append(part)
+    data = pd.concat(rows + cal, ignore_index=True).to_csv(index=False).encode()
+    prep = pipeline.PrepSettings(recompute_from_iq=True, exclude_lines=("CAL",))
+    R.render_gem_results(data, "heights.csv", 0.5, "linear", None, False, prep)
+
+
+def test_iq_only_file_gets_ec_tab_frequency_info_and_multiheight_fit():
+    at = AppTest.from_function(_app_with_heights, default_timeout=180)
+    at.run()
+    assert not at.exception
+    assert at.tabs[0].label.startswith("EC")
+    at.multiselect(key="mh_lines_heights").set_value(["CAL"]).run()
+    at.button(key="mh_fit_heights").click().run()
+    assert not at.exception
+    offsets = next(d.value for d in at.dataframe if "offset" in d.value.columns)
+    assert offsets.loc[offsets["column"] == "I_1525Hz", "offset"].iloc[0] == pytest.approx(25.0, abs=0.5)
+    assert offsets.loc[offsets["column"] == "Q_18325Hz", "offset"].iloc[0] == pytest.approx(-10.0, abs=0.5)
+
+
+def test_forward_model_panel_on_main_page():
+    at = AppTest.from_file("RIs_v2.py", default_timeout=60)
+    at.run()
+    assert not at.exception
+    assert any("Detectable" in str(df.value.columns.tolist()) for df in at.dataframe)

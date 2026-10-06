@@ -26,8 +26,10 @@ from scipy.interpolate import (
 
 import contouring as ctr
 import corrections
+import emphysics
 import gem_io
 import pipeline
+import ui_tools
 
 # ---------------------------------------------------------------------------
 # Configuration (all in one place, easily overridden via Streamlit widgets)
@@ -1132,6 +1134,7 @@ def _render_mode_section(
     is_gem: bool = False,
     scoring: bool = True,
     markers: list[float] | None = None,
+    sensor: emphysics.Sensor | None = None,
 ) -> None:
     """
     Render ranking table (or channel list), graph editor, plots, and downloads for one mode.
@@ -1157,6 +1160,11 @@ def _render_mode_section(
         _render_ranking(scores)
     else:
         _render_channel_list(output_data, scores, mode, is_gem)
+    if is_gem and mode == "EC":
+        ui_tools.render_frequency_info(output_data, sensor or emphysics.GEM2, file_key)
+    freqs = [ctr.parse_frequency(name) or 0.0 for name in output_data]
+    if is_gem and mode in ("MS", "I") and max(freqs) >= ui_tools.PERMITTIVITY_FREQUENCY:
+        st.caption(ui_tools.PERMITTIVITY_CAPTION)
 
     # ── Graph editor ─────────────────────────────────────────────────────
     opts = render_graph_editor(output_data, file_key=file_key)
@@ -1350,6 +1358,10 @@ def render_data_sidebar() -> pipeline.PrepSettings:
         help="The GEM-2 sets Status to a non-zero value when a reading has a "
              "problem such as ADC overload.",
     )
+    exclude = st.text_input(
+        "Lines to leave out (comma-separated)", key="prep_exclude",
+        help="For example calibration or test lines recorded in the same file.",
+    )
     method = st.selectbox(
         "Distance along line", list(gem_io.DISTANCE_METHODS),
         format_func=gem_io.DISTANCE_METHODS.get, key="prep_distance", help=DISTANCE_HELP,
@@ -1360,10 +1372,30 @@ def render_data_sidebar() -> pipeline.PrepSettings:
             "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
             min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
         )
+    sensor, recompute = render_sensor_sidebar()
     return pipeline.PrepSettings(
-        drop_flagged=drop_flagged, distance_method=method, distance_spacing=float(spacing),
+        drop_flagged=drop_flagged, exclude_lines=_parse_labels(exclude),
+        distance_method=method, distance_spacing=float(spacing),
         corrections=render_corrections_sidebar(),
+        sensor=sensor, recompute_from_iq=recompute,
     )
+
+
+def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool]:
+    """Coil geometry and height used by the physics tools; optional EC/MS recomputation."""
+    with st.expander("Sensor geometry", expanded=False):
+        st.caption("GEM-2 defaults (Won et al., 1996). Check them against your sensor's .gem file.")
+        separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep")
+        bucking = st.number_input("Tx–bucking coil (m, 0 = none)", 0.0, 10.0, 1.035, step=0.005,
+                                  format="%.3f", key="sen_buck")
+        height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key="sen_h")
+        recompute = st.checkbox(
+            "Recompute EC / MS from I / Q", key="sen_recompute",
+            help="Half-space conversion of each reading (Huang & Won, 2000) with this geometry "
+                 "and height. Overwrites exported EC / MS columns; adds them to I/Q-only files.",
+        )
+    sensor = emphysics.Sensor(float(separation), float(bucking) or None, float(height))
+    return sensor, recompute
 
 
 def _parse_labels(text: str) -> tuple[str, ...]:
@@ -1409,6 +1441,11 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
             alt_ref = float(alt_ref_value) or None
 
         st.markdown("**Calibration**")
+        offsets_file = st.file_uploader(
+            "Calibration offsets (.csv)", type=["csv"], key="cor_offsets",
+            help="Columns 'column' and 'offset'; each offset is subtracted from that column. "
+                 "Produced by 'Multi-height calibration' under a file.",
+        )
         background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
                                      key="cor_bg")
         ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key="cor_ref",
@@ -1439,6 +1476,7 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
         altitude_column=alt_col, altitude_reference=alt_ref,
         temperature_column=temp_col,
         drift_lines=_parse_labels(drift_text), drift_model=drift_model,
+        iq_offsets=offsets_file.getvalue() if offsets_file is not None else None,
         ec_background=float(background) or None,
         reference=ref_file.getvalue() if ref_file is not None else None,
         reference_radius=float(ref_radius), reference_method=ref_method,
@@ -1771,7 +1809,14 @@ def render_gem_results(
         markers = []
 
     st.caption("GEM format detected — showing every channel in the file")
-    render_lag_estimate(file_bytes, file_name, stem, prep or pipeline.PrepSettings())
+    prep = prep or pipeline.PrepSettings()
+    render_lag_estimate(file_bytes, file_name, stem, prep)
+    try:
+        calib_table, _ = prepared_table(file_bytes, file_name, replace(prep, exclude_lines=()))
+    except ValueError:
+        calib_table = None
+    if calib_table is not None:
+        ui_tools.render_multiheight(calib_table, stem, prep.sensor)
 
     tabs = st.tabs([
         f"{m} ({len(output_data[m])} {'channels' if m == 'AUX' else 'frequencies'})"
@@ -1789,6 +1834,7 @@ def render_gem_results(
                 is_gem=True,
                 scoring=scoring,
                 markers=markers,
+                sensor=prep.sensor,
             )
             if contour is not None:
                 render_contouring(
@@ -2187,6 +2233,8 @@ Switch on in the sidebar under **2D contouring**.
   [doi:10.1190/1.2122412](https://doi.org/10.1190/1.2122412)
                 """
             )
+
+    ui_tools.render_forward_model(prep.sensor)
 
     # ── File uploader ───────────────────────────────────────────────────────
     uploaded_files = st.file_uploader(
