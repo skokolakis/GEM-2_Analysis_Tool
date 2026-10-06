@@ -70,11 +70,26 @@ class KrigingError(ContouringError):
 # Units
 # ---------------------------------------------------------------------------
 
-def value_label(mode: str, is_gem: bool) -> str:
-    """Axis / colour-bar label with correct GEM units."""
+UNIT_LABELS = {
+    "EC": "EC (mS/m)",
+    "MS": "MS (10⁻³ SI)",
+    "I": "In-phase (ppm)",
+    "Q": "Quadrature (ppm)",
+}
+AUX_LABELS = {
+    "PowerLn": "Power-line noise (mG)",
+    "QSum": "Quadrature sum (ppm)",
+    "TotalEC[mS/m]": "Total EC (mS/m)",
+}
+
+
+def value_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
+    """Axis / colour-bar label with correct GEM units; AUX channels carry their own."""
     if not is_gem:
         return f"{mode} (input units)"
-    return "EC (mS/m)" if mode == "EC" else "MS (10⁻³ SI)"
+    if mode == "AUX":
+        return AUX_LABELS.get(channel, str(channel) if channel else "Auxiliary channel")
+    return UNIT_LABELS.get(mode, mode)
 
 
 # ---------------------------------------------------------------------------
