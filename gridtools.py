@@ -79,3 +79,59 @@ def summary_stats(values: np.ndarray) -> dict[str, float]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Merging surveys and difference maps
+# ---------------------------------------------------------------------------
+
+
+def edge_match_offset(
+    ref_xy: np.ndarray, ref_v: np.ndarray, xy: np.ndarray, v: np.ndarray, tolerance: float
+) -> tuple[float, int]:
+    """
+    Constant to add to survey (xy, v) so it matches the reference where they
+    overlap: median of reference - survey over pairs closer than `tolerance`.
+    Returns (offset, number of pairs); (0, 0) when they do not overlap.
+    """
+    d, i = cKDTree(ref_xy).query(xy, distance_upper_bound=tolerance)
+    pair = np.isfinite(d)
+    if not pair.any():
+        return 0.0, 0
+    return float(np.median(ref_v[i[pair]] - v[pair])), int(pair.sum())
+
+
+def merge_tables(
+    tables: list[pd.DataFrame], value_col: str, tolerance: float, match: bool = True
+) -> tuple[pd.DataFrame, list[float]]:
+    """
+    Concatenates GEM tables into one survey. Line labels become
+    "<survey>:<line>" so lines stay distinct. With match=True each table after
+    the first is shifted by its edge-match offset (median difference to the
+    tables before it where readings are closer than `tolerance` metres).
+    All tables must use the same coordinate columns. Returns (table, offsets).
+    """
+    kinds = {ctr.find_coordinate_columns(t, "auto") for t in tables}
+    if len(kinds) > 1:
+        raise ctr.ContouringError("The surveys use different coordinate columns.")
+    origin = None
+    parts, offsets, ref_xy, ref_v = [], [], [], []
+    for k, table in enumerate(tables):
+        x, y, o = corrections.xy_metres(table, origin)
+        origin = origin or o
+        part = table.copy()
+        part["Line"] = f"{k}:" + part["Line"].astype(str)
+        v = pd.to_numeric(part[value_col], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
+        offset = 0.0
+        if match and ref_xy:
+            offset, _ = edge_match_offset(
+                np.vstack(ref_xy), np.concatenate(ref_v),
+                np.column_stack([x[ok], y[ok]]), v[ok], tolerance,
+            )
+            part[value_col] = v + offset
+        ref_xy.append(np.column_stack([x[ok], y[ok]]))
+        ref_v.append(v[ok] + offset)
+        offsets.append(offset)
+        parts.append(part)
+    return pd.concat(parts, ignore_index=True), offsets
+
+

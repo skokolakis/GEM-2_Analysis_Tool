@@ -42,3 +42,23 @@ def test_summary_stats():
     assert s["n"] == 3 and s["mean"] == 2.0 and s["median"] == 2.0 and s["max"] == 3.0
 
 
+def test_edge_match_and_merge():
+    a = pd.DataFrame({"Line": 1, "X": np.arange(10.0), "Y": 0.0, "v": 10.0})
+    b = pd.DataFrame({"Line": 1, "X": np.arange(10.0) + 5, "Y": 0.0, "v": 13.0})
+    merged, offsets = G.merge_tables([a, b], "v", tolerance=0.1)
+    assert offsets == [0.0, -3.0]
+    assert np.allclose(merged["v"], 10.0)
+    assert set(merged["Line"]) == {"0:1", "1:1"}
+    _, none = G.merge_tables([a, b.assign(X=b["X"] + 100)], "v", tolerance=0.1)
+    assert none == [0.0, 0.0]
+
+
+def test_merge_rejects_mixed_coordinates():
+    import contouring as ctr
+
+    a = pd.DataFrame({"Line": 1, "X": np.arange(12.0), "Y": 0.0, "v": 1.0})
+    b = pd.DataFrame({"Line": 1, "Lat": 37.0 + 1e-5 * np.arange(12), "Lon": 23.0, "v": 1.0})
+    with pytest.raises(ctr.ContouringError, match="different coordinate"):
+        G.merge_tables([a, b], "v", 1.0)
+
+
