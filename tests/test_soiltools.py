@@ -46,3 +46,25 @@ def test_sampling_design_needs_enough_points():
         S.sampling_design(np.zeros((3, 2)), np.ones((3, 1)), 12)
 
 
+def test_property_model_recovers_log_linear_relation():
+    df = _field()
+    sites = df.iloc[::37].copy()
+    sites["Clay"] = np.exp(0.5 + 0.8 * np.log(sites["EC1525Hz[mS/m]"]))
+    model = S.fit_property_model(df, sites[["X", "Y", "Clay"]], "Clay", ["EC1525Hz[mS/m]"], radius=0.5)
+    assert model.r2 > 0.999
+    assert model.coefficients["ln EC1525Hz[mS/m]"] == pytest.approx(0.8, rel=1e-3)
+    pred = S.predict_property(model, df)
+    np.testing.assert_allclose(pred, np.exp(0.5 + 0.8 * np.log(df["EC1525Hz[mS/m]"])), rtol=1e-6)
+
+
+def test_property_model_with_trend_and_too_few_samples():
+    df = _field()
+    sites = df.iloc[::37].copy()
+    sites["pH"] = 6 + 0.01 * sites["X"] + 0.02 * sites["EC9825Hz[mS/m]"]
+    model = S.fit_property_model(df, sites[["X", "Y", "pH"]], "pH", ["EC9825Hz[mS/m]"], 0.5,
+                                 log_property=False, trend=True)
+    assert model.r2 > 0.99 and "x" in model.coefficients.index
+    with pytest.raises(ValueError, match="matched readings"):
+        S.fit_property_model(df, sites[["X", "Y", "pH"]].iloc[:3], "pH", ["EC9825Hz[mS/m]"], 0.5)
+
+

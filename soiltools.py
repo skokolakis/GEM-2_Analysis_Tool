@@ -107,3 +107,91 @@ def sampling_design(xy: np.ndarray, features: np.ndarray, n_sites: int = 12) -> 
     return out
 
 
+# ---------------------------------------------------------------------------
+# Calibration of a soil property against apparent conductivity
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PropertyModel:
+    """Least-squares model property ~ conductivity channels (+ trend surface)."""
+    channels: list[str]
+    log_property: bool
+    log_channels: bool
+    trend: bool
+    coefficients: pd.Series      # intercept, channels, [x, y]
+    r2: float
+    rmse: float                  # on the fitted (possibly log) scale
+    n: int
+    observed: np.ndarray
+    fitted: np.ndarray
+
+
+def _design_matrix(values: np.ndarray, xy: np.ndarray | None, log_channels: bool, trend: bool) -> np.ndarray:
+    v = np.log(values) if log_channels else values
+    cols = [np.ones(len(v)), *v.T]
+    if trend:
+        cols += [xy[:, 0], xy[:, 1]]
+    return np.column_stack(cols)
+
+
+def fit_property_model(
+    table: pd.DataFrame,
+    samples: pd.DataFrame,
+    property_col: str,
+    channels: list[str],
+    radius: float,
+    log_property: bool = True,
+    trend: bool = False,
+) -> PropertyModel:
+    """
+    Regression of a soil property measured at sampling sites on the apparent
+    conductivity there (Lesch et al., 1995; ESAP-Calibrate): each sample takes
+    the median of the survey readings within `radius` metres. Conductivities
+    enter as logarithms when all are positive; with log_property the property
+    is fitted on a log scale; trend adds x and y terms.
+    """
+    x, y, origin = corrections.xy_metres(table)
+    sx, sy, _ = corrections.xy_metres(samples, origin)
+    ok = np.isfinite(x) & np.isfinite(y)
+    rows = np.nonzero(ok)[0]
+    near = cKDTree(np.column_stack([x[ok], y[ok]])).query_ball_point(np.column_stack([sx, sy]), r=radius)
+    values = np.array([
+        [np.nanmedian(pd.to_numeric(table[c], errors="coerce").to_numpy()[rows[i]]) if i else np.nan
+         for c in channels]
+        for i in near
+    ], dtype=float).reshape(len(samples), len(channels))
+    prop = pd.to_numeric(samples[property_col], errors="coerce").to_numpy(dtype=float)
+    use = np.all(np.isfinite(values), axis=1) & np.isfinite(prop)
+    if log_property:
+        use &= prop > 0
+    n_terms = 1 + len(channels) + (2 if trend else 0)
+    if use.sum() < n_terms + 2:
+        raise ValueError(f"Only {int(use.sum())} samples matched readings; need at least {n_terms + 2}.")
+    log_channels = bool(np.all(values[use] > 0))
+    a = _design_matrix(values[use], np.column_stack([sx, sy])[use], log_channels, trend)
+    target = np.log(prop[use]) if log_property else prop[use]
+    coef, *_ = np.linalg.lstsq(a, target, rcond=None)
+    fitted = a @ coef
+    resid = target - fitted
+    r2 = 1.0 - float(resid @ resid) / float(((target - target.mean()) ** 2).sum())
+    names = ["intercept", *[f"ln {c}" if log_channels else c for c in channels]] + (["x", "y"] if trend else [])
+    return PropertyModel(
+        channels=list(channels), log_property=log_property, log_channels=log_channels, trend=trend,
+        coefficients=pd.Series(coef, index=names), r2=r2,
+        rmse=float(np.sqrt(np.mean(resid ** 2))), n=int(use.sum()), observed=target, fitted=fitted,
+    )
+
+
+def predict_property(model: PropertyModel, table: pd.DataFrame) -> np.ndarray:
+    """Predicted property at every reading (back-transformed from the log scale when fitted on it)."""
+    values = table[model.channels].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    xy = None
+    if model.trend:
+        x, y, _ = corrections.xy_metres(table)
+        xy = np.column_stack([x, y])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pred = _design_matrix(values, xy, model.log_channels, model.trend) @ model.coefficients.to_numpy()
+    return np.exp(pred) if model.log_property else pred
+
+
