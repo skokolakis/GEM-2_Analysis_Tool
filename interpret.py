@@ -17,6 +17,7 @@ import gem_io
 
 MAX_FREQUENCIES = 3            # Vilhelmsen & Døssing (2022): more frequencies, more noise each
 REDUNDANT_CORRELATION = 0.95   # |r| above which two frequencies carry the same information
+MIN_OVERLAP = 10               # common readings needed for a correlation
 
 VISCOSITY_COLUMN = "MagViscosity[1/1000]"
 QDIFF_EC_COLUMN = "ECqdiff[mS/m]"
@@ -28,13 +29,18 @@ QDIFF_EC_COLUMN = "ECqdiff[mS/m]"
 
 
 def profile_correlation(output_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Pearson correlation between the mean profiles of every pair of channels (pairwise-complete)."""
-    profiles = {}
+    """
+    Pearson correlation between every pair of channels over the readings of
+    all passes, aligned on distance and pass (pairwise-complete; NaN with
+    fewer than MIN_OVERLAP common values). Correlating the passes rather than
+    their mean keeps the spatial signal that averaging lines walked in
+    different places or directions would cancel.
+    """
+    values = {}
     for label, df in output_data.items():
-        prof = df.mean(axis=1, skipna=True)
-        prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
-        profiles[label] = prof
-    return pd.concat(profiles, axis=1).sort_index().corr()
+        index = pd.MultiIndex.from_product([np.round(df.index.to_numpy(dtype=float), 9), df.columns])
+        values[label] = pd.Series(df.to_numpy(dtype=float).ravel(), index=index)
+    return pd.concat(values, axis=1).corr(min_periods=MIN_OVERLAP)
 
 
 def select_frequencies(
@@ -80,6 +86,9 @@ def select_frequencies(
 # ---------------------------------------------------------------------------
 
 
+VISCOSITY_SIGMAS = np.geomspace(1e-5, 10.0, 2000)   # S/m, half-space table for separating viscosity
+
+
 def viscosity_two_frequencies(
     f_low: float,
     f_high: float,
@@ -92,30 +101,39 @@ def viscosity_two_frequencies(
     Conductivity, in-phase susceptibility and quadrature susceptibility
     (magnetic viscosity) from two frequencies, after Simon et al. (2015).
 
-    At low induction number the conductive quadrature grows in proportion to
-    frequency, while a viscous (frequency-independent quadrature)
-    susceptibility kappa'' adds the same quadrature at both:
-        Q(f) = sigma * L(f) - kappa'' * K,
-    with L(f) the LIN quadrature per S/m and K the static in-phase per unit
-    susceptibility for this geometry (e^{+iwt}: kappa = kappa' - i kappa'').
-    The conductive part of the low-frequency in-phase is then removed with the
-    half-space model before kappa' = I / K.
+    A viscous (frequency-independent quadrature) susceptibility kappa'' adds
+    the same quadrature -kappa'' K at both frequencies (K: static in-phase
+    per unit susceptibility of this geometry; e^{+iwt}: kappa = kappa' -
+    i kappa''), while the conductive quadrature Qc(f, sigma) grows with
+    frequency. So sigma follows from Q(f_high) - Q(f_low) = Qc(f_high, sigma)
+    - Qc(f_low, sigma), read from a half-space table of the full forward model
+    (the low-induction-number line would leak conductivity into kappa''),
+    then kappa'' = (Qc(f_low, sigma) - Q(f_low)) / K and kappa' = (I(f_low) -
+    Ic(f_low, sigma)) / K. NaN where the difference is outside the table.
+    Raises ValueError where the in-phase hardly responds to susceptibility.
     Returns (sigma S/m, kappa' SI, kappa'' SI) per reading.
     """
-    l_low = E.lin_ppm_per_sigma(f_low, sensor)
-    l_high = E.lin_ppm_per_sigma(f_high, sensor)
-    k = E.forward_ppm(f_low, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3
-    if k == 0:
-        raise ValueError("The sensor has no in-phase susceptibility response at this height.")
-    q_low = np.asarray(q_low, dtype=float)
-    q_high = np.asarray(q_high, dtype=float)
-    sigma = (q_high - q_low) / (l_high - l_low)
-    kappa_q = (sigma * l_low - q_low) / k
-    ok = np.isfinite(sigma) & (sigma > 0)
-    i_sigma = np.full(sigma.shape, np.nan)
-    if ok.any():
-        i_sigma[ok] = E.forward_ppm_batch([f_low], sigma[ok][:, None], sensor=sensor).real[:, 0]
-    kappa_i = (np.asarray(i_low, dtype=float) - i_sigma) / k
+    if not E.susceptibility_resolved(sensor):
+        raise ValueError(
+            f"At {sensor.height:g} m this coil geometry has almost no in-phase susceptibility "
+            "response, so magnetic viscosity cannot be separated from conductivity."
+        )
+    k = E.kappa_sensitivity(sensor)
+    z = E.forward_ppm_batch([f_low, f_high], VISCOSITY_SIGMAS[:, None], sensor=sensor)
+    dq = z[:, 1].imag - z[:, 0].imag
+    rising = np.concatenate([[True], np.diff(dq) > 0]).cumprod().astype(bool) & (dq > 0)
+    log_s, z_low, log_dq = np.log(VISCOSITY_SIGMAS[rising]), z[rising, 0], np.log(dq[rising])
+    i_low, q_low, q_high = (np.asarray(v, dtype=float) for v in (i_low, q_low, q_high))
+    diff = q_high - q_low
+    sigma, kappa_i, kappa_q = (np.full(diff.shape, np.nan) for _ in range(3))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(diff) & (diff > 0) & (np.log(diff) >= log_dq[0]) & (np.log(diff) <= log_dq[-1])
+    ls = np.interp(np.log(diff[ok]), log_dq, log_s)
+    sigma[ok] = np.exp(ls)
+    q_c = np.exp(np.interp(ls, log_s, np.log(z_low.imag)))
+    i_c = np.interp(ls, log_s, z_low.real)
+    kappa_q[ok] = (q_c - q_low[ok]) / k
+    kappa_i[ok] = (i_low[ok] - i_c) / k
     return sigma, kappa_i, kappa_q
 
 
@@ -128,7 +146,12 @@ def add_viscosity_columns(
     for f, comp in ((f_low, "I"), (f_low, "Q"), (f_high, "Q")):
         col = gem_io.channel_column(comp, f"{f:g}Hz")
         if col not in df.columns:
-            raise ValueError(f"Magnetic viscosity needs the column {col}.")
+            found = gem_io.find_channels(df.columns)
+            have = sorted((lb for lb in found["Q"] if lb in found["I"]), key=lambda lb: float(lb[:-2]))
+            raise ValueError(
+                f"Magnetic viscosity needs the column {col}; this file has I/Q at "
+                f"{', '.join(have) or 'no frequency'}."
+            )
         cols[(f, comp)] = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
     sigma, _, kappa_q = viscosity_two_frequencies(
         f_low, f_high, cols[(f_low, "I")], cols[(f_low, "Q")], cols[(f_high, "Q")], sensor
@@ -136,9 +159,12 @@ def add_viscosity_columns(
     out = df.copy()
     out[QDIFF_EC_COLUMN] = sigma * 1000.0
     out[VISCOSITY_COLUMN] = kappa_q * 1000.0
+    blank = int(np.isnan(sigma).sum())
     return out, [
         f"Magnetic viscosity from {f_low:g} and {f_high:g} Hz (Simon et al., 2015): added "
-        f"'{QDIFF_EC_COLUMN}' and '{VISCOSITY_COLUMN}' to the AUX channels."
+        f"'{QDIFF_EC_COLUMN}' and '{VISCOSITY_COLUMN}' to the AUX channels"
+        + (f" ({blank} reading(s) blank)" if blank else "") + ". Uncalibrated quadrature "
+        "offsets shift the viscosity values, so compare contrasts unless Q is calibrated."
     ]
 
 
@@ -164,7 +190,8 @@ def anomaly_spectrum(
     the readings between radius and 2 x radius ("annulus") or of the whole
     survey ("survey"). `centre` is (x, y) in map metres, or a distance along
     the line when the table has no coordinates.
-    Returns columns Frequency (Hz), I anomaly (ppm), Q anomaly (ppm), n.
+    Returns columns Frequency (Hz), I anomaly (ppm), Q anomaly (ppm), n
+    (readings with a quadrature inside the radius).
     """
     found = gem_io.find_channels(table.columns)
     labels = sorted((lb for lb in found["Q"] if lb in found["I"]), key=lambda lb: float(lb[:-2]))
@@ -189,7 +216,7 @@ def anomaly_spectrum(
             "Frequency (Hz)": float(lb[:-2]),
             "I anomaly (ppm)": float(np.nanmean(i[inside]) - np.nanmedian(i[ring])),
             "Q anomaly (ppm)": float(np.nanmean(q[inside]) - np.nanmedian(q[ring])),
-            "n": int(inside.sum()),
+            "n": int(np.isfinite(q[inside]).sum()),
         })
     return pd.DataFrame(rows)
 

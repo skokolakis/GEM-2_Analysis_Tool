@@ -441,7 +441,10 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
             cy = c2.number_input("Y (m)", value=float(np.nanmedian(y)), key=f"sp_y_{file_key}")
             centre = (float(cx), float(cy))
             st.caption("Map metres: the projected coordinates the area map uses for Lat/Lon.")
-        else:
+        else:                                    # distances are along each line: pick one
+            labels = gem_io.line_labels(table["Line"])
+            line = c2.selectbox("Line", sorted(labels.unique()), key=f"sp_line_{file_key}")
+            table = table[(labels == line).to_numpy()]
             d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
             centre = float(c1.number_input("Distance (m)", value=float(d.median()), key=f"sp_d_{file_key}"))
         radius = c3.number_input("Radius (m)", 0.01, 1000.0, 1.0, key=f"sp_r_{file_key}")

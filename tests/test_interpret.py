@@ -41,18 +41,30 @@ def test_selection_skips_redundant_and_caps_count():
     assert reasons["63025Hz"] == "beyond the 2 best"
 
 
-def test_viscosity_recovers_synthetic_parameters():
-    f1, f2 = 1525.0, 5325.0
-    sigma, kq = np.array([0.01, 0.05]), np.array([2e-4, 5e-5])
-    l1, l2 = E.lin_ppm_per_sigma(f1), E.lin_ppm_per_sigma(f2)
-    k = E.forward_ppm(f1, [0.0], [1e-3]).real[0] / 1e-3
-    q1 = sigma * l1 - kq * k
-    q2 = sigma * l2 - kq * k
-    i1 = E.forward_ppm_batch([f1], sigma[:, None]).real[:, 0] + 1e-3 * k
-    s, ki, kqe = I.viscosity_two_frequencies(f1, f2, i1, q1, q2)
-    np.testing.assert_allclose(s, sigma, rtol=1e-9)
-    np.testing.assert_allclose(kqe, kq, rtol=1e-9)
-    np.testing.assert_allclose(ki, 1e-3, rtol=1e-6)
+def test_correlation_needs_enough_common_readings():
+    x = np.arange(3.0)
+    out = {"a": pd.DataFrame({"L1": [1.0, 2.0, 3.0]}, index=x),
+           "b": pd.DataFrame({"L1": [2.0, 1.0, 5.0]}, index=x)}
+    assert np.isnan(I.profile_correlation(out).loc["a", "b"])
+
+
+def test_viscosity_recovers_forward_model_data_without_conductivity_bias():
+    sigma = np.array([0.001, 0.02, 0.05, 0.1])
+    k = E.kappa_sensitivity()
+    for f1, f2 in ((1525.0, 5325.0), (5325.0, 18325.0)):
+        z = E.forward_ppm_batch([f1, f2], sigma[:, None])
+        for kq in (0.0, 5e-5):
+            s, ki, kqe = I.viscosity_two_frequencies(
+                f1, f2, z[:, 0].real + 1e-3 * k, z[:, 0].imag - kq * k, z[:, 1].imag - kq * k
+            )
+            np.testing.assert_allclose(s, sigma, rtol=1e-4)
+            np.testing.assert_allclose(kqe, kq, atol=5e-7)
+            np.testing.assert_allclose(ki, 1e-3, atol=1e-6)
+
+
+def test_viscosity_needs_an_in_phase_susceptibility_response():
+    with pytest.raises(ValueError, match="almost no in-phase"):
+        I.viscosity_two_frequencies(1525.0, 5325.0, [0.0], [20.0], [70.0], E.Sensor(height=0.0))
 
 
 def test_viscosity_columns_and_missing_columns():
@@ -74,6 +86,14 @@ def test_viscosity_pipeline_adds_aux_channels():
     import gem_io
     aux = gem_io.find_channels(out.columns)["AUX"]
     assert I.VISCOSITY_COLUMN in aux and I.QDIFF_EC_COLUMN in aux
+
+
+def test_viscosity_pair_missing_from_file_is_reported_not_fatal():
+    df = pd.DataFrame({"Line": 0, "Y": np.arange(5.0), "I_1525Hz": 10.0, "Q_1525Hz": 20.0,
+                       "EC1525Hz[mS/m]": 5.0})
+    out, msgs = pipeline.prepare_gem_table(df, pipeline.PrepSettings(viscosity_pair=(1525.0, 5325.0)))
+    assert I.VISCOSITY_COLUMN not in out.columns and "EC1525Hz[mS/m]" in out.columns
+    assert any(m.startswith("Magnetic viscosity skipped") and "1525Hz" in m for m in msgs)
 
 
 def _anomaly_table():
