@@ -58,3 +58,48 @@ def test_symmetric_levels_centre_on_zero():
     assert lo == pytest.approx(-hi)
 
 
+def _map_app(two_files: bool = False):
+    import numpy as np
+    import pandas as pd
+
+    import RIs_v2 as R
+
+    def survey(shift):
+        rows = []
+        for k in range(6):
+            ys = np.arange(0.0, 40.0, 0.5)
+            xs = np.full_like(ys, 4.0 * k)
+            bump = np.exp(-((xs - 10) ** 2 + (ys - 20) ** 2) / 50.0)
+            rows.append(pd.DataFrame({"Line": k, "X": xs, "Y": ys,
+                                      "EC1525Hz[mS/m]": 20 + 10 * bump + shift}))
+        return pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+
+    contour = R.ContourSettings(area_map=True, xy_epsg=32634)
+    files = [(survey(0.0), "a.csv"), (survey(2.0), "b.csv")]
+    if two_files:
+        R.render_combined_maps(files, contour, R.pipeline.PrepSettings())
+    else:
+        R.render_gem_results(files[0][0], "a.csv", 0.5, "linear", contour, False, None)
+
+
+def test_area_map_processing_and_georeferenced_downloads():
+    at = AppTest.from_function(_map_app, default_timeout=180)
+    at.run()
+    at.selectbox(key="mp_kind_a_EC").set_value("low-pass")
+    at.checkbox(key="mp_dec_a_EC").check()
+    at.run()
+    assert not at.exception
+    captions = " ".join(c.value for c in at.caption)
+    assert "Low-pass" in captions and "Deconvolved" in captions
+    labels = [b.label for b in at.get("download_button")]
+    assert "GeoTIFF (.tif)" in labels and "Projection (.prj)" in labels
+
+
+def test_combined_surveys_merge_and_difference():
+    at = AppTest.from_function(_map_app, kwargs={"two_files": True}, default_timeout=180)
+    at.run()
+    assert not at.exception
+    offsets = next(d.value for d in at.dataframe if "Offset added" in d.value.columns)
+    assert offsets["Offset added"].tolist() == pytest.approx([0.0, -2.0], abs=1e-6)
+    at.radio(key="cm_kind").set_value("Difference (B − A)").run()
+    assert not at.exception

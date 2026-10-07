@@ -28,6 +28,7 @@ import contouring as ctr
 import corrections
 import emphysics
 import gem_io
+import gridtools
 import pipeline
 import ui_tools
 
@@ -125,6 +126,8 @@ class ContourSettings:
     blank_distance: float | None = None   # None → automatic
     level_lines: bool = False
     n_levels: int = 20
+    projection: str = "local"             # key of contouring.PROJECTIONS (degrees input)
+    xy_epsg: int | None = None            # CRS of metre X/Y when known
 
 
 PSEUDOSECTION_CAPTION = (
@@ -1333,6 +1336,8 @@ def grid_params(contour: ContourSettings) -> dict:
         "level": contour.level_lines,
         "smoothing": contour.smoothing,
         "variogram_model": contour.variogram_model,
+        "projection": contour.projection,
+        "xy_epsg": contour.xy_epsg,
     }
 
 
@@ -1565,6 +1570,14 @@ def render_contouring_sidebar() -> ContourSettings:
         "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
     )
     n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels")
+    projection = st.selectbox(
+        "Projection of Lat/Lon", list(ctr.PROJECTIONS), format_func=ctr.PROJECTIONS.get,
+        key="ct_proj", help="UTM gives georeferenced .asc / GeoTIFF exports.",
+    )
+    xy_epsg = st.number_input(
+        "EPSG code of X/Y (0 = unknown)", 0, 99999, 0, key="ct_epsg",
+        help="For files whose X/Y are already projected, e.g. 32634 for UTM 34N.",
+    )
     return ContourSettings(
         area_map=True,
         pseudosection=pseudo,
@@ -1576,6 +1589,8 @@ def render_contouring_sidebar() -> ContourSettings:
         blank_distance=float(blank) or None,
         level_lines=level,
         n_levels=int(n_levels),
+        projection=projection,
+        xy_epsg=int(xy_epsg) or None,
     )
 
 
@@ -1638,6 +1653,13 @@ def _render_area_map(
                 file_bytes, file_name, gem_value_column(mode, freq), prep,
                 **grid_params(contour),
             )
+        try:
+            axis = gridtools.line_axis_angle(prepared_table(file_bytes, file_name, prep)[0])
+        except ValueError:
+            axis = 0.0
+        result, processing = _map_processing(
+            result, file_key, (prep or pipeline.PrepSettings()).sensor, axis
+        )
         fig = ctr.make_area_map_figure(
             result, label, f"{freq} [{mode}] — {ctr.METHODS[result.method]}",
             contour.n_levels,
@@ -1657,6 +1679,8 @@ def _render_area_map(
     st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
     plt.close(fig)
+    for msg in processing:
+        st.caption(msg)
 
     details = (
         f"{result.n_raw:,} readings → {len(result.bv):,} block medians · "
@@ -1686,25 +1710,94 @@ def _render_area_map(
                     "optimistic for densely sampled lines)"
                 )
 
+    _render_map_statistics(result, label, file_key)
     stem = Path(file_name).stem
-    base = f"{stem}_{mode}_{freq}_{result.method}"
-    c1, c2, c3 = st.columns(3)
-    c1.download_button(
+    _render_map_downloads(result, png, f"{stem}_{mode}_{freq}_{result.method}", file_key)
+
+
+def _map_processing(
+    result: ctr.AreaMapResult, key: str, sensor: emphysics.Sensor, axis_angle: float
+) -> tuple[ctr.AreaMapResult, list[str]]:
+    """Optional footprint deconvolution and grid filter, chosen in an expander."""
+    with st.expander("Map processing (filters, footprint deconvolution)", expanded=False):
+        kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}")
+        size = st.slider("Window (cells)", 3, 51, 15 if kind == "high-pass" else 3, step=2,
+                         key=f"mp_size_{key}")
+        threshold = 4.0
+        if kind == "despike":
+            threshold = st.number_input("Despike threshold (× robust σ)", 1.0, 20.0, 4.0,
+                                        key=f"mp_thr_{key}")
+        deconv = st.checkbox(
+            "Deconvolve the sensor footprint", key=f"mp_dec_{key}",
+            help="Lateral Tikhonov deconvolution of the low-induction-number footprint of the "
+                 "coils (Rx minus bucking coil, sensor height from the sidebar). Sharpens "
+                 "apparent-conductivity maps; it does not resolve depth (cf. Guillemoteau et "
+                 "al., 2017, for multi-coil sensors).",
+        )
+        reg, angle = 1e-2, axis_angle
+        if deconv:
+            reg = st.select_slider("Regularisation", [1e-4, 1e-3, 1e-2, 1e-1, 1.0], value=1e-2,
+                                   key=f"mp_reg_{key}")
+            angle = st.number_input("Coil axis (° from map x axis)", 0.0, 180.0,
+                                    float(round(axis_angle, 1)), key=f"mp_ang_{key}")
+    if kind == "none" and not deconv:
+        return result, []
+    z, msgs = gridtools.process_map(
+        result.z, result.spec.cell, kind, int(size), float(threshold), deconv, float(reg),
+        float(angle), sensor,
+    )
+    return replace(result, z=z), msgs
+
+
+def _render_map_statistics(result: ctr.AreaMapResult, label: str, key: str) -> None:
+    with st.expander("Histogram & statistics", expanded=False):
+        try:
+            stats = gridtools.summary_stats(result.z)
+        except ValueError:
+            st.info("No values to summarise.")
+            return
+        st.dataframe(pd.DataFrame([stats]).round(4), hide_index=True, use_container_width=True)
+        values = result.z[np.isfinite(result.z)]
+        fig, ax = plt.subplots(figsize=(6, 2.5))
+        flat = np.ptp(values) <= 1e-9 * max(float(np.abs(values).max()), 1e-12)  # round-off only
+        ax.hist(values, bins=1 if flat else 50, color="steelblue")
+        ax.set_xlabel(label)
+        ax.set_ylabel("Grid nodes")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+
+def _render_map_downloads(result: ctr.AreaMapResult, png: bytes, base: str, key: str) -> None:
+    columns = st.columns(5 if result.epsg else 4)
+    columns[0].download_button(
         "Area map (.png)", data=png, file_name=f"{base}.png",
-        mime="image/png", key=f"dl_am_png_{file_key}",
+        mime="image/png", key=f"dl_am_png_{key}",
     )
-    c2.download_button(
+    columns[1].download_button(
         "Grid (.csv)", data=ctr.grid_to_csv(result), file_name=f"{base}.csv",
-        mime="text/csv", key=f"dl_am_csv_{file_key}",
+        mime="text/csv", key=f"dl_am_csv_{key}",
     )
-    c3.download_button(
+    columns[2].download_button(
         "Grid (.asc)", data=ctr.grid_to_asc(result), file_name=f"{base}.asc",
-        mime="text/plain", key=f"dl_am_asc_{file_key}",
+        mime="text/plain", key=f"dl_am_asc_{key}",
     )
+    columns[3].download_button(
+        "GeoTIFF (.tif)",
+        data=gridtools.geotiff_bytes(result.z, result.spec.x0, result.spec.y0, result.spec.cell,
+                                     result.epsg),
+        file_name=f"{base}.tif", mime="image/tiff", key=f"dl_am_tif_{key}",
+    )
+    if result.epsg:
+        columns[4].download_button(
+            "Projection (.prj)", data=gridtools.prj_wkt(result.epsg), file_name=f"{base}.prj",
+            mime="text/plain", key=f"dl_am_prj_{key}",
+        )
     if result.origin is not None:
         st.warning(
-            "Input was in degrees: the .asc grid is in local metres and is not "
-            "georeferenced. Use the lon/lat columns of the CSV to place it."
+            "Input was in degrees and projected to local metres: the .asc and GeoTIFF are not "
+            "georeferenced. Choose UTM under 'Projection of Lat/Lon', or use the lon/lat "
+            "columns of the CSV."
         )
 
 
@@ -1725,6 +1818,88 @@ def render_contouring(
         _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
     if contour.area_map:
         _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _merged_map_cached(
+    files: tuple[tuple[bytes, str], ...], prep: pipeline.PrepSettings, value_col: str,
+    tolerance: float, match: bool, **params,
+) -> tuple[ctr.AreaMapResult, list[float]]:
+    tables = [prepared_table(b, n, prep)[0] for b, n in files]
+    merged, offsets = gridtools.merge_tables(tables, value_col, tolerance, match)
+    return ctr.compute_area_map(merged, value_col, **params), offsets
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _difference_map_cached(
+    file_a: tuple[bytes, str], file_b: tuple[bytes, str], prep: pipeline.PrepSettings,
+    value_col: str, **params,
+) -> ctr.AreaMapResult:
+    a = prepared_table(*file_a, prep)[0]
+    b = prepared_table(*file_b, prep)[0]
+    return ctr.compute_difference_map(a, b, value_col, **params)
+
+
+def render_combined_maps(
+    gem_files: list[tuple[bytes, str]], contour: ContourSettings, prep: pipeline.PrepSettings
+) -> None:
+    """Merged (edge-matched) area map of several surveys, or a time-lapse difference of two."""
+    st.divider()
+    st.subheader("Combined surveys")
+    try:
+        tables = [prepared_table(b, n, prep)[0] for b, n in gem_files]
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+    common = set.intersection(*[set(corrections.channel_columns(t)) for t in tables])
+    if not common:
+        st.info("The files share no channel.")
+        return
+    col = st.selectbox("Channel", sorted(common), key="cm_col")
+    found = {m: chans for m, chans in gem_io.find_channels([col]).items() if chans}
+    mode, label = next((m, next(iter(ch))) for m, ch in found.items())
+    unit = ctr.value_label(mode, True, label)
+    names = [n for _, n in gem_files]
+    kind = st.radio("Map", ["Merged (edge-matched)", "Difference (B − A)"], horizontal=True,
+                    key="cm_kind")
+    try:
+        if kind.startswith("Merged"):
+            chosen = st.multiselect("Surveys", names, default=names, key="cm_files")
+            tol = st.number_input("Edge-matching distance (m)", 0.01, 100.0, 1.0, key="cm_tol")
+            match = st.checkbox("Edge-match levels", True, key="cm_match")
+            if len(chosen) < 2:
+                st.info("Choose at least two surveys.")
+                return
+            files = tuple(f for f in gem_files if f[1] in chosen)
+            with st.spinner("Gridding merged surveys…"):
+                result, offsets = _merged_map_cached(files, prep, col, float(tol), match,
+                                                     **grid_params(contour))
+            st.dataframe(pd.DataFrame({"Survey": chosen, "Offset added": offsets}).round(4),
+                         hide_index=True)
+            fig = ctr.make_area_map_figure(result, unit, f"{col} — merged", contour.n_levels)
+            base = f"merged_{label}"
+        else:
+            c1, c2 = st.columns(2)
+            a = c1.selectbox("A (earlier)", names, index=0, key="cm_a")
+            b = c2.selectbox("B (later)", names, index=1, key="cm_b")
+            if a == b:
+                st.info("Choose two different surveys.")
+                return
+            fa = next(f for f in gem_files if f[1] == a)
+            fb = next(f for f in gem_files if f[1] == b)
+            with st.spinner("Gridding both surveys on one grid…"):
+                result = _difference_map_cached(fa, fb, prep, col, **grid_params(contour))
+            fig = ctr.make_area_map_figure(result, f"Δ {unit}", f"{col}: {b} − {a}",
+                                           contour.n_levels, show_points=False,
+                                           cmap="RdBu_r", symmetric=True)
+            base = f"difference_{label}"
+    except ctr.ContouringError as exc:
+        st.info(str(exc))
+        return
+    st.pyplot(fig, use_container_width=True)
+    png = fig_to_png(fig)
+    plt.close(fig)
+    _render_map_downloads(result, png, base, "combined")
 
 
 # ---------------------------------------------------------------------------
@@ -2341,6 +2516,7 @@ Switch on in the sidebar under **2D contouring**.
                 )
 
     # ── Per-file detailed results ───────────────────────────────────────────
+    gem_files: list[tuple[bytes, str]] = []
     for uploaded_file in uploaded_files:
         st.divider()
         st.subheader(uploaded_file.name)
@@ -2359,6 +2535,7 @@ Switch on in the sidebar under **2D contouring**.
             pass
 
         if is_gem:
+            gem_files.append((file_bytes, file_name))
             render_gem_results(
                 file_bytes, file_name, distance_step, interp_kind, contour, scoring, prep
             )
@@ -2366,6 +2543,9 @@ Switch on in the sidebar under **2D contouring**.
             render_legacy_results(
                 file_bytes, file_name, mode, distance_step, interp_kind, contour, scoring
             )
+
+    if contour.area_map and len(gem_files) >= 2:
+        render_combined_maps(gem_files, contour, prep)
 
 
 if __name__ == "__main__":
