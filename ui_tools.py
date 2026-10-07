@@ -9,6 +9,8 @@ and tested on their own.
 """
 from __future__ import annotations
 
+import io
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -482,6 +484,27 @@ def _lonlat_columns(x: np.ndarray, y: np.ndarray, origin) -> dict:
     return {"lon": lon, "lat": lat}
 
 
+def _read_samples(upload) -> pd.DataFrame:
+    """Samples CSV with any common separator and encoding (UTF-8, Greek or Western Excel)."""
+    data = upload.getvalue()
+    for encoding in ("utf-8-sig", "cp1253", "latin-1"):
+        try:
+            return pd.read_csv(io.BytesIO(data), sep=None, engine="python", encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("The samples file could not be read as text.")
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _zone_table(data: np.ndarray, m: float) -> pd.DataFrame:
+    return soiltools.zone_indices(data, range(2, 7), m)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _zone_fit(data: np.ndarray, c: int, m: float) -> np.ndarray:
+    return soiltools.fuzzy_cmeans(data, c, m)[0]
+
+
 def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
     """Sampling design, calibration of a soil property, and management zones from EC channels."""
     with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
@@ -537,8 +560,13 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             )
             upload = st.file_uploader("Soil samples (.csv)", type=["csv"], key=f"soil_up_{file_key}")
             if upload is not None:
-                samples = pd.read_csv(upload)
-                skip = {c.lower() for c in ("x", "y", "lat", "latitude", "lon", "long", "longitude")}
+                try:
+                    samples = _read_samples(upload)
+                except ValueError as exc:            # includes pandas' ParserError
+                    st.info(f"Could not read the samples file: {exc}")
+                    samples = pd.DataFrame()
+                skip = {"x", "y", "lat", "latitude", "lon", "long", "longitude", "row", "pc1", "pc2",
+                        "target", "line", "id", "zone"}
                 props = [c for c in samples.columns if str(c).lower() not in skip
                          and pd.to_numeric(samples[c], errors="coerce").notna().any()]
                 if not props:
@@ -556,7 +584,9 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                     else:
                         st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} "
                                  f"({'log scale' if log_p else 'property units'}), {model.n} samples.")
-                        st.dataframe(model.coefficients.rename("coefficient").to_frame().round(5))
+                        st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format))
+                        if not model.log_channels:
+                            st.caption("Some samples have EC ≤ 0, so EC enters linearly, not as ln(EC).")
                         column = f"Predicted {prop}"
                         predicted = table.assign(**{column: soiltools.predict_property(model, table)})
                         try:
@@ -567,14 +597,16 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                         else:
                             st.pyplot(fig, use_container_width=True)
                             plt.close(fig)
-                        out = pd.DataFrame({"x": x, "y": y, column: predicted[column]})
+                        out = pd.DataFrame({"x": x, "y": y, **_lonlat_columns(x, y, origin),
+                                            column: predicted[column]})
                         st.download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
                                            file_name=f"{file_key}_{prop}_predicted.csv",
                                            mime="text/csv", key=f"soil_dl_pred_{file_key}")
 
         with t_zones:
             st.caption(
-                "Fuzzy c-means on the standardised channels (Bezdek, 1981), as in Management "
+                "Fuzzy c-means on the standardised channels (clipped to their 1st–99th "
+                "percentiles; Bezdek, 1981), as in Management "
                 "Zone Analyst (Fridgen et al., 2004). The lowest FPI and MPE (modified partition "
                 "entropy, Boydell & McBratney, 2002) suggest the number of zones."
             )
@@ -582,16 +614,18 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             if ok.sum() < 10:
                 st.info("Not enough complete readings.")
                 return
-            data = soiltools.standardise(features[ok])
+            data = soiltools.robust_standardise(features[ok])
             m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}")
             rng = np.random.default_rng(0)
             subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
-            indices = soiltools.zone_indices(subset, range(2, 7), m)
+            indices = _zone_table(subset, float(m))
             st.dataframe(indices.round(4), hide_index=True)
             best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
             c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}")
-            u, _ = soiltools.fuzzy_cmeans(data, int(c), m)
+            u = _zone_fit(data, int(c), float(m))
             zone = u.argmax(axis=1) + 1
+            if (u.sum(axis=0) < 0.01 * len(u)).any():
+                st.warning("A zone holds less than 1 % of the readings: try fewer zones or a larger exponent.")
             fig, ax = plt.subplots(figsize=(6, 4))
             sc = ax.scatter(x[ok], y[ok], c=zone, s=4, cmap="tab10", vmin=0.5, vmax=10.5)
             ax.set_aspect("equal")
@@ -601,7 +635,7 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             fig.tight_layout()
             st.pyplot(fig)
             plt.close(fig)
-            out = pd.DataFrame({"x": x[ok], "y": y[ok], "zone": zone,
+            out = pd.DataFrame({"x": x[ok], "y": y[ok], **_lonlat_columns(x[ok], y[ok], origin), "zone": zone,
                                 **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
             st.download_button("Zones (.csv)", out.to_csv(index=False).encode(),
                                file_name=f"{file_key}_zones.csv", mime="text/csv",

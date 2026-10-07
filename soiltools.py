@@ -15,6 +15,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.stats import norm
 
+import contouring as ctr
 import corrections
 
 DESIGN_POOL = 20                 # candidates (nearest in feature space) per design target
@@ -34,20 +35,28 @@ def standardise(features: np.ndarray) -> np.ndarray:
     return (f - f.mean(axis=0)) / std
 
 
+def robust_standardise(features: np.ndarray, clip: tuple[float, float] = (1.0, 99.0)) -> np.ndarray:
+    """standardise after clipping each column to its 1st-99th percentiles, so a spike cannot own a zone."""
+    f = np.asarray(features, dtype=float)
+    lo, hi = np.nanpercentile(f, clip, axis=0)
+    return standardise(np.clip(f, lo, hi))
+
+
 def principal_scores(features: np.ndarray, n_components: int = 2) -> np.ndarray:
-    """Standardised principal-component scores (each component has unit variance)."""
+    """
+    Standardised principal-component scores (each component has unit
+    variance). Components that are numerical noise (collinear channels) are
+    dropped; signs are fixed so each component rises with the mean channel.
+    """
     z = standardise(features)
     u, s, _ = np.linalg.svd(z, full_matrices=False)
-    k = min(n_components, z.shape[1])
+    k = min(n_components, z.shape[1], max(1, int(np.sum(s > 1e-8 * s[0]))))
     scores = u[:, :k] * s[:k]
+    sign = np.sign(scores.T @ z.mean(axis=1))
+    scores = scores * np.where(sign == 0, 1.0, sign)
     sd = scores.std(axis=0, ddof=1)
     sd[sd == 0] = 1.0
     return scores / sd
-
-
-# ---------------------------------------------------------------------------
-# Sampling design
-# ---------------------------------------------------------------------------
 
 
 def design_targets(n_sites: int, n_components: int) -> np.ndarray:
@@ -135,6 +144,26 @@ def _design_matrix(values: np.ndarray, xy: np.ndarray | None, log_channels: bool
     return np.column_stack(cols)
 
 
+def _sample_xy(samples: pd.DataFrame, origin) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Sample coordinates in the survey's map metres. With a survey in degrees
+    (origin given) Lat/Lon columns are projected however few samples there
+    are; (0, 0) is a missing fix.
+    """
+    lower = {str(c).strip().lower(): c for c in samples.columns}
+    lat = next((lower[n] for n in ctr.LAT_NAMES if n in lower), None)
+    lon = next((lower[n] for n in ctr.LON_NAMES if n in lower), None)
+    if origin is not None and lat is not None and lon is not None:
+        la = pd.to_numeric(samples[lat], errors="coerce").to_numpy(dtype=float)
+        lo = pd.to_numeric(samples[lon], errors="coerce").to_numpy(dtype=float)
+        nofix = (la == 0) & (lo == 0)
+        la[nofix], lo[nofix] = np.nan, np.nan
+        px, py, _ = ctr.project_to_local_metres(lo, la, origin)
+        return px, py
+    sx, sy, _ = corrections.xy_metres(samples, origin)
+    return sx, sy
+
+
 def fit_property_model(
     table: pd.DataFrame,
     samples: pd.DataFrame,
@@ -147,20 +176,25 @@ def fit_property_model(
     """
     Regression of a soil property measured at sampling sites on the apparent
     conductivity there (Lesch et al., 1995; ESAP-Calibrate): each sample takes
-    the median of the survey readings within `radius` metres. Conductivities
-    enter as logarithms when all are positive; with log_property the property
-    is fitted on a log scale; trend adds x and y terms.
+    the median of the survey readings within `radius` metres; samples without
+    coordinates are skipped. Conductivities enter as logarithms when all are
+    positive; with log_property the property is fitted on a log scale; trend
+    adds x and y terms.
     """
     x, y, origin = corrections.xy_metres(table)
-    sx, sy, _ = corrections.xy_metres(samples, origin)
+    sx, sy = _sample_xy(samples, origin)
     ok = np.isfinite(x) & np.isfinite(y)
     rows = np.nonzero(ok)[0]
-    near = cKDTree(np.column_stack([x[ok], y[ok]])).query_ball_point(np.column_stack([sx, sy]), r=radius)
-    values = np.array([
-        [np.nanmedian(pd.to_numeric(table[c], errors="coerce").to_numpy()[rows[i]]) if i else np.nan
-         for c in channels]
-        for i in near
-    ], dtype=float).reshape(len(samples), len(channels))
+    has_xy = np.isfinite(sx) & np.isfinite(sy)
+    near = [[] for _ in range(len(samples))]
+    if has_xy.any():
+        found = cKDTree(np.column_stack([x[ok], y[ok]])).query_ball_point(
+            np.column_stack([sx[has_xy], sy[has_xy]]), r=radius)
+        for k, i in zip(np.nonzero(has_xy)[0], found):
+            near[k] = i
+    channel_values = [pd.to_numeric(table[c], errors="coerce").to_numpy(dtype=float)[rows] for c in channels]
+    values = np.array([[np.nanmedian(v[i]) if i else np.nan for v in channel_values] for i in near],
+                      dtype=float).reshape(len(samples), len(channels))
     prop = pd.to_numeric(samples[property_col], errors="coerce").to_numpy(dtype=float)
     use = np.all(np.isfinite(values), axis=1) & np.isfinite(prop)
     if log_property:
@@ -171,6 +205,8 @@ def fit_property_model(
     log_channels = bool(np.all(values[use] > 0))
     a = _design_matrix(values[use], np.column_stack([sx, sy])[use], log_channels, trend)
     target = np.log(prop[use]) if log_property else prop[use]
+    if np.ptp(target) <= 1e-12 * max(1.0, float(np.abs(target).max())):
+        raise ValueError(f"'{property_col}' does not vary between the matched samples.")
     coef, *_ = np.linalg.lstsq(a, target, rcond=None)
     fitted = a @ coef
     resid = target - fitted
@@ -186,13 +222,17 @@ def fit_property_model(
 def predict_property(model: PropertyModel, table: pd.DataFrame) -> np.ndarray:
     """Predicted property at every reading (back-transformed from the log scale when fitted on it)."""
     values = table[model.channels].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    if model.log_channels:
+        values = np.where(values > 0, values, np.nan)      # ln(EC) needs EC > 0
     xy = None
     if model.trend:
         x, y, _ = corrections.xy_metres(table)
         xy = np.column_stack([x, y])
     with np.errstate(invalid="ignore", divide="ignore"):
         pred = _design_matrix(values, xy, model.log_channels, model.trend) @ model.coefficients.to_numpy()
-    return np.exp(pred) if model.log_property else pred
+    with np.errstate(over="ignore"):
+        pred = np.exp(pred) if model.log_property else pred
+    return np.where(np.isfinite(pred), pred, np.nan)
 
 
 # ---------------------------------------------------------------------------

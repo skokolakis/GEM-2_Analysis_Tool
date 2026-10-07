@@ -93,3 +93,44 @@ def test_index_limits():
     flat = np.full((30, 3), 1 / 3)
     assert S.fuzziness_performance_index(flat) == pytest.approx(1.0)
     assert S.modified_partition_entropy(flat) == pytest.approx(1.0)
+
+
+def _latlon_field():
+    df = _field()
+    lat = 37.9 + df["Y"] / 111_195.0
+    lon = 23.7 + df["X"] / (111_195.0 * np.cos(np.radians(37.9)))
+    return df.drop(columns=["X", "Y"]).assign(Lat=lat, Lon=lon)
+
+
+def test_property_model_with_few_latlon_samples_and_missing_coordinates():
+    df = _latlon_field()
+    sites = df.iloc[::200].copy()                                   # 8 samples
+    sites["Clay"] = np.exp(0.5 + 0.8 * np.log(sites["EC1525Hz[mS/m]"]))
+    sites.iloc[0, sites.columns.get_loc("Lat")] = np.nan            # no GPS fix
+    model = S.fit_property_model(df, sites[["Lat", "Lon", "Clay"]], "Clay", ["EC1525Hz[mS/m]"], 0.5)
+    assert model.n == 7 and model.r2 > 0.999
+
+
+def test_property_model_rejects_a_constant_property_and_masks_bad_predictions():
+    df = _field()
+    sites = df.iloc[::37].copy()
+    with pytest.raises(ValueError, match="does not vary"):
+        S.fit_property_model(df, sites.assign(pH=7.0), "pH", ["EC1525Hz[mS/m]"], 0.5, log_property=False)
+    sites["Clay"] = np.exp(0.5 + 0.8 * np.log(sites["EC1525Hz[mS/m]"]))
+    model = S.fit_property_model(df, sites, "Clay", ["EC1525Hz[mS/m]"], 0.5)
+    pred = S.predict_property(model, df.assign(**{"EC1525Hz[mS/m]": 0.0}))
+    assert np.isnan(pred).all()
+
+
+def test_robust_scaling_keeps_a_spike_from_owning_a_zone():
+    rng = np.random.default_rng(0)
+    ec = rng.lognormal(3.0, 0.3, (3000, 2))
+    ec[0] = 1e4
+    u, _ = S.fuzzy_cmeans(S.robust_standardise(ec), 6, 1.1)
+    assert u.sum(axis=0).min() > 0.01 * len(u)
+
+
+def test_principal_scores_drop_collinear_noise():
+    a = np.random.default_rng(0).normal(size=200)
+    s = S.principal_scores(np.column_stack([a, 2 * a]))
+    assert s.shape == (200, 1) and np.corrcoef(s[:, 0], a)[0, 1] > 0.999
