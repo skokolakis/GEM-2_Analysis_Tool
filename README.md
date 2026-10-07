@@ -25,7 +25,7 @@ The tool can be also be used online via https://gemris.streamlit.app
 
 ### Requirements
 - Python 3.9+
-- Dependencies: `streamlit` (≥ 1.26), `pandas`, `numpy`, `scipy` (≥ 1.10), `matplotlib` (≥ 3.5), `openpyxl`, `pykrige` (≥ 1.7)
+- Dependencies: `streamlit` (≥ 1.26), `pandas`, `numpy`, `scipy` (≥ 1.10), `matplotlib` (≥ 3.5), `openpyxl`, `pykrige` (≥ 1.7), `pyproj` (≥ 3.3)
 - Tests: `pip install -r requirements-dev.txt`, then `python -m pytest`
 
 ### Setup
@@ -245,7 +245,29 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
 
 Contour colours span the 2nd–98th percentile of the gridded values; values beyond that range are shown in the end colours.
 
-**Downloads:** PNG; grid CSV (`x, y, value` [, `variance`] [, `lon, lat`]); ESRI ASCII grid (`.asc`) for QGIS / ArcGIS. With degree input the `.asc` is in local metres and is not georeferenced — use the CSV `lon`/`lat` columns.
+**Projection.** `Lat`/`Lon` are projected to local metres about the survey centre (default) or to **UTM (WGS 84)**, zone of the survey centre (sidebar *Projection of Lat/Lon*). For files whose `X`/`Y` are already projected, enter their **EPSG code** (e.g. 32634 for UTM 34N) so the exports carry it.
+
+**Map processing** (expander under each map), applied to the gridded values:
+
+| Option | What it does |
+|---|---|
+| Despike | Replaces cells that differ from their window median by more than *threshold* × 1.4826 × the median absolute difference |
+| Low-pass | Moving average over *window* × *window* cells (blank cells neither spread nor bias it) |
+| High-pass | Removes the regional trend: the value minus its *window* × *window* moving average |
+| Deconvolve the sensor footprint | Lateral Tikhonov deconvolution of the coils' low-induction-number footprint (receiver minus bucking coil, sensor height from *Sensor geometry*; the coil axis defaults to the survey-line direction). Sharpens apparent-conductivity maps. It does not resolve depth: the 3D multichannel deconvolution of Guillemoteau et al. (2017) needs several coil geometries, while a GEM-2 has one geometry at several frequencies, and at low induction number the frequencies share the same footprint |
+
+The footprint kernel is the dot product of the transmitter's and receiver's quasi-static electric fields (Born approximation). Tests check that its depth profile matches McNeill's (1980) HCP depth response.
+
+**Histogram & statistics** — count, mean, standard deviation, minimum, 2nd / 50th / 98th percentile and maximum of the gridded values, with a histogram.
+
+**Downloads:** PNG; grid CSV (`x, y, value` [, `variance`] [, `lon, lat`]); ESRI ASCII grid (`.asc`); single-band float32 **GeoTIFF** (`.tif`, no-data −9999); and, when the CRS is known (UTM or a user EPSG code), an ESRI **`.prj`** file to sit next to the `.asc`. With local-metre projection the `.asc` and GeoTIFF are not georeferenced — choose UTM, or use the CSV `lon`/`lat` columns.
+
+### Combined surveys
+
+With the area map on and two or more GEM files uploaded, **Combined surveys** (below the files) grids a channel the files share:
+
+- **Merged (edge-matched)** — the surveys become one; line labels are prefixed with the survey number. With *Edge-match levels* each survey after the first is shifted by the median difference to the surveys before it, over readings closer than the edge-matching distance (as in edge matching of adjacent grids in archaeological-prospection software). The offsets are listed.
+- **Difference (B − A)** — both surveys are gridded on one grid in the projection of A, and A is subtracted from B (time-lapse). Nodes blank in either survey stay blank; colours are centred on zero.
 
 ---
 
@@ -290,6 +312,7 @@ pipeline.py    — PrepSettings and prepare_gem_table(): the raw table before pr
 corrections.py — despike, clip, height, drift, temperature, calibration, EC25, PCA, GPS lag, heading
 emphysics.py   — layered-earth forward model, I/Q ↔ EC/MS conversion, skin depth, sensitivity, multi-height fit
 inversion.py   — smooth 1D / laterally constrained inversion, stations, EMagPy export
+gridtools.py   — grid filters, statistics, survey merging, footprint deconvolution, UTM, GeoTIFF, .prj
 ui_tools.py    — Streamlit panels for the physics and inversion tools
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
@@ -419,6 +442,8 @@ RIs_v2.py
 33. Auken, E. & Christiansen, A.V. (2004). Layered and laterally constrained 2D inversion of resistivity data. *Geophysics*, **69**(3), 752–761. https://doi.org/10.1190/1.1759461
 
 34. McLachlan, P., Blanchy, G. & Binley, A. (2021). EMagPy: open-source standalone software for processing, forward modeling and inversion of electromagnetic induction data. *Computers & Geosciences*, **146**, 104561. https://doi.org/10.1016/j.cageo.2020.104561
+
+35. Guillemoteau, J., Christensen, N.B., Jacobsen, B.H. & Tronicke, J. (2017). Fast 3D multichannel deconvolution of electromagnetic induction loop-loop apparent conductivity data sets acquired at low induction numbers. *Geophysics*, **82**(6), E357–E369. https://doi.org/10.1190/geo2016-0518.1
 
 ---
 
