@@ -134,3 +134,14 @@ def test_principal_scores_drop_collinear_noise():
     a = np.random.default_rng(0).normal(size=200)
     s = S.principal_scores(np.column_stack([a, 2 * a]))
     assert s.shape == (200, 1) and np.corrcoef(s[:, 0], a)[0, 1] > 0.999
+
+
+def test_unreadable_samples_file_is_a_value_error():
+    import ui_tools as U
+
+    class Upload:
+        def getvalue(self):
+            return b""
+
+    with pytest.raises(ValueError, match="could not be read"):
+        U._read_samples(Upload())

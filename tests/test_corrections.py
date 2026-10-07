@@ -253,3 +253,26 @@ def test_inactive_settings_change_nothing():
     out, msgs = pipeline.prepare_gem_table(df, pipeline.PrepSettings())
     assert not msgs
     pd.testing.assert_frame_equal(out.drop(columns=pipeline.DISTANCE_COL), df)
+
+
+def test_gps_lag_is_corrected_before_reference_calibration():
+    # Reference values sit where the sensor really was, so matching needs lag-corrected positions.
+    df = _survey(n=161, dt=0.25)                      # 1 m/s
+    t = gem_io.time_seconds(df)
+    true_y = np.empty(len(df))
+    for idx in df.groupby("Line").indices.values():
+        true_y[idx] = np.interp(t[idx] - 1.0, t[idx], df["Y"].to_numpy()[idx])
+    df["EC1525Hz[mS/m]"] = 20 + 5 * np.sin(true_y / 2.0)
+    pts = pd.DataFrame({"X": df["X"], "Y": true_y, "EC1525Hz[mS/m]": 2.0 * df["EC1525Hz[mS/m]"]}).iloc[::25]
+    s = C.CorrectionSettings(lag_seconds=1.0, reference=pts.to_csv(index=False).encode(), reference_radius=0.1)
+    _, msgs = C.apply_corrections(df, s)
+    assert "gain 2," in next(m for m in msgs if m.startswith("Calibrated EC1525"))
+
+
+def test_base_station_lines_may_also_be_left_out():
+    table, _ = _with_base_station()
+    lines = ("B0", "B1", "B2")
+    prep = pipeline.PrepSettings(exclude_lines=lines, corrections=C.CorrectionSettings(drift_lines=lines))
+    out, msgs = pipeline.prepare_gem_table(table, prep)
+    assert any("3 base-station occupation" in m for m in msgs)
+    assert not out["Line"].astype(str).str.startswith("B").any()

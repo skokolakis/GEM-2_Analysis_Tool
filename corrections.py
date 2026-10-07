@@ -575,9 +575,10 @@ def apply_corrections(
     """
     Runs the enabled corrections in this order: despike, clip, sensor height,
     temperature, drift, I/Q offsets (stage "readings": they act on the
-    instrument readings), then background offset, reference calibration, EC
-    at 25 °C, PCA, smoothing, GPS lag, heading filter (stage "derived": they
-    act on EC / MS as interpreted). "all" runs both. When EC / MS are
+    instrument readings), then GPS lag, background offset, reference
+    calibration, EC at 25 °C, PCA, smoothing, heading filter (stage
+    "derived": they act on EC / MS as interpreted and on positions; the lag
+    comes first so reference points are matched at corrected positions). "all" runs both. When EC / MS are
     recomputed from I / Q, the pipeline recomputes between the two stages so
     the EC corrections are not overwritten.
     Returns (table, messages).
@@ -652,8 +653,12 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
 
 
 def _correct_derived(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) -> pd.DataFrame:
-    """Background offset, calibration, EC at 25 °C, PCA, smoothing, lag and heading (see apply_corrections)."""
+    """GPS lag, background offset, calibration, EC at 25 °C, PCA, smoothing and heading (see apply_corrections)."""
     cols = channel_columns(out)
+
+    if s.lag_seconds:
+        out = shift_positions(out, _require_time(out, "GPS lag correction"), s.lag_seconds)
+        msgs.append(f"Positions shifted for a GPS lag of {s.lag_seconds:+.2f} s.")
 
     if s.ec_background is not None:
         shifts = []
@@ -703,10 +708,6 @@ def _correct_derived(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) 
         for col in cols:
             out[col], _ = _per_line(out, col, lambda v: (running_mean(v, s.smooth_window), 0))
         msgs.append(f"Running mean over {s.smooth_window} readings.")
-
-    if s.lag_seconds:
-        out = shift_positions(out, _require_time(out, "GPS lag correction"), s.lag_seconds)
-        msgs.append(f"Positions shifted for a GPS lag of {s.lag_seconds:+.2f} s.")
 
     if s.bearing_center is not None:
         keep = heading_mask(out, s.bearing_center, s.bearing_tolerance)

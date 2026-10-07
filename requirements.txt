@@ -2,7 +2,8 @@ streamlit>=1.26
 matplotlib>=3.5
 numpy
 scipy>=1.10
-pandas
+pandas>=2.1
 openpyxl
 pykrige>=1.7
 pyproj>=3.3
+Pillow

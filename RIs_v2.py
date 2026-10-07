@@ -233,7 +233,7 @@ def _empty_modes() -> dict[str, dict]:
     return {m: {} for m in gem_io.GEM_MODES}
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=64)
 def process_gem_file(
     file_bytes: bytes,
     file_name: str,
@@ -292,7 +292,7 @@ def process_gem_file(
             )
 
     try:
-        prepared, messages = pipeline.prepare_gem_table(raw_df, prep)
+        prepared, messages = prepared_table(file_bytes, file_name, prep)   # shared with the panels
     except ValueError as exc:
         warnings.append(f"Could not prepare the data: {exc}")
         return _empty_modes(), _empty_modes(), warnings
@@ -326,7 +326,7 @@ def process_gem_file(
     return output_data, scores, warnings
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
+@st.cache_data(show_spinner=False, max_entries=64)    # up to 3 settings variants per file
 def prepared_table(
     file_bytes: bytes, file_name: str, prep: pipeline.PrepSettings | None = None
 ) -> tuple[pd.DataFrame, list[str]]:
@@ -1937,6 +1937,21 @@ def render_combined_maps(
 # Per-format rendering dispatchers
 # ---------------------------------------------------------------------------
 
+def unique_file_key(stem: str, taken: set[str], suffixes: tuple[str, ...] = ()) -> str:
+    """
+    Widget key for one upload: the file stem, or stem_2, stem_3, ... when it
+    (or stem_<suffix> for the given suffixes, e.g. the GEM modes) is taken.
+    Two uploads named site.csv and site.xlsx get site and site_2.
+    """
+    key, n = stem, 1
+    while key in taken or any(f"{key}_{s}" in taken for s in suffixes):
+        n += 1
+        key = f"{stem}_{n}"
+    taken.add(key)
+    taken.update(f"{key}_{s}" for s in suffixes)
+    return key
+
+
 def render_legacy_results(
     file_bytes: bytes,
     file_name: str,
@@ -1945,9 +1960,10 @@ def render_legacy_results(
     interp_kind: str,
     contour: ContourSettings | None = None,
     scoring: bool = True,
+    file_key: str | None = None,
 ) -> None:
     """Process and render a legacy multi-sheet Excel file."""
-    stem = Path(file_name).stem
+    stem = file_key or Path(file_name).stem
 
     with st.spinner("Processing…"):
         output_data, scores, warnings = process_file(
@@ -1982,9 +1998,10 @@ def render_gem_results(
     contour: ContourSettings | None = None,
     scoring: bool = True,
     prep: pipeline.PrepSettings | None = None,
+    file_key: str | None = None,
 ) -> None:
-    """Process and render a GEM instrument file (CSV or XLSX)."""
-    stem = Path(file_name).stem
+    """Process and render a GEM instrument file (CSV or XLSX). file_key keeps widget keys unique."""
+    stem = file_key or Path(file_name).stem
 
     with st.spinner("Processing GEM file…"):
         output_data, scores, warnings = process_gem_file(
@@ -2553,6 +2570,7 @@ Switch on in the sidebar under **2D contouring**.
 
     # ── Per-file detailed results ───────────────────────────────────────────
     gem_files: list[tuple[bytes, str]] = []
+    taken_keys: set[str] = set()
     for uploaded_file in uploaded_files:
         st.divider()
         st.subheader(uploaded_file.name)
@@ -2570,14 +2588,17 @@ Switch on in the sidebar under **2D contouring**.
         except Exception:
             pass
 
+        stem = Path(file_name).stem
         if is_gem:
             gem_files.append((file_bytes, file_name))
             render_gem_results(
-                file_bytes, file_name, distance_step, interp_kind, contour, scoring, prep
+                file_bytes, file_name, distance_step, interp_kind, contour, scoring, prep,
+                file_key=unique_file_key(stem, taken_keys, gem_io.GEM_MODES),
             )
         else:
             render_legacy_results(
-                file_bytes, file_name, mode, distance_step, interp_kind, contour, scoring
+                file_bytes, file_name, mode, distance_step, interp_kind, contour, scoring,
+                file_key=unique_file_key(stem, taken_keys)
             )
 
     if contour.area_map and len(gem_files) >= 2:

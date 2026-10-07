@@ -9,6 +9,7 @@ and tested on their own.
 """
 from __future__ import annotations
 
+import csv
 import io
 
 import matplotlib.pyplot as plt
@@ -492,6 +493,8 @@ def _read_samples(upload) -> pd.DataFrame:
             return pd.read_csv(io.BytesIO(data), sep=None, engine="python", encoding=encoding)
         except UnicodeDecodeError:
             continue
+        except csv.Error as exc:                  # e.g. empty file: no separator to detect
+            raise ValueError(f"The samples file could not be read: {exc}.") from exc
     raise ValueError("The samples file could not be read as text.")
 
 

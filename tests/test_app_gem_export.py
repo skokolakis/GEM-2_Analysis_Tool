@@ -122,3 +122,48 @@ def test_main_page_defaults_to_scoring_off():
     at.run()
     assert not at.exception
     assert at.toggle(key="scoring").value is False
+
+
+def _small_gem_csv():
+    import numpy as np
+
+    rows = [pd.DataFrame({"Line": k, "X": 2.0 * k, "Y": np.arange(0.0, 20.0, 0.5),
+                          "EC1525Hz[mS/m]": 10 + k + np.sin(np.arange(40) / 5)}) for k in range(3)]
+    return pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+
+
+def _two_uploads_app():
+    import numpy as np
+    import pandas as pd
+
+    import RIs_v2 as R
+
+    rows = [pd.DataFrame({"Line": k, "X": 2.0 * k, "Y": np.arange(0.0, 20.0, 0.5),
+                          "EC1525Hz[mS/m]": 10 + k + np.sin(np.arange(40) / 5)}) for k in range(3)]
+    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+    R.render_gem_results(data, "site.csv", 0.5, "linear", None, False, None, file_key="site")
+    R.render_gem_results(data, "site.csv", 0.5, "linear", None, False, None, file_key="site_2")
+
+
+def test_unique_file_keys_avoid_widget_collisions():
+    taken = set()
+    assert R.unique_file_key("site", taken, ("EC",)) == "site"
+    assert R.unique_file_key("site", taken, ("EC",)) == "site_2"
+    assert R.unique_file_key("site_EC", taken) == "site_EC_2"      # a legacy file named like a GEM mode key
+    at = AppTest.from_function(_two_uploads_app, default_timeout=180)
+    at.run()
+    assert not at.exception
+
+
+def test_gem_file_is_prepared_once(monkeypatch):
+    import pipeline
+
+    calls = []
+    real = pipeline.prepare_gem_table
+    monkeypatch.setattr(pipeline, "prepare_gem_table", lambda raw, prep=None: calls.append(1) or real(raw, prep))
+    R.process_gem_file.clear()
+    R.prepared_table.clear()
+    prep = pipeline.PrepSettings(drop_flagged=False)
+    R.process_gem_file(_small_gem_csv(), "once.csv", 0.5, "linear", prep)
+    R.prepared_table(_small_gem_csv(), "once.csv", prep)
+    assert len(calls) == 1
