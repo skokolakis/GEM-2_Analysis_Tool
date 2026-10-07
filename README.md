@@ -126,6 +126,17 @@ Under each GEM file, **Layered-earth inversion** inverts the quadrature of the m
 
 > Calibrate first (multi-height offsets, reference calibration): offsets in I/Q bias inverted models (Minsley et al., 2014).
 
+---
+
+## Interpretation aids
+
+| Tool | Where | What it does |
+|---|---|---|
+| Frequency selection | Under the ranking (scoring on) | Keeps up to *n* frequencies in descending score order, skipping any whose mean profile correlates above \|r\| with one already kept; shows the correlation matrix. The GEM-2 shares its transmitter power among the frequencies, and drone-towed GEM-2 tests recommend at most three (Vilhelmsen & Døssing, 2022); strongly correlated frequencies carry the same information (Minsley et al., 2010) |
+| Magnetic viscosity | Sensor geometry → *Magnetic viscosity from frequencies* | From two frequencies with I / Q columns (after Simon et al., 2015): at low induction number the conductive quadrature grows with frequency while a viscous susceptibility κ″ adds the same quadrature at both, so Q(f) = σ·L(f) − κ″·K. Adds `ECqdiff[mS/m]` and `MagViscosity[1/1000]` (κ″ × 1000) to the AUX tab, where they can be profiled and mapped. For a log-uniform relaxation spectrum the drop in susceptibility per decade of frequency is (2 ln 10 / π)·κ″ |
+| Anomaly spectrum | Under each GEM file | Mean I and Q within a radius of a point minus the background (ring from radius to 2 × radius, or the whole survey), for every frequency, with the Argand diagram (Q against I). The spectrum shape helps tell metal targets from soil (EMI spectroscopy, Huang & Won, 2003) |
+| Power-line noise map | AUX tab → area map of `PowerLn` | The GEM-2 logs power-line noise in mG; mapping it shows where noise contaminates the survey (GEM-2 Manual) |
+
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
 - Column 0 = distance (metres), Columns 1+ = one per survey line/trace
@@ -313,6 +324,7 @@ corrections.py — despike, clip, height, drift, temperature, calibration, EC25,
 emphysics.py   — layered-earth forward model, I/Q ↔ EC/MS conversion, skin depth, sensitivity, multi-height fit
 inversion.py   — smooth 1D / laterally constrained inversion, stations, EMagPy export
 gridtools.py   — grid filters, statistics, survey merging, footprint deconvolution, UTM, GeoTIFF, .prj
+interpret.py   — redundancy-aware frequency selection, magnetic viscosity, anomaly spectra
 ui_tools.py    — Streamlit panels for the physics and inversion tools
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
@@ -444,6 +456,10 @@ RIs_v2.py
 34. McLachlan, P., Blanchy, G. & Binley, A. (2021). EMagPy: open-source standalone software for processing, forward modeling and inversion of electromagnetic induction data. *Computers & Geosciences*, **146**, 104561. https://doi.org/10.1016/j.cageo.2020.104561
 
 35. Guillemoteau, J., Christensen, N.B., Jacobsen, B.H. & Tronicke, J. (2017). Fast 3D multichannel deconvolution of electromagnetic induction loop-loop apparent conductivity data sets acquired at low induction numbers. *Geophysics*, **82**(6), E357–E369. https://doi.org/10.1190/geo2016-0518.1
+
+36. Simon, F.-X., Sarris, A., Thiesson, J. & Tabbagh, A. (2015). Mapping of quadrature magnetic susceptibility/magnetic viscosity of soils by using multi-frequency EMI. *Journal of Applied Geophysics*, **120**, 36–47. https://doi.org/10.1016/j.jappgeo.2015.06.007
+
+37. Huang, H. & Won, I.J. (2003). Characterization of UXO-like targets using broadband electromagnetic induction sensors. *IEEE Transactions on Geoscience and Remote Sensing*, **41**(3), 652–663. https://doi.org/10.1109/TGRS.2003.809936
 
 ---
 
