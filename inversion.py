@@ -24,9 +24,14 @@ import pipeline
 MIN_LOG_SIGMA = -5.0          # 0.01 mS/m
 MAX_LOG_SIGMA = 1.0           # 10 S/m
 JACOBIAN_STEP = 0.01          # log10 units
-MAX_ITERATIONS = 15
-ALPHA_DECREASE = 0.5          # regularisation cooling per iteration
-STEP_HALVINGS = 6
+MAX_ITERATIONS = 20
+ALPHA_FACTORS = (64.0, 8.0, 1.0, 0.25, 0.0625)   # regularisation weights tried per iteration (x current)
+ALPHA_MIN = 0.01              # regularisation never drops below this
+MIN_IMPROVEMENT = 0.01        # relative misfit decrease below which the search stops
+FORWARD_CHUNK = 400           # models per forward call (memory: ~0.35 MB per model)
+MAX_STATIONS = 200            # stations the panel inverts at once
+STEP_HALVINGS = 5
+MODEL_TOLERANCE = 1e-3        # log10 units; smaller model updates end the iterations
 
 
 @dataclass(frozen=True)
@@ -48,12 +53,22 @@ def make_layer_grid(max_depth: float = 6.0, n_layers: int = 15, first: float = 0
     n = n_layers - 1
     if n < 1 or first <= 0 or max_depth <= first:
         raise ValueError("need n_layers >= 2 and 0 < first < max_depth")
-    # Solve first * (q^n - 1) / (q - 1) = max_depth for the growth factor q.
-    lo, hi = 1.0 + 1e-9, 10.0
+    if first * n > max_depth:
+        raise ValueError(
+            f"{n} layers of at least {first:g} m reach {first * n:g} m, deeper than {max_depth:g} m: "
+            "use fewer layers or a thinner first layer."
+        )
+
+    def total(q):
+        return first * n if abs(q - 1) < 1e-12 else first * (q ** n - 1) / (q - 1)
+
+    lo, hi = 1.0, 100.0
+    if total(hi) < max_depth:
+        raise ValueError(f"{max_depth:g} m is too deep for {n_layers} layers starting at {first:g} m.")
+    # Solve total(q) = max_depth for the growth factor q (total grows with q).
     for _ in range(200):
         q = 0.5 * (lo + hi)
-        total = first * n if abs(q - 1) < 1e-12 else first * (q ** n - 1) / (q - 1)
-        lo, hi = (q, hi) if total < max_depth else (lo, q)
+        lo, hi = (q, hi) if total(q) < max_depth else (lo, q)
     return LayerGrid(thickness=first * q ** np.arange(n))
 
 
@@ -69,8 +84,14 @@ class InversionResult:
 
 
 def _forward_q(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Sensor) -> np.ndarray:
-    """Quadrature ppm for M models: log_sigma (M, N) -> (M, F)."""
-    return E.forward_ppm_batch(frequencies, 10.0 ** log_sigma, None, grid.thickness, sensor).imag
+    """Quadrature ppm for M models: log_sigma (M, N) -> (M, F), FORWARD_CHUNK models at a time."""
+    out = np.empty((len(log_sigma), len(np.atleast_1d(frequencies))))
+    for a in range(0, len(log_sigma), FORWARD_CHUNK):
+        part = log_sigma[a: a + FORWARD_CHUNK]
+        out[a: a + len(part)] = E.forward_ppm_batch(
+            frequencies, 10.0 ** part, None, grid.thickness, sensor
+        ).imag
+    return out
 
 
 def _jacobian(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Sensor):
@@ -111,19 +132,28 @@ def invert(
     Gauss-Newton inversion of quadrature data (ppm) for log10(sigma).
 
     data_q, errors: (n_stations, n_freq); errors are 1-sigma data errors in
-    ppm. Stations are inverted jointly with lateral smoothing weighted by
-    `lateral_weight` (0 = independent 1D inversions). The regularisation
-    weight starts at `alpha` and is halved each iteration while the misfit
-    stays above `target_chi2` (chi-squared per datum).
+    ppm (only used where there are data). Stations are inverted jointly with
+    lateral smoothing weighted by `lateral_weight` (0 = independent 1D
+    inversions). Each iteration tries regularisation weights around the
+    current one (ALPHA_FACTORS, starting from `alpha`) in the Occam manner
+    (Constable et al., 1987): while the misfit (chi-squared per datum) is
+    above `target_chi2` it takes the step with the lowest misfit, and stops
+    when that improves by less than MIN_IMPROVEMENT; once the target is
+    reached it takes the smoothest step that keeps it, until no smoother
+    model fits.
     """
     d = np.atleast_2d(np.asarray(data_q, dtype=float))
     e = np.atleast_2d(np.asarray(errors, dtype=float))
-    if d.shape != e.shape or np.any(~np.isfinite(e)) or np.any(e <= 0):
-        raise ValueError("errors must be positive, finite and the same shape as the data")
+    if d.shape != e.shape:
+        raise ValueError("errors must have the same shape as the data")
+    finite = np.isfinite(d)
+    if not finite.any():
+        raise ValueError("No finite data to invert.")
+    if np.any(~np.isfinite(e[finite])) or np.any(e[finite] <= 0):
+        raise ValueError("errors must be positive and finite wherever there are data")
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     n_st, n_l = d.shape[0], grid.n_layers
-    finite = np.isfinite(d)
-    w = np.where(finite, 1.0 / e, 0.0)
+    w = np.where(finite, 1.0 / np.where(finite, e, 1.0), 0.0)
     d0 = np.where(finite, d, 0.0)
 
     if start_log_sigma is None:
@@ -142,34 +172,45 @@ def invert(
     def misfit(pred):
         return float(np.sum((w * (d0 - pred)) ** 2)) / n_data
 
-    def objective(pred, model, a):
-        return misfit(pred) * n_data + a * float(np.sum((rough @ model.ravel()) ** 2))
-
     pred = _forward_q(f, m, grid, sensor)
     history = [misfit(pred)]
-    it = 0
-    for it in range(1, MAX_ITERATIONS + 1):
-        if history[-1] <= target_chi2:
-            break
+    alpha = max(float(alpha), ALPHA_MIN)
+    steps = 0
+    for _ in range(MAX_ITERATIONS):
         base, jac = _jacobian(f, m, grid, sensor)
         wj = sparse.block_diag([w[i][:, None] * jac[i] for i in range(n_st)], format="csr")
         r = (w * (d0 - base)).ravel()
-        lhs = sparse.vstack([wj, np.sqrt(alpha) * rough]).tocsr()
-        rhs = np.concatenate([r, -np.sqrt(alpha) * (rough @ m.ravel())])
-        step = lsqr(lhs, rhs, atol=1e-10, btol=1e-10, iter_lim=5000)[0].reshape(n_st, n_l)
-        current = objective(base, m, alpha)
-        for _ in range(STEP_HALVINGS):
-            trial = np.clip(m + step, MIN_LOG_SIGMA, MAX_LOG_SIGMA)
-            trial_pred = _forward_q(f, trial, grid, sensor)
-            if objective(trial_pred, trial, alpha) < current:
-                m, pred = trial, trial_pred
-                break
-            step *= 0.5
-        history.append(misfit(pred))
-        alpha *= ALPHA_DECREASE
+        trials = []
+        for a in sorted({max(alpha * k, ALPHA_MIN) for k in ALPHA_FACTORS}, reverse=True):
+            lhs = sparse.vstack([wj, np.sqrt(a) * rough]).tocsr()
+            rhs = np.concatenate([r, -np.sqrt(a) * (rough @ m.ravel())])
+            step = lsqr(lhs, rhs, atol=1e-10, btol=1e-10, iter_lim=5000)[0].reshape(n_st, n_l)
+            for _ in range(STEP_HALVINGS):              # damp the step until the misfit drops
+                trial = np.clip(m + step, MIN_LOG_SIGMA, MAX_LOG_SIGMA)
+                trial_pred = _forward_q(f, trial, grid, sensor)
+                if misfit(trial_pred) < history[-1]:
+                    break
+                step *= 0.5
+            trials.append((a, trial, trial_pred, misfit(trial_pred)))
+        current = history[-1]
+        fitting = [t for t in trials if t[3] <= target_chi2]
+        if current > target_chi2:
+            a, trial, trial_pred, mis = fitting[0] if fitting else min(trials, key=lambda t: t[3])
+            if not fitting and mis > current * (1.0 - MIN_IMPROVEMENT):
+                break                                   # no longer approaching the target
+        else:
+            if not fitting or fitting[0][0] <= alpha:
+                break                                   # no smoother model keeps the target
+            a, trial, trial_pred, mis = fitting[0]
+        change = float(np.max(np.abs(trial - m)))
+        m, pred, alpha = trial, trial_pred, a
+        history.append(mis)
+        steps += 1
+        if change < MODEL_TOLERANCE:
+            break
     return InversionResult(
         log_sigma=m, grid=grid, predicted=pred, chi2=history[-1],
-        alpha=alpha, iterations=it, history=history,
+        alpha=alpha, iterations=steps, history=history,
     )
 
 
@@ -184,7 +225,8 @@ def data_errors(
     model_err = relative * np.abs(data) + floor
     if noise is None:
         return model_err
-    return np.maximum(model_err, np.broadcast_to(np.asarray(noise, dtype=float), data.shape))
+    # fmax: a frequency without measured noise (NaN) keeps the model error
+    return np.fmax(model_err, np.broadcast_to(np.asarray(noise, dtype=float), data.shape))
 
 
 def ec_to_quadrature(frequencies, ec_ms_m: np.ndarray, sensor: E.Sensor = E.GEM2) -> np.ndarray:
@@ -241,7 +283,7 @@ class StationData:
     distance: np.ndarray         # (S,) m
     frequencies: np.ndarray      # (F,) Hz
     quadrature: np.ndarray       # (S, F) ppm
-    noise: np.ndarray | None     # (F,) ppm, measured between passes; None if unknown
+    noise: np.ndarray | None     # (F,) ppm, noise of the mean profile; None if unknown
     source: str                  # "Q" or "EC"
 
 
@@ -266,7 +308,9 @@ def station_data(
     Stations every `station_step` metres along the mean profiles. Uses the
     quadrature channels when present, otherwise EC converted to quadrature
     (ec_to_quadrature). The measured noise is the between-pass sigma of each
-    frequency (None for a frequency scored from a single pass).
+    frequency divided by sqrt(number of passes), the noise of the mean
+    profile (NaN for a frequency scored from a single pass; None if no
+    frequency has it).
     """
     source = "Q" if output_data.get("Q") else "EC"
     channels = output_data.get(source) or {}
@@ -281,11 +325,13 @@ def station_data(
     keep = np.unique(np.abs(distance[:, None] - targets[None, :]).argmin(axis=0))
     distance, values = distance[keep], values[keep]
 
-    noise = np.array([
-        scores.get(source, {}).get(lb, {}).get("mean_std", np.nan)
-        if scores.get(source, {}).get(lb, {}).get("noise_method") == "between-trace" else np.nan
-        for lb in labels
-    ])
+    def mean_noise(sc: dict) -> float:
+        """Noise of the mean of n passes: the between-pass sigma / sqrt(n)."""
+        if sc.get("noise_method") != "between-trace":
+            return np.nan
+        return sc.get("mean_std", np.nan) / np.sqrt(max(int(sc.get("n_traces", 1)), 1))
+
+    noise = np.array([mean_noise(scores.get(source, {}).get(lb, {})) for lb in labels])
     if source == "EC":
         q = ec_to_quadrature(freqs, values, sensor)
         # noise in mS/m -> ppm with the local slope dQ/dEC at the median EC
@@ -353,7 +399,7 @@ def emagpy_from_table(
         x = pd.to_numeric(table[pipeline.DISTANCE_COL], errors="coerce").to_numpy(dtype=float)
         y = np.zeros(len(table))
     ec = table[[found[lb] for lb in labels]].apply(pd.to_numeric, errors="coerce").to_numpy()
-    keep = np.isfinite(x) & np.isfinite(y)
+    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(ec).any(axis=1)
     err = None
     if errors_ms_m:
         err = np.array([errors_ms_m.get(found[lb], np.nan) for lb in labels])

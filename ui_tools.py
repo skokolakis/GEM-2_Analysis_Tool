@@ -317,7 +317,7 @@ def render_inversion(
                                   key=f"inv_l_{file_key}")
         step = c2.number_input("Station spacing (m)", 0.1, 100.0, 1.0, key=f"inv_s_{file_key}")
         rel = c3.number_input("Relative error (%)", 0.1, 50.0, 3.0, key=f"inv_r_{file_key}")
-        floor = c3.number_input("Error floor (ppm)", 0.0, 1000.0, 1.0, key=f"inv_fl_{file_key}")
+        floor = c3.number_input("Error floor (ppm)", 0.01, 1000.0, 1.0, key=f"inv_fl_{file_key}")
         use_noise = c3.checkbox("Use measured noise (between passes)", True, key=f"inv_n2_{file_key}")
         try:
             stations = inversion.station_data(output_data, scores, step, sensor)
@@ -333,9 +333,22 @@ def render_inversion(
             stations.noise if use_noise else None, rel / 100.0, floor,
         )
         run_key = f"inv_run_{file_key}"
-        if st.button("Invert", key=f"inv_btn_{file_key}"):
-            st.session_state[run_key] = True
-        if st.session_state.get(run_key):
+        params = (int(n_layers), float(max_depth), float(first), float(alpha), float(lateral),
+                  float(step), float(rel), float(floor), bool(use_noise), sensor,
+                  hash(stations.quadrature.tobytes()))
+        too_many = len(stations.distance) > inversion.MAX_STATIONS
+        if too_many:
+            length = float(stations.distance[-1] - stations.distance[0])
+            st.info(
+                f"More than {inversion.MAX_STATIONS} stations: set the station spacing to at least "
+                f"{length / inversion.MAX_STATIONS:.2g} m to invert."
+            )
+        elif st.button("Invert", key=f"inv_btn_{file_key}"):
+            st.session_state[run_key] = params          # the inputs this inversion is for
+        ran = st.session_state.get(run_key)
+        if ran is not None and ran != params:
+            st.caption("The inputs changed since the last inversion: press Invert to update it.")
+        if ran == params and not too_many:
             try:
                 with st.spinner("Inverting…"):
                     result = run_inversion(

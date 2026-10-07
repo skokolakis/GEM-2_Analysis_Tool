@@ -89,6 +89,19 @@ def test_emagpy_reads_the_export():
         assert k.surveys[0].freqs == [1525.0, 5325.0]
 
 
+def test_station_noise_is_the_noise_of_the_mean_profile():
+    out = {"Q": _profiles({"1525Hz": np.ones(21)}, passes=4)}
+    scores = {"Q": {"1525Hz": {"mean_std": 2.0, "noise_method": "between-trace", "n_traces": 4}}}
+    np.testing.assert_allclose(V.station_data(out, scores, 1.0).noise, 1.0)
+
+
+def test_emagpy_skips_readings_without_ec():
+    table = pd.DataFrame({"Line": 0, "X": [0.0, 1.0, 2.0], "Y": 0.0,
+                          "EC1525Hz[mS/m]": [10.0, np.nan, 11.0], pipeline.DISTANCE_COL: [0.0, 1.0, 2.0]})
+    df = pd.read_csv(io.BytesIO(V.emagpy_from_table(table)))
+    assert df["x"].tolist() == [0.0, 2.0]
+
+
 def _inversion_app():
     import numpy as np
     import pandas as pd
@@ -117,3 +130,13 @@ def test_inversion_panel_runs_and_offers_model_download():
     at.button(key="inv_btn_inv").click().run()
     assert not at.exception
     assert any("stations" in c.value for c in at.caption)
+
+
+def test_inversion_reruns_only_on_the_button():
+    at = AppTest.from_function(_inversion_app, default_timeout=300)
+    at.run()
+    at.number_input(key="inv_s_inv").set_value(2.0).run()
+    at.button(key="inv_btn_inv").click().run()
+    at.number_input(key="inv_a_inv").set_value(100.0).run()
+    assert not at.exception
+    assert any("inputs changed" in c.value for c in at.caption)
