@@ -137,6 +137,18 @@ Under each GEM file, **Layered-earth inversion** inverts the quadrature of the m
 | Anomaly spectrum | Under each GEM file | Mean I and Q within a radius of a point minus the background (ring from radius to 2 × radius, or the whole survey), for every frequency, with the Argand diagram (Q against I). The spectrum shape helps tell metal targets from soil (EMI spectroscopy, Huang & Won, 2003) |
 | Power-line noise map | AUX tab → area map of `PowerLn` | The GEM-2 logs power-line noise in mG; mapping it shows where noise contaminates the survey (GEM-2 Manual) |
 
+---
+
+## Soil tools
+
+Under each GEM file with coordinates, **Soil tools** works on the chosen EC channels:
+
+| Tab | What it does |
+|---|---|
+| Sampling design | Picks sampling sites that span the conductivity range and are spread over the field: standardised principal-component scores of the channels; design targets at the centre, an inner ring (radius 1) and an outer ring (radius 1.75) — normal quantiles for one channel; for each target, of the 20 readings closest to it in component space, the one farthest from the sites already chosen (response-surface sampling after Lesch, 2005, as in ESAP-RSSD). Download the sites as CSV (map metres, plus lon/lat for degree files) |
+| Calibration | Upload measured soil properties (same coordinate columns as the survey). Each sample takes the median conductivity of the readings within the matching radius; the property is regressed on ln(EC) (on a log scale if chosen, optionally with an x, y trend surface) (Lesch et al., 1995; ESAP-Calibrate). Shows R², RMSE and the coefficients, maps the predicted property and exports it |
+| Management zones | Fuzzy c-means on the standardised channels (Bezdek, 1981), as in Management Zone Analyst (Fridgen et al., 2004). For 2–6 zones the fuzziness performance index (FPI) and modified partition entropy (MPE, Boydell & McBratney, 2002) are listed; the lowest values suggest the number of zones. Readings are mapped by zone and exported with their memberships |
+
 **Legacy format** (multi-sheet XLSX):
 - One frequency per Excel sheet
 - Column 0 = distance (metres), Columns 1+ = one per survey line/trace
@@ -325,6 +337,7 @@ emphysics.py   — layered-earth forward model, I/Q ↔ EC/MS conversion, skin d
 inversion.py   — smooth 1D / laterally constrained inversion, stations, EMagPy export
 gridtools.py   — grid filters, statistics, survey merging, footprint deconvolution, UTM, GeoTIFF, .prj
 interpret.py   — redundancy-aware frequency selection, magnetic viscosity, anomaly spectra
+soiltools.py   — sampling design, soil-property calibration, fuzzy c-means management zones
 ui_tools.py    — Streamlit panels for the physics and inversion tools
 contouring.py  — area maps, pseudo-sections, unit labels
 RIs_v2.py
@@ -460,6 +473,14 @@ RIs_v2.py
 36. Simon, F.-X., Sarris, A., Thiesson, J. & Tabbagh, A. (2015). Mapping of quadrature magnetic susceptibility/magnetic viscosity of soils by using multi-frequency EMI. *Journal of Applied Geophysics*, **120**, 36–47. https://doi.org/10.1016/j.jappgeo.2015.06.007
 
 37. Huang, H. & Won, I.J. (2003). Characterization of UXO-like targets using broadband electromagnetic induction sensors. *IEEE Transactions on Geoscience and Remote Sensing*, **41**(3), 652–663. https://doi.org/10.1109/TGRS.2003.809936
+
+38. Lesch, S.M. (2005). Sensor-directed response surface sampling designs for characterizing spatial variation in soil properties. *Computers and Electronics in Agriculture*, **46**, 153–179. https://doi.org/10.1016/j.compag.2004.11.004
+
+39. Fridgen, J.J., Kitchen, N.R., Sudduth, K.A., Drummond, S.T., Wiebold, W.J. & Fraisse, C.W. (2004). Management Zone Analyst (MZA): software for subfield management zone delineation. *Agronomy Journal*, **96**, 100–108. https://doi.org/10.2134/agronj2004.0100
+
+40. Boydell, B. & McBratney, A.B. (2002). Identifying potential within-field management zones from cotton-yield estimates. *Precision Agriculture*, **3**, 9–23. https://doi.org/10.1023/A:1013318002609
+
+41. Bezdek, J.C. (1981). *Pattern Recognition with Fuzzy Objective Function Algorithms*. Plenum Press, New York.
 
 ---
 
