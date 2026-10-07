@@ -15,8 +15,10 @@ import pandas as pd
 import streamlit as st
 
 import contouring as ctr
+import corrections
 import emphysics
 import gem_io
+import interpret
 import inversion
 
 DEFAULT_FREQUENCIES = "475, 1525, 5325, 18325, 63025"
@@ -342,3 +344,78 @@ def render_inversion(
                      "columns from the between-pass noise. EMagPy models a plain loop pair: "
                      "the GEM-2 bucking coil is not modelled there.",
             )
+
+
+# ---------------------------------------------------------------------------
+# Interpretation
+# ---------------------------------------------------------------------------
+
+
+def render_frequency_selection(
+    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], file_key: str
+) -> None:
+    """Redundancy-aware choice of a few frequencies from the scores and profile correlations."""
+    with st.expander("Frequency selection (redundancy-aware)", expanded=False):
+        st.caption(
+            "The GEM-2 shares its transmitter power among all frequencies, so fewer "
+            "frequencies give less noise on each; drone-towed GEM-2 tests recommend at most "
+            "three (Vilhelmsen & Døssing, 2022). Strongly correlated frequencies carry the "
+            "same information (Minsley et al., 2010)."
+        )
+        c1, c2 = st.columns(2)
+        count = c1.slider("Frequencies to keep", 1, max(1, len(scores)), min(3, len(scores)),
+                          key=f"sel_n_{file_key}")
+        limit = c2.slider("Redundant above |r|", 0.5, 1.0, 0.95, step=0.01, key=f"sel_r_{file_key}")
+        corr = interpret.profile_correlation(output_data)
+        table = interpret.select_frequencies(scores, corr, count, limit)
+        st.dataframe(table.round(3), hide_index=True, use_container_width=True)
+        fig, ax = plt.subplots(figsize=(4.5, 3.8))
+        im = ax.imshow(corr.to_numpy(), vmin=-1, vmax=1, cmap="RdBu_r")
+        ax.set_xticks(range(len(corr)), corr.columns, rotation=90, fontsize=7)
+        ax.set_yticks(range(len(corr)), corr.index, fontsize=7)
+        fig.colorbar(im, ax=ax, label="Correlation of mean profiles")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+
+def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
+    """In-phase / quadrature anomaly against frequency around a chosen point."""
+    with st.expander("Anomaly spectrum (EMI spectroscopy)", expanded=False):
+        st.caption(
+            "Mean I and Q within the radius minus the background, for every frequency with "
+            "I_ and Q_ columns. The shape of the spectrum and of the Argand diagram helps tell "
+            "metal targets from soil and geology (Huang & Won, 2003)."
+        )
+        found = gem_io.find_channels(table.columns)
+        if not any(lb in found["I"] for lb in found["Q"]):
+            st.info("Needs I_ and Q_ columns.")
+            return
+        try:
+            x, y, _ = corrections.xy_metres(table)
+            has_xy = bool(np.isfinite(x).any())
+        except ctr.ContouringError:
+            has_xy = False
+        c1, c2, c3 = st.columns(3)
+        if has_xy:
+            cx = c1.number_input("X (m)", value=float(np.nanmedian(x)), key=f"sp_x_{file_key}")
+            cy = c2.number_input("Y (m)", value=float(np.nanmedian(y)), key=f"sp_y_{file_key}")
+            centre = (float(cx), float(cy))
+            st.caption("Map metres: the projected coordinates the area map uses for Lat/Lon.")
+        else:
+            d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
+            centre = float(c1.number_input("Distance (m)", value=float(d.median()), key=f"sp_d_{file_key}"))
+        radius = c3.number_input("Radius (m)", 0.01, 1000.0, 1.0, key=f"sp_r_{file_key}")
+        background = st.radio("Background", ["annulus", "survey"], horizontal=True,
+                              format_func={"annulus": "Ring from radius to 2 × radius",
+                                           "survey": "Whole survey"}.get,
+                              key=f"sp_bg_{file_key}")
+        try:
+            spectrum = interpret.anomaly_spectrum(table, centre, float(radius), background)
+        except ValueError as exc:
+            st.info(str(exc))
+            return
+        st.dataframe(spectrum.round(3), hide_index=True)
+        fig = interpret.make_spectrum_figure(spectrum, f"Anomaly at {centre}")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)

@@ -1161,6 +1161,8 @@ def _render_mode_section(
     show_scores = scoring and mode != "AUX"
     if show_scores:
         _render_ranking(scores)
+        if len(output_data) > 1:
+            ui_tools.render_frequency_selection(output_data, scores, file_key)
     else:
         _render_channel_list(output_data, scores, mode, is_gem)
     if is_gem and mode == "EC":
@@ -1377,17 +1379,17 @@ def render_data_sidebar() -> pipeline.PrepSettings:
             "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
             min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
         )
-    sensor, recompute = render_sensor_sidebar()
+    sensor, recompute, viscosity_pair = render_sensor_sidebar()
     return pipeline.PrepSettings(
         drop_flagged=drop_flagged, exclude_lines=_parse_labels(exclude),
         distance_method=method, distance_spacing=float(spacing),
         corrections=render_corrections_sidebar(),
-        sensor=sensor, recompute_from_iq=recompute,
+        sensor=sensor, recompute_from_iq=recompute, viscosity_pair=viscosity_pair,
     )
 
 
-def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool]:
-    """Coil geometry and height used by the physics tools; optional EC/MS recomputation."""
+def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float] | None]:
+    """Coil geometry and height for the physics tools; EC/MS recomputation; viscosity pair."""
     with st.expander("Sensor geometry", expanded=False):
         st.caption("GEM-2 defaults (Won et al., 1996). Check them against your sensor's .gem file.")
         separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep")
@@ -1399,8 +1401,23 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool]:
             help="Half-space conversion of each reading (Huang & Won, 2000) with this geometry "
                  "and height. Overwrites exported EC / MS columns; adds them to I/Q-only files.",
         )
+        visc_text = st.text_input(
+            "Magnetic viscosity from frequencies (low, high Hz)", key="sen_visc",
+            help="Two frequencies with I_ / Q_ columns, e.g. '1525, 5325'. Adds EC from the "
+                 "quadrature difference and the quadrature susceptibility κ″ to the AUX "
+                 "channels (Simon et al., 2015).",
+        )
     sensor = emphysics.Sensor(float(separation), float(bucking) or None, float(height))
-    return sensor, recompute
+    return sensor, recompute, _parse_pair(visc_text)
+
+
+def _parse_pair(text: str) -> tuple[float, float] | None:
+    """'1525, 5325' -> (1525.0, 5325.0); None if blank or not two distinct numbers."""
+    try:
+        values = tuple(float(p) for p in text.replace(",", " ").split())
+    except ValueError:
+        return None
+    return values if len(values) == 2 and values[0] != values[1] else None
 
 
 def _parse_labels(text: str) -> tuple[str, ...]:
@@ -2022,6 +2039,8 @@ def render_gem_results(
     except ValueError:
         table = None
     ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
+    if table is not None:
+        ui_tools.render_anomaly_spectrum(table, stem)
 
 
 # ---------------------------------------------------------------------------
