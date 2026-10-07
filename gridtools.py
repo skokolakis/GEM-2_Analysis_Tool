@@ -290,3 +290,63 @@ def convolve(z: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Georeferencing
+# ---------------------------------------------------------------------------
+
+
+def utm_epsg(lon: float, lat: float) -> int:
+    """EPSG code of the WGS 84 / UTM zone containing (lon, lat)."""
+    zone = int((lon + 180.0) // 6.0) % 60 + 1
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def lonlat_to_epsg(lon: np.ndarray, lat: np.ndarray, epsg: int) -> tuple[np.ndarray, np.ndarray]:
+    """Projects WGS 84 lon/lat to the CRS `epsg` (metres)."""
+    from pyproj import Transformer
+
+    t = Transformer.from_crs(4326, epsg, always_xy=True)
+    x, y = t.transform(np.asarray(lon, dtype=float), np.asarray(lat, dtype=float))
+    return np.asarray(x), np.asarray(y)
+
+
+def prj_wkt(epsg: int) -> bytes:
+    """ESRI .prj contents (WKT1) for `epsg`, to sit next to an .asc grid."""
+    from pyproj import CRS
+    from pyproj.enums import WktVersion
+
+    return CRS.from_epsg(epsg).to_wkt(WktVersion.WKT1_ESRI).encode()
+
+
+GEOTIFF_NODATA = -9999.0
+
+
+def geotiff_bytes(z: np.ndarray, x0: float, y0: float, cell: float, epsg: int | None) -> bytes:
+    """
+    Single-band float32 GeoTIFF. (x0, y0) is the lower-left corner of the
+    lower-left cell, row 0 of `z` is the southernmost row (as in GridSpec);
+    the file stores the northernmost row first. With epsg=None the file has
+    pixel scale and tie point but no CRS.
+    """
+    from PIL import Image, TiffImagePlugin, TiffTags
+
+    z = np.asarray(z, dtype=np.float32)
+    ny, _ = z.shape
+    data = np.where(np.isfinite(z), z, GEOTIFF_NODATA).astype(np.float32)[::-1]
+    img = Image.fromarray(data, mode="F")
+    ifd = TiffImagePlugin.ImageFileDirectory_v2()
+    ifd[33550] = (float(cell), float(cell), 0.0)                       # ModelPixelScale
+    ifd.tagtype[33550] = TiffTags.DOUBLE
+    ifd[33922] = (0.0, 0.0, 0.0, float(x0), float(y0 + ny * cell), 0.0)  # ModelTiepoint
+    ifd.tagtype[33922] = TiffTags.DOUBLE
+    keys = [1, 1, 0, 2, 1024, 0, 1, 1, 1025, 0, 1, 1]                  # projected, PixelIsArea
+    if epsg:
+        keys[3] = 3
+        keys += [3072, 0, 1, int(epsg)]                                # ProjectedCSTypeGeoKey
+    ifd[34735] = tuple(keys)                                           # GeoKeyDirectory
+    ifd.tagtype[34735] = TiffTags.SHORT
+    ifd[42113] = f"{GEOTIFF_NODATA:g}"                                 # GDAL_NODATA
+    ifd.tagtype[42113] = TiffTags.ASCII
+    buf = io.BytesIO()
+    img.save(buf, format="TIFF", tiffinfo=ifd)
+    return buf.getvalue()

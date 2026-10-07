@@ -118,3 +118,29 @@ def test_deconvolution_keeps_blanks():
     assert np.isnan(out[:5, :5]).all() and np.isfinite(out[10:, 10:]).all()
 
 
+def test_utm_zone():
+    assert G.utm_epsg(23.7, 37.9) == 32634          # Athens
+    assert G.utm_epsg(-70.6, -33.4) == 32719        # Santiago
+
+
+def test_projection_and_prj():
+    x, y = G.lonlat_to_epsg([21.0], [0.0], 32634)
+    assert x[0] == pytest.approx(500000.0, abs=1e-3)
+    assert b"UTM_Zone_34N" in G.prj_wkt(32634)
+
+
+def test_geotiff_round_trip_values_and_tags():
+    from PIL import Image
+
+    z = np.arange(12, dtype=float).reshape(3, 4)
+    z[0, 0] = np.nan
+    data = G.geotiff_bytes(z, 500000.0, 4000000.0, 2.0, 32634)
+    img = Image.open(io.BytesIO(data))
+    arr = np.array(img)
+    assert arr.shape == (3, 4)
+    assert arr[0, 1] == 9.0                     # first stored row = northernmost (z row 2)
+    assert arr[2, 0] == G.GEOTIFF_NODATA
+    tags = img.tag_v2
+    assert tuple(tags[33550])[:2] == (2.0, 2.0)
+    assert tuple(tags[33922])[3:5] == (500000.0, 4000006.0)
+    assert 32634 in tuple(tags[34735])
