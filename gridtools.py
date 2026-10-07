@@ -19,6 +19,8 @@ import contouring as ctr
 import corrections
 import emphysics as E
 
+MIN_EDGE_PAIRS = 5             # overlapping readings needed before an edge-match offset is applied
+
 # ---------------------------------------------------------------------------
 # NaN-aware filters (normalised convolution: blanks neither spread nor bias)
 # ---------------------------------------------------------------------------
@@ -45,6 +47,15 @@ def highpass(z: np.ndarray, size: int = 15) -> np.ndarray:
     return np.asarray(z, dtype=float) - _nan_uniform(z, size)
 
 
+def _fill_nan(z: np.ndarray) -> np.ndarray:
+    """Fills NaN cells with the value of the nearest finite cell."""
+    ok = np.isfinite(z)
+    if ok.all():
+        return z
+    idx = ndimage.distance_transform_edt(~ok, return_distances=False, return_indices=True)
+    return z[tuple(idx)]
+
+
 def despike(z: np.ndarray, size: int = 3, threshold: float = 3.0) -> tuple[np.ndarray, int]:
     """
     Replaces cells that differ from the local median by more than
@@ -53,7 +64,9 @@ def despike(z: np.ndarray, size: int = 3, threshold: float = 3.0) -> tuple[np.nd
     """
     z = np.asarray(z, dtype=float)
     ok = np.isfinite(z)
-    filled = np.where(ok, z, np.nanmedian(z))
+    if not ok.any():
+        return z.copy(), 0
+    filled = _fill_nan(z)                   # nearest values, so blanks do not pull edge medians
     med = ndimage.median_filter(filled, size=size, mode="nearest")
     dev = np.abs(z - med)
     scale = 1.4826 * np.nanmedian(dev[ok])
@@ -90,12 +103,15 @@ def edge_match_offset(
     """
     Constant to add to survey (xy, v) so it matches the reference where they
     overlap: median of reference - survey over pairs closer than `tolerance`.
-    Returns (offset, number of pairs); (0, 0) when they do not overlap.
+    Returns (offset, number of pairs); the offset is 0 with fewer than
+    MIN_EDGE_PAIRS pairs.
     """
+    if len(ref_xy) == 0 or len(xy) == 0:
+        return 0.0, 0
     d, i = cKDTree(ref_xy).query(xy, distance_upper_bound=tolerance)
     pair = np.isfinite(d)
-    if not pair.any():
-        return 0.0, 0
+    if pair.sum() < MIN_EDGE_PAIRS:
+        return 0.0, int(pair.sum())
     return float(np.median(ref_v[i[pair]] - v[pair])), int(pair.sum())
 
 
@@ -164,6 +180,9 @@ def _depth_nodes(height: float, max_depth: float, n: int = 200) -> tuple[np.ndar
     return z, w
 
 
+FOOTPRINT_SAMPLE = 0.2         # m; each cell is averaged over sub-samples at most this far apart
+
+
 def footprint(
     cell: float, sensor: E.Sensor = E.GEM2, angle_deg: float = 0.0, half_width: float | None = None
 ) -> np.ndarray:
@@ -171,7 +190,11 @@ def footprint(
     Lateral footprint of the sensor on a map grid with spacing `cell`:
     depth-integrated sensitivity of Rx minus bucking coil, each scaled to its
     low-induction-number total, centred on the Tx-Rx midpoint with the coil
-    axis at `angle_deg` from the grid x axis. Sums to 1.
+    axis at `angle_deg` from the grid x axis. Each cell holds the mean over
+    the cell (sub-sampled every FOOTPRINT_SAMPLE m), so coarse grids do not
+    alias the negative core between the coils. The kernel is symmetrised,
+    (k + k turned by 180°) / 2: lines are walked both ways, so which end is
+    the transmitter is not known. Sums to 1.
     """
     s, h = sensor.separation, sensor.height
     if half_width is None:
@@ -180,19 +203,26 @@ def footprint(
     ax = np.arange(-n, n + 1) * cell
     gx, gy = np.meshgrid(ax, ax)
     a = math.radians(angle_deg)
-    # grid -> sensor frame (coil axis along +x', Tx at x' = -s/2)
-    xs = gx * math.cos(a) + gy * math.sin(a) + s / 2
-    ys = -gx * math.sin(a) + gy * math.cos(a)
+    m = min(9, max(1, math.ceil(cell / FOOTPRINT_SAMPLE)))
+    sub = ((np.arange(m) + 0.5) / m - 0.5) * cell
     z, wz = _depth_nodes(h, max_depth=10.0 * s + 10.0 * h)
 
     def radius_term(r):
-        k = sum(w * lin_sensitivity(xs, ys, zi, r, h) for zi, w in zip(z, wz))
+        k = np.zeros_like(gx)
+        for ox in sub:
+            for oy in sub:
+                px, py = gx + ox, gy + oy
+                # grid -> sensor frame (coil axis along +x', Tx at x' = -s/2)
+                xs = px * math.cos(a) + py * math.sin(a) + s / 2
+                ys = -px * math.sin(a) + py * math.cos(a)
+                k += sum(w * lin_sensitivity(xs, ys, zi, r, h) for zi, w in zip(z, wz))
         total = r * r / (4.0 * math.sqrt(4.0 * (h / r) ** 2 + 1.0))
         return k / k.sum() * total
 
     k = radius_term(s)
     if sensor.bucking:
         k = k - radius_term(sensor.bucking)
+    k = 0.5 * (k + k[::-1, ::-1])
     return k / k.sum()
 
 
@@ -248,26 +278,33 @@ def process_map(
     return out, msgs
 
 
-def _fill_nan(z: np.ndarray) -> np.ndarray:
-    """Fills NaN cells with the value of the nearest finite cell."""
+def _plane(z: np.ndarray) -> np.ndarray:
+    """Least-squares plane through the finite cells of z (their mean with fewer than 3)."""
+    rows, cols = np.indices(z.shape)
     ok = np.isfinite(z)
-    if ok.all():
-        return z
-    idx = ndimage.distance_transform_edt(~ok, return_distances=False, return_indices=True)
-    return z[tuple(idx)]
+    if ok.sum() < 3:
+        return np.full(z.shape, float(np.mean(z[ok])) if ok.any() else 0.0)
+    a = np.column_stack([np.ones(ok.sum()), cols[ok], rows[ok]])
+    c = np.linalg.lstsq(a, z[ok], rcond=None)[0]
+    return c[0] + c[1] * cols + c[2] * rows
 
 
 def deconvolve(z: np.ndarray, kernel: np.ndarray, regularisation: float = 1e-2) -> np.ndarray:
     """
-    Tikhonov (Wiener-type) deconvolution of a map by a footprint kernel:
-    Z * conj(K) / (|K|^2 + regularisation * max|K|^2) in the Fourier domain.
-    Blank cells are filled from their nearest neighbour for the transform and
-    blanked again; edges are mirror-padded by the kernel half-width.
+    Tikhonov (Wiener-type) deconvolution of a map by a footprint kernel, the
+    inverse of convolve (each reading = sum of kernel x conductivity around
+    it): Z K / (|K|^2 + regularisation * max|K|^2) in the Fourier domain. A
+    plane fitted to the map is removed first and added back (a symmetric
+    kernel that sums to 1 passes it unchanged), so a regional trend does not
+    wrap around the transform. Blank cells are filled from their nearest
+    neighbour for the transform and blanked again; edges are mirror-padded by
+    the kernel half-width.
     """
     z = np.asarray(z, dtype=float)
     blank = ~np.isfinite(z)
+    trend = _plane(z)
     pad = kernel.shape[0] // 2
-    work = np.pad(_fill_nan(z), pad, mode="reflect")
+    work = np.pad(_fill_nan(z - trend), pad, mode="reflect")
     mean = work.mean()
     shape = work.shape
     kpad = np.zeros(shape)
@@ -276,8 +313,8 @@ def deconvolve(z: np.ndarray, kernel: np.ndarray, regularisation: float = 1e-2) 
     K = np.fft.rfft2(kpad)
     Z = np.fft.rfft2(work - mean)
     lam = regularisation * float(np.max(np.abs(K)) ** 2)
-    out = np.fft.irfft2(Z * np.conj(K) / (np.abs(K) ** 2 + lam), s=shape) + mean
-    out = out[pad: pad + z.shape[0], pad: pad + z.shape[1]]
+    out = np.fft.irfft2(Z * K / (np.abs(K) ** 2 + lam), s=shape) + mean
+    out = out[pad: pad + z.shape[0], pad: pad + z.shape[1]] + trend
     return np.where(blank, np.nan, out)
 
 
@@ -350,3 +387,18 @@ def geotiff_bytes(z: np.ndarray, x0: float, y0: float, cell: float, epsg: int | 
     buf = io.BytesIO()
     img.save(buf, format="TIFF", tiffinfo=ifd)
     return buf.getvalue()
+
+
+def epsg_problem(epsg: int) -> str | None:
+    """Why `epsg` cannot label metre X/Y (unknown, or not a projected CRS); None when it can."""
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    try:
+        crs = CRS.from_epsg(int(epsg))
+    except CRSError:
+        return f"EPSG:{epsg} is not a known coordinate system; X/Y are treated as unreferenced."
+    if not crs.is_projected:
+        return (f"EPSG:{epsg} ({crs.name}) is not a projected system in metres; "
+                "X/Y are treated as unreferenced.")
+    return None

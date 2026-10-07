@@ -665,6 +665,11 @@ def compute_difference_map(
     """
     coord = {k: params.get(k) for k in ("coord_mode", "projection", "xy_epsg")}
     coord = {k: v for k, v in coord.items() if v is not None}
+    mode = coord.get("coord_mode", "auto")
+    if find_coordinate_columns(df_a, mode)[2] != find_coordinate_columns(df_b, mode)[2]:
+        raise ContouringError(
+            "The two surveys use different coordinates (one in degrees, one in metres)."
+        )
     xa, ya, _, _, origin, epsg = survey_xy(df_a, value_col, **coord)
     xb, yb, _, _, _, _ = survey_xy(df_b, value_col, origin=origin, epsg=epsg, **coord)
     if xa.size == 0 or xb.size == 0:

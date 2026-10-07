@@ -58,6 +58,11 @@ def test_symmetric_levels_centre_on_zero():
     assert lo == pytest.approx(-hi)
 
 
+def test_difference_map_rejects_mixed_coordinates():
+    with pytest.raises(C.ContouringError, match="different coordinates"):
+        C.compute_difference_map(_grid_survey(), _grid_survey(degrees=False), "EC1525Hz[mS/m]")
+
+
 def _map_app(two_files: bool = False):
     import numpy as np
     import pandas as pd

@@ -1603,6 +1603,11 @@ def render_contouring_sidebar() -> ContourSettings:
         "EPSG code of X/Y (0 = unknown)", 0, 99999, 0, key="ct_epsg",
         help="For files whose X/Y are already projected, e.g. 32634 for UTM 34N.",
     )
+    xy_epsg = int(xy_epsg) or None
+    problem = gridtools.epsg_problem(xy_epsg) if xy_epsg else None
+    if problem:
+        st.warning(problem)
+        xy_epsg = None
     return ContourSettings(
         area_map=True,
         pseudosection=pseudo,
@@ -1615,7 +1620,7 @@ def render_contouring_sidebar() -> ContourSettings:
         level_lines=level,
         n_levels=int(n_levels),
         projection=projection,
-        xy_epsg=int(xy_epsg) or None,
+        xy_epsg=xy_epsg,
     )
 
 
@@ -1895,6 +1900,7 @@ def render_combined_maps(
             if len(chosen) < 2:
                 st.info("Choose at least two surveys.")
                 return
+            chosen = [n for n in names if n in chosen]        # upload order, as merged
             files = tuple(f for f in gem_files if f[1] in chosen)
             with st.spinner("Gridding merged surveys…"):
                 result, offsets = _merged_map_cached(files, prep, col, float(tol), match,

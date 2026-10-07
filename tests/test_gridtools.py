@@ -37,6 +37,15 @@ def test_despike_replaces_only_spikes():
     assert np.array_equal(np.delete(out.ravel(), 10 * 30 + 10), np.delete(z.ravel(), 10 * 30 + 10))
 
 
+def test_despike_does_not_use_far_values_at_blank_edges():
+    rng = np.random.default_rng(1)
+    z = 10 + rng.normal(0, 0.1, (20, 20))
+    z[5:15, 12:15] += 20.0                    # a real block against the blank area
+    z[:, 15:] = np.nan
+    out, _ = G.despike(z, 3, 6.0)
+    assert out[5, 14] == pytest.approx(z[5, 14])
+
+
 def test_summary_stats():
     s = G.summary_stats(np.array([1.0, 2.0, 3.0, np.nan]))
     assert s["n"] == 3 and s["mean"] == 2.0 and s["median"] == 2.0 and s["max"] == 3.0
@@ -60,6 +69,13 @@ def test_merge_rejects_mixed_coordinates():
     b = pd.DataFrame({"Line": 1, "Lat": 37.0 + 1e-5 * np.arange(12), "Lon": 23.0, "v": 1.0})
     with pytest.raises(ctr.ContouringError, match="different coordinate"):
         G.merge_tables([a, b], "v", 1.0)
+
+
+def test_edge_match_needs_enough_pairs():
+    a = pd.DataFrame({"Line": 1, "X": np.arange(10.0), "Y": 0.0, "v": 10.0})
+    b = pd.DataFrame({"Line": 1, "X": np.arange(10.0) + 8, "Y": 0.0, "v": 13.0})   # 2 pairs
+    assert G.merge_tables([a, b], "v", tolerance=0.1)[1] == [0.0, 0.0]
+    assert G.edge_match_offset(np.zeros((0, 2)), np.zeros(0), np.zeros((3, 2)), np.ones(3), 1.0) == (0.0, 0)
 
 
 def test_line_axis_angle():
@@ -118,6 +134,35 @@ def test_deconvolution_keeps_blanks():
     assert np.isnan(out[:5, :5]).all() and np.isfinite(out[10:, 10:]).all()
 
 
+@pytest.mark.parametrize("cell", [0.5, 2.0, 5.0])
+def test_broad_anomaly_passes_deconvolution_at_any_cell_size(cell):
+    # The footprint is averaged over each cell, so coarse grids do not alias it.
+    x = np.arange(-150.0, 150.0 + cell / 2, cell)
+    gx, gy = np.meshgrid(x, x)
+    broad = 10.0 * np.exp(-(gx ** 2 + gy ** 2) / (2 * 60.0 ** 2))
+    out = G.deconvolve(broad, G.footprint(cell), 1e-2)
+    mid = len(x) // 2
+    assert out[mid, mid] == pytest.approx(10.0, rel=0.05)
+
+
+def test_deconvolution_keeps_a_regional_trend():
+    rows, cols = np.indices((80, 120))
+    plane = 20.0 + 40.0 * cols / 119 + 5.0 * rows / 79
+    out = G.deconvolve(plane, G.footprint(0.5), 1e-4)
+    np.testing.assert_allclose(out, plane, atol=1e-6)
+
+
+def test_deconvolution_inverts_convolve_for_an_asymmetric_kernel():
+    m = np.random.default_rng(0).normal(size=(64, 64))
+    k = np.zeros((5, 5))
+    k[2, 2], k[2, 4] = 0.7, 0.3
+    blurred = G.convolve(m, k)
+    back = G.deconvolve(blurred, k, 1e-6)
+    inner = (slice(8, -8), slice(8, -8))
+    err = lambda a: np.sqrt(np.mean((a[inner] - m[inner]) ** 2))
+    assert err(back) < 0.1 * err(blurred)
+
+
 def test_utm_zone():
     assert G.utm_epsg(23.7, 37.9) == 32634          # Athens
     assert G.utm_epsg(-70.6, -33.4) == 32719        # Santiago
@@ -144,3 +189,9 @@ def test_geotiff_round_trip_values_and_tags():
     assert tuple(tags[33550])[:2] == (2.0, 2.0)
     assert tuple(tags[33922])[3:5] == (500000.0, 4000006.0)
     assert 32634 in tuple(tags[34735])
+
+
+def test_epsg_problems():
+    assert G.epsg_problem(32634) is None
+    assert "not a projected" in G.epsg_problem(4326)
+    assert "not a known" in G.epsg_problem(12345)
