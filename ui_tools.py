@@ -20,6 +20,7 @@ import emphysics
 import gem_io
 import interpret
 import inversion
+import soiltools
 
 DEFAULT_FREQUENCIES = "475, 1525, 5325, 18325, 63025"
 PERMITTIVITY_FREQUENCY = 40_000.0     # Hz; above this, permittivity can reach the in-phase
@@ -419,3 +420,148 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
         fig = interpret.make_spectrum_figure(spectrum, f"Anomaly at {centre}")
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Soil tools
+# ---------------------------------------------------------------------------
+
+ZONE_SAMPLE = 5000          # readings used to compare zone numbers (random subset)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _property_map(table: pd.DataFrame, column: str) -> ctr.AreaMapResult:
+    return ctr.compute_area_map(table, column)
+
+
+def _lonlat_columns(x: np.ndarray, y: np.ndarray, origin) -> dict:
+    if origin is None:
+        return {}
+    lon, lat = ctr.local_metres_to_lonlat(x, y, origin)
+    return {"lon": lon, "lat": lat}
+
+
+def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
+    """Sampling design, calibration of a soil property, and management zones from EC channels."""
+    with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
+        ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
+        if not ec_cols:
+            st.info("Needs EC channels.")
+            return
+        try:
+            x, y, origin = corrections.xy_metres(table)
+        except ctr.ContouringError:
+            st.info("Needs X/Y or Lat/Lon coordinates.")
+            return
+        chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}")
+        if not chans:
+            return
+        features = table[chans].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        t_design, t_cal, t_zones = st.tabs(["Sampling design", "Calibration", "Management zones"])
+
+        with t_design:
+            st.caption(
+                "Sampling sites that span the conductivity range and are spread over the field "
+                "(response-surface design after Lesch, 2005; ESAP-RSSD)."
+            )
+            n_sites = st.number_input("Sites", 4, 60, 12, key=f"soil_n_{file_key}")
+            try:
+                sites = soiltools.sampling_design(np.column_stack([x, y]), features, int(n_sites))
+            except ValueError as exc:
+                st.info(str(exc))
+            else:
+                extra = _lonlat_columns(sites["x"].to_numpy(), sites["y"].to_numpy(), origin)
+                sites = sites.assign(**extra)
+                st.dataframe(sites.round(4), hide_index=True, use_container_width=True)
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.scatter(x, y, s=2, c="0.7")
+                ax.scatter(sites["x"], sites["y"], c="red", s=25)
+                for k, (sx, sy) in enumerate(zip(sites["x"], sites["y"]), 1):
+                    ax.annotate(str(k), (sx, sy), fontsize=8, xytext=(3, 3), textcoords="offset points")
+                ax.set_aspect("equal")
+                ax.set_xlabel("x (m)")
+                ax.set_ylabel("y (m)")
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+                st.download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
+                                   file_name=f"{file_key}_sampling_sites.csv", mime="text/csv",
+                                   key=f"soil_dl_sites_{file_key}")
+
+        with t_cal:
+            st.caption(
+                "Regression of a measured soil property on the conductivity at the sampling "
+                "sites (Lesch et al., 1995; ESAP-Calibrate). The samples file has the survey's "
+                "coordinate columns and one column per measured property."
+            )
+            upload = st.file_uploader("Soil samples (.csv)", type=["csv"], key=f"soil_up_{file_key}")
+            if upload is not None:
+                samples = pd.read_csv(upload)
+                skip = {c.lower() for c in ("x", "y", "lat", "latitude", "lon", "long", "longitude")}
+                props = [c for c in samples.columns if str(c).lower() not in skip
+                         and pd.to_numeric(samples[c], errors="coerce").notna().any()]
+                if not props:
+                    st.info("No numeric property column in the samples file.")
+                else:
+                    c1, c2 = st.columns(2)
+                    prop = c1.selectbox("Property", props, key=f"soil_prop_{file_key}")
+                    radius = c1.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=f"soil_rad_{file_key}")
+                    log_p = c2.checkbox("Fit the property on a log scale", True, key=f"soil_log_{file_key}")
+                    trend = c2.checkbox("Add a trend surface (x, y)", False, key=f"soil_tr_{file_key}")
+                    try:
+                        model = soiltools.fit_property_model(table, samples, prop, chans, radius, log_p, trend)
+                    except (ValueError, ctr.ContouringError) as exc:
+                        st.info(str(exc))
+                    else:
+                        st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} "
+                                 f"({'log scale' if log_p else 'property units'}), {model.n} samples.")
+                        st.dataframe(model.coefficients.rename("coefficient").to_frame().round(5))
+                        column = f"Predicted {prop}"
+                        predicted = table.assign(**{column: soiltools.predict_property(model, table)})
+                        try:
+                            result = _property_map(predicted, column)
+                            fig = ctr.make_area_map_figure(result, column, column)
+                        except ctr.ContouringError as exc:
+                            st.info(str(exc))
+                        else:
+                            st.pyplot(fig, use_container_width=True)
+                            plt.close(fig)
+                        out = pd.DataFrame({"x": x, "y": y, column: predicted[column]})
+                        st.download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
+                                           file_name=f"{file_key}_{prop}_predicted.csv",
+                                           mime="text/csv", key=f"soil_dl_pred_{file_key}")
+
+        with t_zones:
+            st.caption(
+                "Fuzzy c-means on the standardised channels (Bezdek, 1981), as in Management "
+                "Zone Analyst (Fridgen et al., 2004). The lowest FPI and MPE (modified partition "
+                "entropy, Boydell & McBratney, 2002) suggest the number of zones."
+            )
+            ok = np.all(np.isfinite(features), axis=1) & np.isfinite(x) & np.isfinite(y)
+            if ok.sum() < 10:
+                st.info("Not enough complete readings.")
+                return
+            data = soiltools.standardise(features[ok])
+            m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}")
+            rng = np.random.default_rng(0)
+            subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
+            indices = soiltools.zone_indices(subset, range(2, 7), m)
+            st.dataframe(indices.round(4), hide_index=True)
+            best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
+            c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}")
+            u, _ = soiltools.fuzzy_cmeans(data, int(c), m)
+            zone = u.argmax(axis=1) + 1
+            fig, ax = plt.subplots(figsize=(6, 4))
+            sc = ax.scatter(x[ok], y[ok], c=zone, s=4, cmap="tab10", vmin=0.5, vmax=10.5)
+            ax.set_aspect("equal")
+            ax.set_xlabel("x (m)")
+            ax.set_ylabel("y (m)")
+            fig.colorbar(sc, ax=ax, ticks=range(1, int(c) + 1), label="Zone")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+            out = pd.DataFrame({"x": x[ok], "y": y[ok], "zone": zone,
+                                **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
+            st.download_button("Zones (.csv)", out.to_csv(index=False).encode(),
+                               file_name=f"{file_key}_zones.csv", mime="text/csv",
+                               key=f"soil_dl_zones_{file_key}")

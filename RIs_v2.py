@@ -2041,6 +2041,7 @@ def render_gem_results(
     ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
     if table is not None:
         ui_tools.render_anomaly_spectrum(table, stem)
+        ui_tools.render_soil_tools(table, stem)
 
 
 # ---------------------------------------------------------------------------
