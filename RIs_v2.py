@@ -1405,10 +1405,18 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float]
             "Magnetic viscosity from frequencies (low, high Hz)", key="sen_visc",
             help="Two frequencies with I_ / Q_ columns, e.g. '1525, 5325'. Adds EC from the "
                  "quadrature difference and the quadrature susceptibility κ″ to the AUX "
-                 "channels (Simon et al., 2015).",
+                 "channels (Simon et al., 2015). Uncalibrated Q offsets shift κ″, so compare "
+                 "contrasts unless Q is calibrated.",
         )
-    sensor = emphysics.Sensor(float(separation), float(bucking) or None, float(height))
-    return sensor, recompute, _parse_pair(visc_text)
+    try:
+        sensor = emphysics.Sensor(float(separation), float(bucking) or None, float(height))
+    except ValueError as exc:
+        st.error(f"{exc} Using the GEM-2 coil spacings.")
+        sensor = emphysics.Sensor(height=float(height))
+    pair = _parse_pair(visc_text)
+    if visc_text.strip() and pair is None:
+        st.warning("Magnetic viscosity needs two different frequencies in Hz, e.g. '1525, 5325'.")
+    return sensor, recompute, pair
 
 
 def _parse_pair(text: str) -> tuple[float, float] | None:
@@ -1514,8 +1522,8 @@ def render_lag_estimate(
 ) -> None:
     """Expander that estimates the GPS time lag from crossings of neighbouring lines."""
     with st.expander("Estimate GPS lag", expanded=False):
-        no_lag = replace(prep, corrections=replace(prep.corrections, lag_seconds=0.0,
-                                                   bearing_center=None))
+        no_lag = replace(prep, recompute_from_iq=False,
+                         corrections=replace(prep.corrections, lag_seconds=0.0, bearing_center=None))
         try:
             table, _ = prepared_table(file_bytes, file_name, no_lag)
         except ValueError as exc:
@@ -2004,7 +2012,9 @@ def render_gem_results(
     prep = prep or pipeline.PrepSettings()
     render_lag_estimate(file_bytes, file_name, stem, prep)
     try:
-        calib_table, _ = prepared_table(file_bytes, file_name, replace(prep, exclude_lines=()))
+        raw_prep = replace(prep, exclude_lines=(), corrections=corrections.CorrectionSettings(),
+                           recompute_from_iq=False)       # calibration lines as recorded
+        calib_table, _ = prepared_table(file_bytes, file_name, raw_prep)
     except ValueError:
         calib_table = None
     if calib_table is not None:

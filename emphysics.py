@@ -40,6 +40,14 @@ class Sensor:
     bucking: float | None = 1.035  # Tx-bucking coil, m; None for a plain pair
     height: float = 1.0           # sensor above ground, m
 
+    def __post_init__(self):
+        if not self.separation > 0:
+            raise ValueError("The Tx–Rx separation must be positive.")
+        if self.bucking is not None and not 0 < self.bucking < self.separation:
+            raise ValueError("The bucking coil must lie between the transmitter and the receiver.")
+        if not self.height >= 0:
+            raise ValueError("The sensor height must not be negative.")
+
 
 GEM2 = Sensor()
 
@@ -149,6 +157,8 @@ def forward_ppm_batch(
         raise ValueError("need kappa.shape == sigma.shape == (M, len(thickness) + 1)")
     if np.any(sigma < 0) or np.any(thickness <= 0) or sensor.height < 0:
         raise ValueError("conductivities and height must be >= 0, thicknesses > 0")
+    if np.any(kappa <= -1):
+        raise ValueError("susceptibilities must be > -1 SI")
     omega = 2 * np.pi * f
     z = _hcp_ratio(sensor.separation, sensor.height, omega, sigma, kappa, thickness)
     if sensor.bucking:
@@ -200,20 +210,143 @@ def halfspace_from_ppm(
     """
     Apparent conductivity (S/m) and susceptibility (SI) of the homogeneous
     half-space that reproduces one (in-phase, quadrature) pair in ppm
-    (Huang & Won, 2000). Starts from the low-induction-number estimate.
+    (Huang & Won, 2000). NaN where halfspace_from_ppm_batch gives NaN.
     """
-    q_per_sigma = lin_ppm_per_sigma(frequency, sensor)
-    i_per_kappa = forward_ppm(frequency, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3
-    s0 = max(quadrature / q_per_sigma, 1e-5)
-    k0 = inphase / i_per_kappa if i_per_kappa else 0.0
-    scale = np.array([abs(quadrature) + 1.0, abs(inphase) + 1.0])
+    sigma, kappa = halfspace_from_ppm_batch(frequency, [inphase], [quadrature], sensor)
+    return float(sigma[0]), float(kappa[0])
 
-    def residual(p):
-        z = forward_ppm(frequency, [np.exp(p[0])], [p[1]], sensor=sensor)[0]
-        return (np.array([z.imag, z.real]) - [quadrature, inphase]) / scale
 
-    sol = least_squares(residual, [np.log(s0), k0], method="lm", xtol=1e-12, ftol=1e-12)
-    return float(np.exp(sol.x[0])), float(sol.x[1])
+CONVERSION_CHUNK = 4000        # readings per batched forward call
+CONVERSION_ITERATIONS = 25
+LOG_SIGMA_STEP = 1e-4          # finite-difference steps for the 2 x 2 Jacobian
+KAPPA_STEP = 1e-6
+SIGMA_RANGE = (1e-5, 10.0)     # S/m, apparent conductivities a conversion can return
+KAPPA_RANGE = (-0.1, 1.0)      # SI; beyond these the in-phase is not a susceptibility
+MIN_PPM_PER_KAPPA = 5000.0     # static in-phase ppm per SI below which MS is not resolved
+CONVERSION_TOLERANCE = 1e-3    # normalised misfit above which no half-space fits a reading
+_GRID_LOG_SIGMA = np.log(np.geomspace(*SIGMA_RANGE, 61))
+_GRID_KAPPA = np.array([-0.1, -0.03, -0.01, -0.003, -0.001, 0.0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0])
+
+
+def _halfspace_batch(frequency: float, log_sigma: np.ndarray, kappa: np.ndarray, sensor: Sensor):
+    z = forward_ppm_batch([frequency], np.exp(log_sigma)[:, None], kappa[:, None], sensor=sensor)
+    return z[:, 0]
+
+
+def kappa_sensitivity(sensor: Sensor = GEM2) -> float:
+    """Static in-phase response in ppm per SI of susceptibility (frequency independent)."""
+    return float(forward_ppm(1000.0, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3)
+
+
+def susceptibility_resolved(sensor: Sensor = GEM2) -> bool:
+    """
+    False where the in-phase barely depends on susceptibility: with a bucking
+    coil, at ground level (both coils see the same image) and near the height
+    where the bucked static response changes sign (about 0.82 m for the GEM-2).
+    """
+    return abs(kappa_sensitivity(sensor)) >= MIN_PPM_PER_KAPPA
+
+
+def halfspace_from_ppm_batch(
+    frequency: float,
+    inphase: np.ndarray,
+    quadrature: np.ndarray,
+    sensor: Sensor = GEM2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Apparent conductivity and susceptibility of many readings at one
+    frequency (Huang & Won, 2000). Each reading starts from the closest
+    model of a (sigma, kappa) grid, which picks the right branch where the
+    quadrature is no longer monotonic in sigma (high induction number); a
+    damped Gauss-Newton on (ln sigma, kappa) with a 2 x 2 finite-difference
+    Jacobian then refines it within SIGMA_RANGE and KAPPA_RANGE. Converged
+    readings drop out of the iterations.
+
+    Where the in-phase is insensitive to susceptibility (see
+    susceptibility_resolved) kappa is fixed at 0, sigma comes from the
+    quadrature alone (below its maximum) and kappa is returned as NaN.
+    Readings with missing values, a quadrature <= 0 or no half-space within
+    the ranges that reproduces them return NaN. Returns (sigma S/m, kappa SI).
+    """
+    i_all = np.atleast_1d(np.asarray(inphase, dtype=float))
+    q_all = np.atleast_1d(np.asarray(quadrature, dtype=float))
+    sigma = np.full(i_all.shape, np.nan)
+    kappa = np.full(i_all.shape, np.nan)
+    free = susceptibility_resolved(sensor)
+    if free:
+        gs, gk = (g.ravel() for g in np.meshgrid(_GRID_LOG_SIGMA, _GRID_KAPPA, indexing="ij"))
+    else:
+        gs, gk = _GRID_LOG_SIGMA, np.zeros_like(_GRID_LOG_SIGMA)
+    gz = _halfspace_batch(frequency, gs, gk, sensor)
+    lo_s, hi_s = np.log(SIGMA_RANGE)
+    lo_k, hi_k = KAPPA_RANGE if free else (0.0, 0.0)
+    if not free:                      # quadrature only: keep the branch below its maximum
+        peak = int(np.argmax(gz.imag))
+        gs, gk, gz, hi_s = gs[: peak + 1], gk[: peak + 1], gz[: peak + 1], gs[peak]
+    w_i = 1.0 if free else 0.0
+    ok = np.isfinite(i_all) & np.isfinite(q_all) & (q_all > 0)
+    rows_ok = np.nonzero(ok)[0]
+    for start in range(0, len(rows_ok), CONVERSION_CHUNK):
+        rows = rows_ok[start: start + CONVERSION_CHUNK]
+        i_obs, q_obs = i_all[rows], q_all[rows]
+        scale_q = scale_i = np.hypot(i_obs, q_obs) + 1.0     # one scale: |reading| + 1 ppm
+
+        def misfit(z, sel):
+            return np.hypot((z.imag - q_obs[sel]) / scale_q[sel], w_i * (z.real - i_obs[sel]) / scale_i[sel])
+
+        dist = np.hypot((gz.imag[None, :] - q_obs[:, None]) / scale_q[:, None],
+                        w_i * (gz.real[None, :] - i_obs[:, None]) / scale_i[:, None])
+        best = np.argmin(dist, axis=1)
+        ls, k = gs[best].copy(), gk[best].copy()
+        z = gz[best].copy()
+        active = np.ones(len(rows), dtype=bool)
+        for _ in range(CONVERSION_ITERATIONS):
+            a_rows = np.nonzero(active)[0]
+            if a_rows.size == 0:
+                break
+            lsa, ka, za = ls[a_rows], k[a_rows], z[a_rows]
+            sq, si = scale_q[a_rows], scale_i[a_rows]
+            zs = _halfspace_batch(frequency, lsa + LOG_SIGMA_STEP, ka, sensor)
+            # rows: (quadrature, in-phase) residuals; columns: (ln sigma, kappa)
+            a = (zs.imag - za.imag) / LOG_SIGMA_STEP / sq
+            c = (zs.real - za.real) / LOG_SIGMA_STEP / si
+            rq = (q_obs[a_rows] - za.imag) / sq
+            ri = (i_obs[a_rows] - za.real) / si
+            if free:
+                zk = _halfspace_batch(frequency, lsa, ka + KAPPA_STEP, sensor)
+                b = (zk.imag - za.imag) / KAPPA_STEP / sq
+                d = (zk.real - za.real) / KAPPA_STEP / si
+                det = a * d - b * c
+                det = np.where(np.abs(det) < 1e-30, 1e-30, det)
+                d_ls = (d * rq - b * ri) / det
+                d_k = (a * ri - c * rq) / det
+            else:
+                d_ls = np.where(np.abs(a) > 1e-30, rq / np.where(np.abs(a) > 1e-30, a, 1.0), 0.0)
+                d_k = np.zeros_like(d_ls)
+            shrink = np.minimum(1.0, 2.0 / np.maximum(np.abs(d_ls), 1e-300))   # |d ln sigma| <= 2
+            d_ls, d_k = d_ls * shrink, d_k * shrink
+            current = misfit(za, a_rows)
+            step = np.ones_like(lsa)
+            accepted = np.zeros(lsa.shape, dtype=bool)
+            for _ in range(8):                      # halve the step until the misfit drops
+                trial_ls = np.clip(lsa + step * d_ls, lo_s, hi_s)
+                trial_k = np.clip(ka + step * d_k, lo_k, hi_k)
+                zt = _halfspace_batch(frequency, trial_ls, trial_k, sensor)
+                better = (misfit(zt, a_rows) < current) & ~accepted
+                lsa = np.where(better, trial_ls, lsa)
+                ka = np.where(better, trial_k, ka)
+                za = np.where(better, zt, za)
+                accepted |= better
+                step = np.where(accepted, step, 0.5 * step)
+                if accepted.all():
+                    break
+            ls[a_rows], k[a_rows], z[a_rows] = lsa, ka, za
+            done = ~accepted | ((np.abs(d_ls) < 1e-10) & (np.abs(d_k) < 1e-12))
+            active[a_rows[done]] = False
+        fits = misfit(z, slice(None)) <= CONVERSION_TOLERANCE
+        sigma[rows[fits]] = np.exp(ls[fits])
+        kappa[rows[fits]] = k[fits] if free else np.nan
+    return sigma, kappa
 
 
 def skin_depth(sigma: float, frequency: float) -> float:
@@ -265,84 +398,8 @@ def depth_of_investigation(
 
 
 # ---------------------------------------------------------------------------
-# Conversion of many readings, frequency information, multi-height calibration
+# Frequency information and multi-height calibration
 # ---------------------------------------------------------------------------
-
-CONVERSION_CHUNK = 4000        # readings per batched forward call
-CONVERSION_ITERATIONS = 15
-LOG_SIGMA_STEP = 1e-4          # finite-difference steps for the 2 x 2 Jacobian
-KAPPA_STEP = 1e-6
-
-
-def _halfspace_batch(frequency: float, log_sigma: np.ndarray, kappa: np.ndarray, sensor: Sensor):
-    z = forward_ppm_batch([frequency], np.exp(log_sigma)[:, None], kappa[:, None], sensor=sensor)
-    return z[:, 0]
-
-
-def halfspace_from_ppm_batch(
-    frequency: float,
-    inphase: np.ndarray,
-    quadrature: np.ndarray,
-    sensor: Sensor = GEM2,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Vectorised halfspace_from_ppm for many readings at one frequency:
-    damped Gauss-Newton on (ln sigma, kappa) with a 2 x 2 finite-difference
-    Jacobian, started from the low-induction-number estimates. Readings with
-    a quadrature <= 0 or missing values return NaN. Returns (sigma S/m, kappa SI).
-    """
-    i_all = np.asarray(inphase, dtype=float)
-    q_all = np.asarray(quadrature, dtype=float)
-    sigma = np.full(i_all.shape, np.nan)
-    kappa = np.full(i_all.shape, np.nan)
-    ok = np.isfinite(i_all) & np.isfinite(q_all) & (q_all > 0)
-    q_per_sigma = lin_ppm_per_sigma(frequency, sensor)
-    i_per_kappa = forward_ppm(frequency, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3
-    for start in range(0, int(ok.sum()), CONVERSION_CHUNK):
-        rows = np.nonzero(ok)[0][start: start + CONVERSION_CHUNK]
-        i_obs, q_obs = i_all[rows], q_all[rows]
-        scale_q, scale_i = np.abs(q_obs) + 1.0, np.abs(i_obs) + 1.0
-        ls = np.log(np.maximum(q_obs / q_per_sigma, 1e-6))
-        k = i_obs / i_per_kappa if i_per_kappa else np.zeros_like(i_obs)
-
-        def misfit(z):
-            return np.hypot((z.imag - q_obs) / scale_q, (z.real - i_obs) / scale_i)
-
-        z = _halfspace_batch(frequency, ls, k, sensor)
-        for _ in range(CONVERSION_ITERATIONS):
-            zs = _halfspace_batch(frequency, ls + LOG_SIGMA_STEP, k, sensor)
-            zk = _halfspace_batch(frequency, ls, k + KAPPA_STEP, sensor)
-            # rows: (quadrature, in-phase) residuals; columns: (ln sigma, kappa)
-            a = (zs.imag - z.imag) / LOG_SIGMA_STEP / scale_q
-            b = (zk.imag - z.imag) / KAPPA_STEP / scale_q
-            c = (zs.real - z.real) / LOG_SIGMA_STEP / scale_i
-            d = (zk.real - z.real) / KAPPA_STEP / scale_i
-            rq = (q_obs - z.imag) / scale_q
-            ri = (i_obs - z.real) / scale_i
-            det = a * d - b * c
-            det = np.where(np.abs(det) < 1e-30, 1e-30, det)
-            d_ls = (d * rq - b * ri) / det
-            d_k = (a * ri - c * rq) / det
-            current = misfit(z)
-            step = np.ones_like(ls)
-            accepted = np.zeros(ls.shape, dtype=bool)
-            for _ in range(6):                      # halve the step until the misfit drops
-                trial_ls = ls + step * np.clip(d_ls, -2.0, 2.0)
-                trial_k = k + step * d_k
-                zt = _halfspace_batch(frequency, trial_ls, trial_k, sensor)
-                better = (misfit(zt) < current) & ~accepted
-                ls = np.where(better, trial_ls, ls)
-                k = np.where(better, trial_k, k)
-                z = np.where(better, zt, z)
-                accepted |= better
-                step = np.where(accepted, step, 0.5 * step)
-                if accepted.all():
-                    break
-            if np.max(np.abs(d_ls)) < 1e-9 and np.max(np.abs(d_k)) < 1e-12:
-                break
-        sigma[rows] = np.exp(ls)
-        kappa[rows] = k
-    return sigma, kappa
 
 
 def frequency_table(frequencies, sigma_s_m, sensor: Sensor = GEM2, fraction: float = 0.3):
@@ -381,6 +438,11 @@ def fit_multiheight_bias(
     an additive bias per frequency and component. inphase / quadrature have
     shape (n_heights, n_freq) in ppm. Needs at least 2 heights.
 
+    For a given half-space the best biases are the mean differences between
+    the readings and the model over the heights, so only (sigma, kappa) are
+    searched: first on a grid, then by bounded least squares. This works
+    from any starting heights, including the sensor on the ground.
+
     Returns {"sigma": S/m, "kappa": SI, "bias_i": (F,), "bias_q": (F,), "rms": ppm}.
     The biases are the values to subtract from the survey's I and Q.
     """
@@ -390,30 +452,33 @@ def fit_multiheight_bias(
     q_obs = np.atleast_2d(np.asarray(quadrature, dtype=float))
     if len(np.unique(h)) < 2:
         raise ValueError("Multi-height calibration needs readings at 2 or more heights.")
-    n_f = len(f)
+    obs = i_obs + 1j * q_obs                                  # (K, F)
+    sensors = [Sensor(sensor.separation, sensor.bucking, hk) for hk in h]
 
-    def model(p):
-        s, kap = np.exp(p[0]), p[1]
-        out = np.array([
-            forward_ppm(f, [s], [kap], sensor=Sensor(sensor.separation, sensor.bucking, hk))
-            for hk in h
-        ])
-        return out.real + p[2: 2 + n_f], out.imag + p[2 + n_f:]
+    def response(log_s, kap):                                # (M,) -> (M, K, F)
+        return np.stack([
+            forward_ppm_batch(f, np.exp(log_s)[:, None], kap[:, None], sensor=sk) for sk in sensors
+        ], axis=1)
 
-    def residual(p):
-        mi, mq = model(p)
-        return np.concatenate([(mi - i_obs).ravel(), (mq - q_obs).ravel()])
+    def residuals(z):                                         # after the best biases
+        r = obs[None] - z
+        r = r - r.mean(axis=1, keepdims=True)
+        return np.concatenate([r.real.reshape(len(z), -1), r.imag.reshape(len(z), -1)], axis=1)
 
-    lowest = int(np.argmin(h))
-    s0, k0 = halfspace_from_ppm(f[0], i_obs[lowest, 0], q_obs[lowest, 0],
-                                Sensor(sensor.separation, sensor.bucking, h[lowest]))
-    p0 = np.concatenate([[np.log(max(s0, 1e-5)), k0], np.zeros(2 * n_f)])
-    sol = least_squares(residual, p0, x_scale="jac", xtol=1e-12, ftol=1e-12, max_nfev=2000)
+    gs, gk = (g.ravel() for g in np.meshgrid(_GRID_LOG_SIGMA, _GRID_KAPPA, indexing="ij"))
+    best = int(np.argmin(np.sum(residuals(response(gs, gk)) ** 2, axis=1)))
+    lower = [np.log(SIGMA_RANGE[0]), KAPPA_RANGE[0]]
+    upper = [np.log(SIGMA_RANGE[1]), KAPPA_RANGE[1]]
+    sol = least_squares(
+        lambda p: residuals(response(p[:1], p[1:]))[0], [gs[best], gk[best]],
+        bounds=(lower, upper), x_scale="jac", xtol=1e-12, ftol=1e-12, max_nfev=2000,
+    )
+    z = response(sol.x[:1], sol.x[1:])[0]
+    bias = (obs - z).mean(axis=0)
     return {
         "sigma": float(np.exp(sol.x[0])),
         "kappa": float(sol.x[1]),
-        "bias_i": sol.x[2: 2 + n_f].copy(),
-        "bias_q": sol.x[2 + n_f:].copy(),
+        "bias_i": bias.real.copy(),
+        "bias_q": bias.imag.copy(),
         "rms": float(np.sqrt(np.mean(sol.fun ** 2))),
     }
-

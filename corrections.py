@@ -25,6 +25,8 @@ import gem_io
 LAG_SEARCH = np.round(np.arange(-2.0, 2.0001, 0.1), 3)   # s, candidate GPS lags
 LAG_MAX_POINTS = 5000                                    # subsample for the lag search
 LAG_NEIGHBOURS = 64                                      # first neighbour search for another line
+LAG_MAX_NEIGHBOURS = 1024                                # ... widened up to this many readings
+LAG_END_SECONDS = 2.0                                    # s, track used to extrapolate line ends
 MIN_OCCUPATIONS = 2                                      # base-station visits for drift
 MIN_TEMPERATURE_OCCUPATIONS = 3                          # ... for a temperature coefficient
 
@@ -399,15 +401,27 @@ def _coordinate_pairs(df: pd.DataFrame) -> list[tuple[str, str, bool]]:
     return pairs
 
 
+def _end_slope(t: np.ndarray, v: np.ndarray, first: bool) -> float:
+    """Slope of a straight line through the first (or last) LAG_END_SECONDS of a sorted track."""
+    sel = t <= t[0] + LAG_END_SECONDS if first else t >= t[-1] - LAG_END_SECONDS
+    if np.ptp(t[sel]) <= 0:
+        return 0.0
+    return float(np.polyfit(t[sel], v[sel], 1)[0])
+
+
 def _interp_extrapolate(t_new: np.ndarray, t: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Linear interpolation in sorted t that continues the first and last segments beyond the ends."""
+    """
+    Linear interpolation in sorted t. Beyond the ends the track continues
+    with the velocity fitted over its first / last LAG_END_SECONDS, which is
+    steadier than the last two readings when GPS positions update more slowly
+    than the sensor logs.
+    """
     out = np.interp(t_new, t, v)
-    if len(t) >= 2:
-        before, after = t_new < t[0], t_new > t[-1]
-        if before.any() and t[1] > t[0]:
-            out[before] = v[0] + (t_new[before] - t[0]) * (v[1] - v[0]) / (t[1] - t[0])
-        if after.any() and t[-1] > t[-2]:
-            out[after] = v[-1] + (t_new[after] - t[-1]) * (v[-1] - v[-2]) / (t[-1] - t[-2])
+    before, after = t_new < t[0], t_new > t[-1]
+    if before.any():
+        out[before] = v[0] + (t_new[before] - t[0]) * _end_slope(t, v, True)
+    if after.any():
+        out[after] = v[-1] + (t_new[after] - t[-1]) * _end_slope(t, v, False)
     return out
 
 
@@ -416,7 +430,7 @@ def shift_positions(df: pd.DataFrame, t: np.ndarray, lag: float) -> pd.DataFrame
     Corrects a GPS/sensor time lag: a reading logged at time t was measured
     where the sensor was at t - lag, so its coordinates are replaced by the
     track position at t - lag (interpolated within each line, extrapolated
-    along its end segments). Lat/Lon and X/Y are both shifted when present;
+    with the velocity at its ends). Lat/Lon and X/Y are both shifted when present;
     GPS no-fix rows (0, 0 in degrees) are left as they are.
     """
     pairs = _coordinate_pairs(df)
@@ -446,8 +460,9 @@ def _cross_line_difference(
 ) -> float:
     """
     Mean |v - v_nearest| over probe readings, nearest = closest reading on
-    another line. The neighbour search widens until such a reading is found,
-    so dense sampling along a line cannot hide the neighbouring lines. Pairs
+    another line. The neighbour search widens (up to LAG_MAX_NEIGHBOURS
+    readings) until such a reading is found, so dense sampling along a line
+    cannot hide the neighbouring lines. Pairs
     farther apart than twice the median pair distance (line ends, gaps) are
     ignored. inf when no reading has a neighbour on another line.
     """
@@ -470,8 +485,8 @@ def _cross_line_difference(
         dists.append(d[rows, first[rows]])
         diffs.append(np.abs(v[idx[j[rows, first[rows]]]] - v[pending[rows]]))
         pending = pending[~found]
-        if k_eff == len(idx):
-            break
+        if k_eff == len(idx) or k_eff >= LAG_MAX_NEIGHBOURS:
+            break                         # the rest have no other line nearby
         k *= 4
     d, diff = np.concatenate(dists), np.concatenate(diffs)
     if d.size == 0:
@@ -492,6 +507,10 @@ def estimate_lag(
     t = _require_time(df, "Lag estimation")
     v = _numeric(df, column)
     lines = df["Line"].astype(str).to_numpy()
+    x0, y0, _ = xy_metres(df)
+    if len(np.unique(lines[np.isfinite(x0) & np.isfinite(y0)])) < 2:
+        raise ValueError("Lag estimation needs positions on 2 or more lines: no reading has a "
+                         "neighbour on another line.")
     probe = np.arange(len(df))
     if len(probe) > LAG_MAX_POINTS:
         probe = np.sort(np.random.default_rng(seed).choice(probe, LAG_MAX_POINTS, replace=False))
@@ -547,16 +566,36 @@ def _per_line(df: pd.DataFrame, col: str, func) -> tuple[np.ndarray, int]:
     return v, total
 
 
-def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataFrame, list[str]]:
+CORRECTION_STAGES = ("all", "readings", "derived")
+
+
+def apply_corrections(
+    df: pd.DataFrame, s: CorrectionSettings, stage: str = "all"
+) -> tuple[pd.DataFrame, list[str]]:
     """
     Runs the enabled corrections in this order: despike, clip, sensor height,
-    temperature, drift, I/Q offsets, background offset, reference
-    calibration, EC at 25 °C, PCA, smoothing, GPS lag, heading filter.
+    temperature, drift, I/Q offsets (stage "readings": they act on the
+    instrument readings), then background offset, reference calibration, EC
+    at 25 °C, PCA, smoothing, GPS lag, heading filter (stage "derived": they
+    act on EC / MS as interpreted). "all" runs both. When EC / MS are
+    recomputed from I / Q, the pipeline recomputes between the two stages so
+    the EC corrections are not overwritten.
     Returns (table, messages).
     Raises ValueError when an enabled step cannot run (missing columns).
     """
+    if stage not in CORRECTION_STAGES:
+        raise ValueError(f"Unknown correction stage: {stage!r}")
     out = df.copy()
     msgs: list[str] = []
+    if stage != "derived":
+        out = _correct_readings(out, s, msgs)
+    if stage != "readings":
+        out = _correct_derived(out, s, msgs)
+    return out, msgs
+
+
+def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) -> pd.DataFrame:
+    """Despike, clip, sensor height, temperature, drift and I/Q offsets (see apply_corrections)."""
     cols = channel_columns(out)
 
     if s.despike:
@@ -608,6 +647,13 @@ def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataF
                 out[col] = _numeric(out, col) - off
                 applied.append(f"{col}: {-off:+.4g}")
         msgs.append("Subtracted calibration offsets — " + ("; ".join(applied) or "no matching columns"))
+
+    return out
+
+
+def _correct_derived(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) -> pd.DataFrame:
+    """Background offset, calibration, EC at 25 °C, PCA, smoothing, lag and heading (see apply_corrections)."""
+    cols = channel_columns(out)
 
     if s.ec_background is not None:
         shifts = []
@@ -670,4 +716,4 @@ def apply_corrections(df: pd.DataFrame, s: CorrectionSettings) -> tuple[pd.DataF
         )
         out = out.loc[keep].reset_index(drop=True)
 
-    return out, msgs
+    return out

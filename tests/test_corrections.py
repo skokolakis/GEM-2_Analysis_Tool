@@ -213,6 +213,23 @@ def test_headings_use_whole_line_direction():
     assert C.heading_mask(df, 0.0, 30.0).all()
 
 
+def test_estimate_lag_on_one_long_line_fails_fast():
+    import time
+
+    df = _survey(n_lines=1, n=4001, dt=0.04)
+    start = time.perf_counter()
+    with pytest.raises(ValueError, match="neighbour on another line"):
+        C.estimate_lag(df, "EC1525Hz[mS/m]")
+    assert time.perf_counter() - start < 3
+
+
+def test_shift_positions_extrapolates_with_end_velocity():
+    t = 0.9 + 0.1 * np.arange(100)                 # 10 Hz logging, GPS updated once a second
+    df = pd.DataFrame({"Line": 0, "X": 0.0, "Y": np.floor(t), "Time[ms]": 1000 * t})
+    out = C.shift_positions(df, gem_io.time_seconds(df), 1.0)
+    assert -1.6 < out["Y"].iloc[0] < -0.5           # about 1 m/s, not the 10 m/s of the first two readings
+
+
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
 def test_background_offset_and_soil_temperature_in_pipeline():

@@ -41,10 +41,13 @@ def recompute_ec_ms(df: pd.DataFrame, sensor: emphysics.Sensor) -> tuple[pd.Data
     Writes EC{f}Hz[mS/m] and MSusc{f}Hz[1/1000] for every frequency with both
     I_{f}Hz and Q_{f}Hz columns: the homogeneous half-space that reproduces
     each reading (Huang & Won, 2000), for the given coil geometry and height.
+    Where the file already has EC / MS, the messages compare them with the
+    recomputed values: a median ratio far from 1, or MS running the opposite
+    way, points to a different geometry, height or I/Q sign convention.
     """
     out = df.copy()
     found = gem_io.find_channels(df.columns)
-    done, blank = [], 0
+    done, blank, ratios, flipped = [], 0, [], []
     for label, q_col in found["Q"].items():
         i_col = found["I"].get(label)
         if i_col is None:
@@ -56,16 +59,44 @@ def recompute_ec_ms(df: pd.DataFrame, sensor: emphysics.Sensor) -> tuple[pd.Data
             pd.to_numeric(df[q_col], errors="coerce").to_numpy(dtype=float),
             sensor,
         )
-        out[gem_io.channel_column("EC", label)] = sigma * 1000.0
-        out[gem_io.channel_column("MS", label)] = kappa * 1000.0
+        ec_col, ms_col = gem_io.channel_column("EC", label), gem_io.channel_column("MS", label)
+        ec, ms = sigma * 1000.0, kappa * 1000.0
+        if ec_col in df.columns:
+            old = pd.to_numeric(df[ec_col], errors="coerce").to_numpy(dtype=float)
+            both = np.isfinite(old) & np.isfinite(ec) & (old > 0)
+            if both.sum() >= 3:
+                ratios.append(f"{label} ×{np.median(ec[both] / old[both]):.3g}")
+        if ms_col in df.columns:
+            old = pd.to_numeric(df[ms_col], errors="coerce").to_numpy(dtype=float)
+            both = np.isfinite(old) & np.isfinite(ms)
+            if (both.sum() >= 3 and np.std(old[both]) > 0 and np.std(ms[both]) > 0
+                    and np.corrcoef(old[both], ms[both])[0, 1] < 0):
+                flipped.append(label)
+        out[ec_col] = ec
+        out[ms_col] = ms
         done.append(label)
         blank += int(np.isnan(sigma).sum())
     if not done:
         return out, ["Recompute from I/Q: no frequency has both I_ and Q_ columns."]
     sep = f"{sensor.separation:g} m" + (f", bucking {sensor.bucking:g} m" if sensor.bucking else "")
     msgs = [f"EC and MS recomputed from I/Q for {', '.join(done)} (coils {sep}, height {sensor.height:g} m)."]
+    if not emphysics.susceptibility_resolved(sensor):
+        msgs.append(
+            f"At {sensor.height:g} m the in-phase of this coil geometry barely depends on "
+            "susceptibility, so EC comes from the quadrature alone and MS is left blank."
+        )
     if blank:
-        msgs.append(f"{blank} reading(s) with quadrature ≤ 0 have no EC / MS.")
+        msgs.append(f"{blank} reading(s) have no EC / MS: quadrature ≤ 0, or no half-space reproduces them.")
+    if ratios:
+        msgs.append(
+            "Recomputed / exported EC (median): " + ", ".join(ratios) + ". A ratio far from 1 points "
+            "to a different coil geometry, height or calibration than the instrument's."
+        )
+    if flipped:
+        msgs.append(
+            "Recomputed MS runs opposite to the exported MS for " + ", ".join(flipped)
+            + ": check the sign convention of the in-phase."
+        )
     return out, msgs
 
 
@@ -100,16 +131,25 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
         df = df.loc[~drop].reset_index(drop=True)
         messages.append(f"Left out {int(drop.sum())} reading(s) of line(s) {', '.join(prep.exclude_lines)}.")
 
-    if prep.corrections.active:
+    if prep.recompute_from_iq:
+        # I/Q corrections, then EC / MS from I / Q, then the corrections of EC / MS
+        if prep.corrections.active:
+            df, steps = corrections.apply_corrections(df, prep.corrections, stage="readings")
+            messages.extend(steps)
+        df, steps = recompute_ec_ms(df, prep.sensor)
+        messages.extend(steps)
+        if prep.corrections.active:
+            df, steps = corrections.apply_corrections(df, prep.corrections, stage="derived")
+            messages.extend(steps)
+    elif prep.corrections.active:
         df, steps = corrections.apply_corrections(df, prep.corrections)
         messages.extend(steps)
 
-    if prep.recompute_from_iq:
-        df, steps = recompute_ec_ms(df, prep.sensor)
-        messages.extend(steps)
-
     if prep.viscosity_pair:
-        df, steps = interpret.add_viscosity_columns(df, prep.viscosity_pair, prep.sensor)
+        try:
+            df, steps = interpret.add_viscosity_columns(df, prep.viscosity_pair, prep.sensor)
+        except ValueError as exc:                # the rest of the file is still usable
+            steps = [f"Magnetic viscosity skipped: {exc}"]
         messages.extend(steps)
 
     if order_based:

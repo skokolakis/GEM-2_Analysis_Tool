@@ -82,3 +82,25 @@ def test_iq_offsets_are_subtracted():
     np.testing.assert_allclose(out["I_1525Hz"], df["I_1525Hz"] - 10.0)
     np.testing.assert_allclose(out["Q_18325Hz"], df["Q_18325Hz"] + 5.0)
     assert any("Subtracted calibration offsets" in m for m in msgs)
+
+
+def test_ec_corrections_survive_recompute():
+    import corrections
+
+    prep = P.PrepSettings(recompute_from_iq=True,
+                          corrections=corrections.CorrectionSettings(ec_background=50.0))
+    out, msgs = P.prepare_gem_table(_iq_table(), prep)
+    np.testing.assert_allclose(out["EC1525Hz[mS/m]"], 50.0, rtol=1e-6)
+    first = [m.split()[0] for m in msgs]
+    assert first.index("EC") < first.index("Shifted")
+
+
+def test_recompute_compares_with_exported_ec_and_blanks_ms_at_ground_level():
+    sensor = E.Sensor(height=0.0)
+    z = E.forward_ppm([1525.0], [0.03], [1e-3], sensor=sensor)[0]
+    df = pd.DataFrame({"Line": 0, "Y": np.arange(10.0), "I_1525Hz": z.real, "Q_1525Hz": z.imag,
+                       "EC1525Hz[mS/m]": 15.0})
+    out, msgs = P.recompute_ec_ms(df, sensor)
+    assert out["MSusc1525Hz[1/1000]"].isna().all()
+    assert any("barely depends on susceptibility" in m for m in msgs)
+    assert any("1525Hz ×2" in m for m in msgs)

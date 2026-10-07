@@ -29,6 +29,7 @@ PERMITTIVITY_CAPTION = (
     "contribution, not only magnetic susceptibility (Benech et al., 2016)."
 )
 HEIGHT_BIN = 0.05                     # m, readings within a bin share one height level
+MULTIHEIGHT_MAX_RMS = 50.0            # ppm, about 10 x the GEM-2 noise; worse fits give no offsets
 LAYER_COLUMNS = ["Thickness (m)", "EC (mS/m)", "MS (10⁻³ SI)"]
 
 
@@ -155,6 +156,16 @@ def render_forward_model(sensor: emphysics.Sensor) -> None:
         plt.close(fig)
 
 
+@st.cache_data(show_spinner=False)
+def _frequency_info(freqs: tuple, sigmas: tuple, sensor: emphysics.Sensor):
+    """Frequency table and cumulative-sensitivity curves (cached: expanders run on every rerun)."""
+    table = emphysics.frequency_table(freqs, sigmas, sensor)
+    depths = np.geomspace(0.05, 20.0, 40)
+    curves = [emphysics.cumulative_sensitivity(f, s, depths, sensor) if s > 0 else None
+              for f, s in zip(freqs, sigmas)]
+    return table, depths, curves
+
+
 def render_frequency_info(
     output_data: dict[str, pd.DataFrame], sensor: emphysics.Sensor, file_key: str
 ) -> None:
@@ -172,7 +183,7 @@ def render_frequency_info(
         if not freqs:
             st.info("No frequency labels to analyse.")
             return
-        table = emphysics.frequency_table(freqs, sigmas, sensor)
+        table, depths, curves = _frequency_info(tuple(freqs), tuple(sigmas), sensor)
         st.dataframe(table.round(3), use_container_width=True, hide_index=True)
         st.caption(
             "For a half-space with the median EC of each frequency, sensor at "
@@ -180,11 +191,10 @@ def render_frequency_info(
             "(McNeill, 1980). Depth of investigation: 70 % of the quadrature response comes from "
             "above it (cumulative sensitivity of the full forward model)."
         )
-        depths = np.geomspace(0.05, 20.0, 40)
         fig, ax = plt.subplots(figsize=(6, 3.5))
-        for label, f, s in zip(labels, freqs, sigmas):
-            if s > 0:
-                ax.plot(emphysics.cumulative_sensitivity(f, s, depths, sensor), depths, label=label)
+        for label, curve in zip(labels, curves):
+            if curve is not None:
+                ax.plot(curve, depths, label=label)
         ax.invert_yaxis()
         ax.set_yscale("log")
         ax.set_xlabel("Fraction of response from below depth")
@@ -217,21 +227,36 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
         lines = st.multiselect(
             "Calibration line(s)", sorted(gem_io.line_labels(table["Line"]).unique()), key=f"mh_lines_{file_key}"
         )
-        if not lines or not st.button("Fit offsets", key=f"mh_fit_{file_key}"):
+        if not lines:
             return
-        rows = table[gem_io.line_labels(table["Line"]).isin(lines)]
-        heights, i, q = height_levels(rows, height_col, labels)
-        try:
-            fit = emphysics.fit_multiheight_bias(
-                [float(lb[:-2]) for lb in labels], heights, i, q, sensor
-            )
-        except ValueError as exc:
-            st.info(str(exc))
+        state_key = f"mh_result_{file_key}"
+        if st.button("Fit offsets", key=f"mh_fit_{file_key}"):
+            rows = table[gem_io.line_labels(table["Line"]).isin(lines)]
+            heights, i, q = height_levels(rows, height_col, labels)
+            try:
+                fit = emphysics.fit_multiheight_bias(
+                    [float(lb[:-2]) for lb in labels], heights, i, q, sensor
+                )
+            except ValueError as exc:
+                st.session_state.pop(state_key, None)
+                st.info(str(exc))
+                return
+            st.session_state[state_key] = (tuple(lines), tuple(labels), len(heights), fit)
+        stored = st.session_state.get(state_key)
+        if stored is None or stored[:2] != (tuple(lines), tuple(labels)):
             return
+        n_levels, fit = stored[2:]
         st.write(
             f"Half-space EC **{fit['sigma'] * 1000:.4g} mS/m**, MS **{fit['kappa'] * 1000:.4g}** "
-            f"× 10⁻³ SI, RMS misfit {fit['rms']:.3g} ppm from {len(heights)} height levels."
+            f"× 10⁻³ SI, RMS misfit {fit['rms']:.3g} ppm from {n_levels} height levels."
         )
+        if fit["rms"] > MULTIHEIGHT_MAX_RMS:
+            st.error(
+                f"A half-space fits the calibration readings poorly (RMS {fit['rms']:.3g} ppm > "
+                f"{MULTIHEIGHT_MAX_RMS:g} ppm): the ground under the spot is not uniform, the heights "
+                "are wrong or the readings are noisy. No offsets are offered."
+            )
+            return
         offsets = pd.DataFrame({
             "column": [gem_io.channel_column("I", lb) for lb in labels]
             + [gem_io.channel_column("Q", lb) for lb in labels],

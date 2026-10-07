@@ -61,6 +61,15 @@ def test_identical_layers_equal_halfspace():
     np.testing.assert_allclose(three, one, rtol=1e-6)
 
 
+def test_sensor_and_forward_reject_impossible_values():
+    with pytest.raises(ValueError, match="bucking coil"):
+        E.Sensor(separation=1.66, bucking=1.66)
+    with pytest.raises(ValueError, match="height"):
+        E.Sensor(height=-0.1)
+    with pytest.raises(ValueError, match="> -1"):
+        E.forward_ppm(1525.0, [0.01], [-1.0])
+
+
 def test_deep_layer_matters_less_at_high_frequency_never_negative_sensitivity():
     c = E.cumulative_sensitivity(5325.0, 0.02, [0.0, 0.5, 1, 2, 4, 8, 16])
     assert c[0] == 1.0
@@ -108,6 +117,31 @@ def test_batch_conversion_blanks_non_positive_quadrature():
     assert np.isnan(s).all() and np.isnan(k).all()
 
 
+@pytest.mark.parametrize("h", [0.0, 0.8212])
+def test_conversion_where_in_phase_ignores_susceptibility(h):
+    # Bucked GEM-2: no static susceptibility response at the ground and near 0.82 m.
+    s = E.Sensor(height=h)
+    assert not E.susceptibility_resolved(s)
+    z = E.forward_ppm(1525.0, [0.02], [1e-3], sensor=s)[0]
+    sigma, kappa = E.halfspace_from_ppm(1525.0, z.real - 500.0, z.imag, s)
+    assert sigma == pytest.approx(0.02, rel=2e-3) and np.isnan(kappa)
+
+
+def test_conversion_of_highly_conductive_ground():
+    # The quadrature peaks near 2 S/m at 63 kHz; the in-phase picks the branch.
+    for f, sigma in [(63025.0, 1.0), (63025.0, 3.0), (18325.0, 5.0)]:
+        z = E.forward_ppm(f, [sigma], [1e-3])[0]
+        s_est, k_est = E.halfspace_from_ppm(f, z.real, z.imag)
+        assert s_est == pytest.approx(sigma, rel=1e-4)
+        assert k_est == pytest.approx(1e-3, abs=1e-6)
+
+
+def test_conversion_blanks_readings_no_halfspace_explains():
+    s, k = E.halfspace_from_ppm_batch(63025.0, np.array([2e5, 10.0]), np.array([3e4, -1.0]))
+    assert np.isnan(s).all() and np.isnan(k).all()
+    assert np.isnan(E.halfspace_from_ppm(1525.0, 10.0, -1.0)).all()
+
+
 def test_frequency_table_columns_and_trend():
     t = E.frequency_table([475.0, 63025.0], [0.02, 0.02])
     assert list(t.columns[:4]) == ["Frequency (Hz)", "EC (mS/m)", "Skin depth (m)", "Induction number"]
@@ -136,3 +170,17 @@ def test_multiheight_needs_two_heights():
     with pytest.raises(ValueError, match="2 or more heights"):
         E.fit_multiheight_bias([1525.0], [1.0, 1.0], [[1.0], [1.0]], [[1.0], [1.0]])
 
+
+def test_multiheight_bias_from_ground_level():
+    f = np.array([1525.0, 18325.0, 63025.0])
+    h = np.array([0.0, 0.5, 1.0, 1.5])
+    bias_i, bias_q = np.array([300.0, -200.0, 150.0]), np.array([-150.0, 100.0, -80.0])
+    ii, qq = [], []
+    for hk in h:
+        z = E.forward_ppm(f, [0.03], [1e-3], sensor=E.Sensor(height=hk))
+        ii.append(z.real + bias_i)
+        qq.append(z.imag + bias_q)
+    fit = E.fit_multiheight_bias(f, h, np.array(ii), np.array(qq))
+    assert fit["sigma"] == pytest.approx(0.03, rel=1e-3)
+    np.testing.assert_allclose(fit["bias_i"], bias_i, atol=0.5)
+    np.testing.assert_allclose(fit["bias_q"], bias_q, atol=0.5)
