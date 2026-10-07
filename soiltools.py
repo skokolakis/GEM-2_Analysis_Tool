@@ -195,3 +195,61 @@ def predict_property(model: PropertyModel, table: pd.DataFrame) -> np.ndarray:
     return np.exp(pred) if model.log_property else pred
 
 
+# ---------------------------------------------------------------------------
+# Management zones (fuzzy c-means)
+# ---------------------------------------------------------------------------
+
+
+def fuzzy_cmeans(
+    data: np.ndarray, c: int, m: float = 1.3, max_iter: int = 300, tol: float = 1e-6, seed: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Fuzzy c-means (Bezdek, 1981) with Euclidean distance on the given
+    (already standardised) data. Returns (memberships (n, c), centres (c, k)).
+    """
+    x = np.asarray(data, dtype=float)
+    if c < 2 or c >= len(x):
+        raise ValueError("Need 2 <= number of zones < number of points.")
+    rng = np.random.default_rng(seed)
+    u = rng.dirichlet(np.ones(c), size=len(x))
+    for _ in range(max_iter):
+        w = u ** m
+        centres = (w.T @ x) / w.sum(axis=0)[:, None]
+        d = np.linalg.norm(x[:, None, :] - centres[None, :, :], axis=2)
+        d = np.fmax(d, 1e-12)
+        ratio = (d[:, :, None] / d[:, None, :]) ** (2.0 / (m - 1.0))
+        new_u = 1.0 / ratio.sum(axis=2)
+        if np.max(np.abs(new_u - u)) < tol:
+            u = new_u
+            break
+        u = new_u
+    order = np.argsort(centres[:, 0])              # zone 1 = lowest first feature
+    return u[:, order], centres[order]
+
+
+def fuzziness_performance_index(u: np.ndarray) -> float:
+    """
+    FPI = c / (c - 1) x (1 - sum(u^2) / n) (as used by Fridgen et al., 2004):
+    0 for distinct (crisp) zones, 1 when memberships are shared equally.
+    """
+    n, c = u.shape
+    return float(c / (c - 1.0) * (1.0 - np.sum(u ** 2) / n))
+
+
+def modified_partition_entropy(u: np.ndarray) -> float:
+    """MPE = -sum(u log u) / (n log c) (Boydell & McBratney, 2002); 0 = organised, 1 = disorganised."""
+    n, c = u.shape
+    uu = np.clip(u, 1e-300, 1.0)
+    return float(-np.sum(uu * np.log(uu)) / (n * math.log(c)))
+
+
+def zone_indices(data: np.ndarray, c_range=range(2, 7), m: float = 1.3) -> pd.DataFrame:
+    """FPI and MPE for each number of zones; the lowest values suggest the number to use."""
+    rows = []
+    for c in c_range:
+        if c >= len(data):
+            break
+        u, _ = fuzzy_cmeans(data, c, m)
+        rows.append({"Zones": c, "FPI": fuzziness_performance_index(u),
+                     "MPE": modified_partition_entropy(u)})
+    return pd.DataFrame(rows)

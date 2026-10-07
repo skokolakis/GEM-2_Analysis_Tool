@@ -68,3 +68,28 @@ def test_property_model_with_trend_and_too_few_samples():
         S.fit_property_model(df, sites[["X", "Y", "pH"]].iloc[:3], "pH", ["EC9825Hz[mS/m]"], 0.5)
 
 
+def test_fuzzy_cmeans_separates_two_blobs():
+    rng = np.random.default_rng(1)
+    a = rng.normal(-3, 0.3, (100, 2))
+    b = rng.normal(3, 0.3, (100, 2))
+    u, centres = S.fuzzy_cmeans(np.vstack([a, b]), 2)
+    np.testing.assert_allclose(u.sum(axis=1), 1.0)
+    assert (u[:100, 0] > 0.9).all() and (u[100:, 1] > 0.9).all()
+    assert centres[0, 0] < 0 < centres[1, 0]
+
+
+def test_indices_prefer_the_true_number_of_zones():
+    rng = np.random.default_rng(2)
+    data = np.vstack([rng.normal(c, 0.3, (80, 2)) for c in (-4, 0, 4)])
+    table = S.zone_indices(data, range(2, 6))
+    assert table.loc[table["FPI"].idxmin(), "Zones"] == 3
+    assert table.loc[table["MPE"].idxmin(), "Zones"] == 3
+
+
+def test_index_limits():
+    crisp = np.eye(3)[np.arange(30) % 3]
+    assert S.fuzziness_performance_index(crisp) == pytest.approx(0.0)
+    assert S.modified_partition_entropy(crisp) == pytest.approx(0.0, abs=1e-12)
+    flat = np.full((30, 3), 1 / 3)
+    assert S.fuzziness_performance_index(flat) == pytest.approx(1.0)
+    assert S.modified_partition_entropy(flat) == pytest.approx(1.0)
