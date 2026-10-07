@@ -41,3 +41,38 @@ def test_selection_skips_redundant_and_caps_count():
     assert reasons["63025Hz"] == "beyond the 2 best"
 
 
+def test_viscosity_recovers_synthetic_parameters():
+    f1, f2 = 1525.0, 5325.0
+    sigma, kq = np.array([0.01, 0.05]), np.array([2e-4, 5e-5])
+    l1, l2 = E.lin_ppm_per_sigma(f1), E.lin_ppm_per_sigma(f2)
+    k = E.forward_ppm(f1, [0.0], [1e-3]).real[0] / 1e-3
+    q1 = sigma * l1 - kq * k
+    q2 = sigma * l2 - kq * k
+    i1 = E.forward_ppm_batch([f1], sigma[:, None]).real[:, 0] + 1e-3 * k
+    s, ki, kqe = I.viscosity_two_frequencies(f1, f2, i1, q1, q2)
+    np.testing.assert_allclose(s, sigma, rtol=1e-9)
+    np.testing.assert_allclose(kqe, kq, rtol=1e-9)
+    np.testing.assert_allclose(ki, 1e-3, rtol=1e-6)
+
+
+def test_viscosity_columns_and_missing_columns():
+    df = pd.DataFrame({"I_1525Hz": [10.0], "Q_1525Hz": [20.0], "Q_5325Hz": [70.0]})
+    out, msgs = I.add_viscosity_columns(df, (5325.0, 1525.0), E.GEM2)
+    assert {I.VISCOSITY_COLUMN, I.QDIFF_EC_COLUMN} <= set(out.columns)
+    with pytest.raises(ValueError, match="I_5325Hz|Q_9825Hz"):
+        I.add_viscosity_columns(df, (1525.0, 9825.0), E.GEM2)
+
+
+def test_viscosity_per_decade():
+    assert I.viscosity_per_decade(np.array([1.0]))[0] == pytest.approx(1.4658, rel=1e-3)
+
+
+def test_viscosity_pipeline_adds_aux_channels():
+    df = pd.DataFrame({"Line": 0, "Y": np.arange(5.0), "I_1525Hz": 10.0, "Q_1525Hz": 20.0,
+                       "Q_5325Hz": 70.0})
+    out, msgs = pipeline.prepare_gem_table(df, pipeline.PrepSettings(viscosity_pair=(1525.0, 5325.0)))
+    import gem_io
+    aux = gem_io.find_channels(out.columns)["AUX"]
+    assert I.VISCOSITY_COLUMN in aux and I.QDIFF_EC_COLUMN in aux
+
+

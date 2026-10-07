@@ -75,3 +75,75 @@ def select_frequencies(
     return pd.DataFrame(rows, columns=["Frequency", "Score", "Selected", "Reason"])
 
 
+# ---------------------------------------------------------------------------
+# Magnetic viscosity
+# ---------------------------------------------------------------------------
+
+
+def viscosity_two_frequencies(
+    f_low: float,
+    f_high: float,
+    i_low: np.ndarray,
+    q_low: np.ndarray,
+    q_high: np.ndarray,
+    sensor: E.Sensor = E.GEM2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Conductivity, in-phase susceptibility and quadrature susceptibility
+    (magnetic viscosity) from two frequencies, after Simon et al. (2015).
+
+    At low induction number the conductive quadrature grows in proportion to
+    frequency, while a viscous (frequency-independent quadrature)
+    susceptibility kappa'' adds the same quadrature at both:
+        Q(f) = sigma * L(f) - kappa'' * K,
+    with L(f) the LIN quadrature per S/m and K the static in-phase per unit
+    susceptibility for this geometry (e^{+iwt}: kappa = kappa' - i kappa'').
+    The conductive part of the low-frequency in-phase is then removed with the
+    half-space model before kappa' = I / K.
+    Returns (sigma S/m, kappa' SI, kappa'' SI) per reading.
+    """
+    l_low = E.lin_ppm_per_sigma(f_low, sensor)
+    l_high = E.lin_ppm_per_sigma(f_high, sensor)
+    k = E.forward_ppm(f_low, [0.0], [1e-3], sensor=sensor).real[0] / 1e-3
+    if k == 0:
+        raise ValueError("The sensor has no in-phase susceptibility response at this height.")
+    q_low = np.asarray(q_low, dtype=float)
+    q_high = np.asarray(q_high, dtype=float)
+    sigma = (q_high - q_low) / (l_high - l_low)
+    kappa_q = (sigma * l_low - q_low) / k
+    ok = np.isfinite(sigma) & (sigma > 0)
+    i_sigma = np.full(sigma.shape, np.nan)
+    if ok.any():
+        i_sigma[ok] = E.forward_ppm_batch([f_low], sigma[ok][:, None], sensor=sensor).real[:, 0]
+    kappa_i = (np.asarray(i_low, dtype=float) - i_sigma) / k
+    return sigma, kappa_i, kappa_q
+
+
+def add_viscosity_columns(
+    df: pd.DataFrame, pair: tuple[float, float], sensor: E.Sensor
+) -> tuple[pd.DataFrame, list[str]]:
+    """Adds ECqdiff[mS/m] and MagViscosity[1/1000] (kappa'' x 1000) from two I/Q frequencies."""
+    f_low, f_high = sorted(float(f) for f in pair)
+    cols = {}
+    for f, comp in ((f_low, "I"), (f_low, "Q"), (f_high, "Q")):
+        col = gem_io.channel_column(comp, f"{f:g}Hz")
+        if col not in df.columns:
+            raise ValueError(f"Magnetic viscosity needs the column {col}.")
+        cols[(f, comp)] = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+    sigma, _, kappa_q = viscosity_two_frequencies(
+        f_low, f_high, cols[(f_low, "I")], cols[(f_low, "Q")], cols[(f_high, "Q")], sensor
+    )
+    out = df.copy()
+    out[QDIFF_EC_COLUMN] = sigma * 1000.0
+    out[VISCOSITY_COLUMN] = kappa_q * 1000.0
+    return out, [
+        f"Magnetic viscosity from {f_low:g} and {f_high:g} Hz (Simon et al., 2015): added "
+        f"'{QDIFF_EC_COLUMN}' and '{VISCOSITY_COLUMN}' to the AUX channels."
+    ]
+
+
+def viscosity_per_decade(kappa_q: np.ndarray) -> np.ndarray:
+    """Susceptibility drop per decade of frequency for a log-uniform relaxation spectrum: (2 ln 10 / pi) kappa''."""
+    return 2.0 * math.log(10.0) / math.pi * np.asarray(kappa_q, dtype=float)
+
+

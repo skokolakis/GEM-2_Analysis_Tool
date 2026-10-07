@@ -16,6 +16,7 @@ import pandas as pd
 import corrections
 import emphysics
 import gem_io
+import interpret
 
 DISTANCE_COL = gem_io.DISTANCE_COL   # column added by prepare_gem_table
 READING_ORDER_METHODS = ("sample", "markers")   # distances that count every logged reading
@@ -32,6 +33,7 @@ class PrepSettings:
     corrections: corrections.CorrectionSettings = corrections.CorrectionSettings()
     sensor: emphysics.Sensor = emphysics.GEM2
     recompute_from_iq: bool = False   # EC / MS from I / Q with the sensor geometry above
+    viscosity_pair: tuple[float, float] | None = None   # Hz; adds magnetic-viscosity AUX channels
 
 
 def recompute_ec_ms(df: pd.DataFrame, sensor: emphysics.Sensor) -> tuple[pd.DataFrame, list[str]]:
@@ -104,6 +106,10 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
 
     if prep.recompute_from_iq:
         df, steps = recompute_ec_ms(df, prep.sensor)
+        messages.extend(steps)
+
+    if prep.viscosity_pair:
+        df, steps = interpret.add_viscosity_columns(df, prep.viscosity_pair, prep.sensor)
         messages.extend(steps)
 
     if order_based:

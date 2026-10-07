@@ -85,6 +85,8 @@ AUX_LABELS = {
     "PowerLn": "Power-line noise (mG)",
     "QSum": "Quadrature sum (ppm)",
     "TotalEC[mS/m]": "Total EC (mS/m)",
+    "ECqdiff[mS/m]": "EC from quadrature difference (mS/m)",
+    "MagViscosity[1/1000]": "Magnetic viscosity κ″ (10⁻³ SI)",
 }
 
 
