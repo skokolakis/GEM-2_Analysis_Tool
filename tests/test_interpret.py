@@ -76,3 +76,32 @@ def test_viscosity_pipeline_adds_aux_channels():
     assert I.VISCOSITY_COLUMN in aux and I.QDIFF_EC_COLUMN in aux
 
 
+def _anomaly_table():
+    rows = []
+    for k in range(9):
+        xs = np.full(41, float(k))
+        ys = np.linspace(0, 8, 41)
+        r = np.hypot(xs - 4, ys - 4)
+        bump = (r < 1.0).astype(float)
+        part = pd.DataFrame({"Line": k, "X": xs, "Y": ys})
+        for f, ai, aq in ((1525.0, 5.0, 20.0), (18325.0, 15.0, 8.0)):
+            part[f"I_{f:g}Hz"] = 100 + ai * bump
+            part[f"Q_{f:g}Hz"] = 50 + aq * bump
+        rows.append(part)
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_anomaly_spectrum_with_annulus_background():
+    s = I.anomaly_spectrum(_anomaly_table(), (4.0, 4.0), 0.9)
+    np.testing.assert_allclose(s["I anomaly (ppm)"], [5.0, 15.0])
+    np.testing.assert_allclose(s["Q anomaly (ppm)"], [20.0, 8.0])
+    fig = I.make_spectrum_figure(s, "t")
+    assert len(fig.axes) == 2
+    plt.close(fig)
+
+
+def test_anomaly_spectrum_errors():
+    with pytest.raises(ValueError, match="No readings"):
+        I.anomaly_spectrum(_anomaly_table(), (100.0, 100.0), 0.5)
+    with pytest.raises(ValueError, match="I_ and Q_"):
+        I.anomaly_spectrum(pd.DataFrame({"X": [0.0], "Y": [0.0]}), (0.0, 0.0), 1.0)

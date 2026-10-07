@@ -147,3 +147,74 @@ def viscosity_per_decade(kappa_q: np.ndarray) -> np.ndarray:
     return 2.0 * math.log(10.0) / math.pi * np.asarray(kappa_q, dtype=float)
 
 
+# ---------------------------------------------------------------------------
+# Anomaly spectra
+# ---------------------------------------------------------------------------
+
+
+def anomaly_spectrum(
+    table: pd.DataFrame,
+    centre: tuple[float, float] | float,
+    radius: float,
+    background: str = "annulus",
+) -> pd.DataFrame:
+    """
+    In-phase and quadrature anomaly per frequency around one point: mean of
+    the readings within `radius` minus the background, which is the median of
+    the readings between radius and 2 x radius ("annulus") or of the whole
+    survey ("survey"). `centre` is (x, y) in map metres, or a distance along
+    the line when the table has no coordinates.
+    Returns columns Frequency (Hz), I anomaly (ppm), Q anomaly (ppm), n.
+    """
+    found = gem_io.find_channels(table.columns)
+    labels = sorted((lb for lb in found["Q"] if lb in found["I"]), key=lambda lb: float(lb[:-2]))
+    if not labels:
+        raise ValueError("Anomaly spectra need I_ and Q_ columns.")
+    if isinstance(centre, tuple):
+        x, y, _ = corrections.xy_metres(table)
+        d = np.hypot(x - centre[0], y - centre[1])
+    else:
+        d = np.abs(pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce").to_numpy() - centre)
+    inside = d <= radius
+    if not inside.any():
+        raise ValueError("No readings within the radius of that point.")
+    ring = (d > radius) & (d <= 2 * radius) if background == "annulus" else np.isfinite(d) & ~inside
+    if not ring.any():
+        raise ValueError("No background readings around that point.")
+    rows = []
+    for lb in labels:
+        i = pd.to_numeric(table[found["I"][lb]], errors="coerce").to_numpy(dtype=float)
+        q = pd.to_numeric(table[found["Q"][lb]], errors="coerce").to_numpy(dtype=float)
+        rows.append({
+            "Frequency (Hz)": float(lb[:-2]),
+            "I anomaly (ppm)": float(np.nanmean(i[inside]) - np.nanmedian(i[ring])),
+            "Q anomaly (ppm)": float(np.nanmean(q[inside]) - np.nanmedian(q[ring])),
+            "n": int(inside.sum()),
+        })
+    return pd.DataFrame(rows)
+
+
+def make_spectrum_figure(spectrum: pd.DataFrame, title: str):
+    """In-phase and quadrature anomaly against frequency, and the Argand diagram (Q against I)."""
+    import matplotlib.pyplot as plt
+
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.6))
+    f = spectrum["Frequency (Hz)"]
+    a1.semilogx(f, spectrum["I anomaly (ppm)"], "o-", label="In-phase")
+    a1.semilogx(f, spectrum["Q anomaly (ppm)"], "s--", label="Quadrature")
+    a1.axhline(0, color="0.5", linewidth=0.8)
+    a1.set_xlabel("Frequency (Hz)")
+    a1.set_ylabel("Anomaly (ppm)")
+    a1.legend()
+    a1.grid(True, alpha=0.4)
+    a2.plot(spectrum["I anomaly (ppm)"], spectrum["Q anomaly (ppm)"], "o-")
+    for _, row in spectrum.iterrows():
+        a2.annotate(f"{row['Frequency (Hz)']:g}", (row["I anomaly (ppm)"], row["Q anomaly (ppm)"]),
+                    fontsize=7, xytext=(3, 3), textcoords="offset points")
+    a2.set_xlabel("In-phase anomaly (ppm)")
+    a2.set_ylabel("Quadrature anomaly (ppm)")
+    a2.set_title("Argand diagram")
+    a2.grid(True, alpha=0.4)
+    fig.suptitle(title)
+    fig.tight_layout()
+    return fig
