@@ -145,3 +145,20 @@ def test_unreadable_samples_file_is_a_value_error():
 
     with pytest.raises(ValueError, match="could not be read"):
         U._read_samples(Upload())
+
+
+def test_zone_map_is_sized_to_the_survey_and_lists_only_the_zones_used():
+    import matplotlib.pyplot as plt
+
+    import ui_tools as U
+
+    x, y = np.meshgrid(np.arange(61.0), np.linspace(0, 77, 50))     # taller than wide, like a 61-line field
+    zone = np.where(x < 30, 1, 3).ravel()
+    fig = U.zone_figure(x.ravel(), y.ravel(), zone, 3)
+    w, h = fig.get_size_inches()
+    assert h > w                                    # portrait field -> portrait figure
+    assert list(fig.axes[1].get_yticks()) == [1, 2, 3]
+    plt.close(fig)
+    fig, _ = U.plan_view(np.array([0.0, 500.0]), np.array([0.0, 1.0]))
+    assert fig.get_size_inches()[1] == 3.0         # very flat surveys keep a usable height
+    plt.close(fig)

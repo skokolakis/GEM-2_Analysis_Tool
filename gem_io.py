@@ -5,7 +5,8 @@ distance along each survey line.
 Pure functions only (no Streamlit). Column names follow the WinGEM export
 (GEM-2 Manual v3.8, 2004): Line Sample X Y Mark Status GPSStat Time[ms]
 Time[hhmmss.sss] PowerLn I_<f>Hz Q_<f>Hz QSum EC<f>Hz[mS/m] TotalEC[mS/m]
-MSusc<f>Hz[1/1000].
+MSusc<f>Hz[1/1000]. Tables converted from .gbf files (Ip_<f>Hz / Qd_<f>Hz,
+no Line column) are brought to that layout by normalise_columns.
 """
 from __future__ import annotations
 
@@ -71,6 +72,80 @@ def channel_column(mode: str, label: str) -> str:
     if mode == "AUX":
         return label
     raise ValueError(f"Unknown mode: {mode!r}")
+
+
+CHANNEL_ALIASES = {                        # other export names -> WinGEM names
+    re.compile(r"^Ip_(\d+(?:\.\d+)?)Hz$"): "I_{}Hz",
+    re.compile(r"^Qd_(\d+(?:\.\d+)?)Hz$"): "Q_{}Hz",
+}
+MIN_LINE_READINGS = 10       # readings per line, on average, for lines taken from a constant coordinate
+LINE_GAP_SECONDS = 3.0       # a pause longer than this starts a new line (when no coordinate is constant)
+
+
+def infer_lines(df: pd.DataFrame) -> tuple[np.ndarray, str]:
+    """
+    Line labels for a table without a Line column, and how they were found.
+    A grid survey keeps one coordinate constant along each line (X for lines
+    walked along Y, or Y for lines along X): a new line starts wherever that
+    coordinate changes, and lines are labelled by its value when every line
+    has its own. Otherwise (e.g. GPS positions) a new line starts after a
+    pause of more than LINE_GAP_SECONDS; without a time column the whole file
+    is one line.
+    """
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    best = None
+    for name in ("x", "y"):
+        if name not in lower:
+            continue
+        v = pd.to_numeric(df[lower[name]], errors="coerce").ffill().bfill().to_numpy(dtype=float)
+        if len(v) == 0 or not np.isfinite(v).all():
+            continue
+        starts = np.concatenate([[True], np.diff(v) != 0])
+        runs = int(starts.sum())
+        if runs <= max(1, len(v) // MIN_LINE_READINGS) and (best is None or runs < best[0]):
+            best = (runs, name, v, starts)
+    if best is not None:
+        runs, name, v, starts = best
+        run_values = v[starts]
+        if len(np.unique(run_values)) == runs:
+            labels = v
+        else:
+            labels = (np.cumsum(starts) - 1).astype(float)
+        return labels, f"lines taken from runs of constant {name.upper()} ({runs} lines)"
+    t = time_seconds(df)
+    if t is not None:
+        t = pd.Series(t).ffill().bfill().to_numpy()
+        starts = np.concatenate([[True], np.diff(t) > LINE_GAP_SECONDS])
+        return (np.cumsum(starts) - 1).astype(float), (
+            f"lines split at pauses longer than {LINE_GAP_SECONDS:g} s in time ({int(starts.sum())} lines)"
+        )
+    return np.zeros(len(df)), "the whole file is treated as one line"
+
+
+def normalise_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Brings other GEM-2 export layouts to the WinGEM one: in-phase and
+    quadrature columns named Ip_<f>Hz / Qd_<f>Hz (e.g. tables converted from
+    .gbf files) become I_<f>Hz / Q_<f>Hz, and a table without a Line column
+    gets one from infer_lines. Returns (table, messages); a WinGEM export is
+    returned unchanged with no messages.
+    """
+    renames = {}
+    for col in df.columns:
+        for pattern, target in CHANNEL_ALIASES.items():
+            match = pattern.match(str(col))
+            if match and target.format(match.group(1)) not in df.columns:
+                renames[col] = target.format(match.group(1))
+    msgs = []
+    out = df
+    if renames:
+        out = out.rename(columns=renames)
+        msgs.append("Renamed " + ", ".join(f"{a} → {b}" for a, b in renames.items()) + ".")
+    if "Line" not in out.columns:
+        labels, how = infer_lines(out)
+        out = out.assign(Line=labels)
+        msgs.append(f"No Line column: {how}.")
+    return out, msgs
 
 
 def time_seconds(df: pd.DataFrame) -> np.ndarray | None:

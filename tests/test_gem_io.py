@@ -134,3 +134,44 @@ def test_time_seconds_from_ms_and_hhmmss_with_midnight():
 def test_time_seconds_ignores_missing_values():
     df = pd.DataFrame({"Time[ms]": [5e7, np.nan, 50_001_000.0, 50_002_000.0]})
     np.testing.assert_allclose(G.time_seconds(df), [50000, np.nan, 50001, 50002])
+
+
+def _gbf_export(lines=3, n=21, along="Y"):
+    """A GEM-2 export converted from a .gbf file: no Line column, Ip_/Qd_ for in-phase and quadrature."""
+    rows, t0 = [], 0.0
+    for k in range(lines):
+        s = np.linspace(0, 10, n)
+        x, y = (np.full(n, float(k)), s) if along == "Y" else (s, np.full(n, float(k)))
+        t = t0 + 100.0 * np.arange(n)
+        t0 = t[-1] + 5000.0
+        rows.append(pd.DataFrame({"X": x, "Y": y, "Mark": 0, "Status": 0, "Time[ms]": t,
+                                  "Ip_15270Hz": 1300.0 + k, "Qd_15270Hz": 1500.0 + s,
+                                  "EC15270Hz[mS/m]": 37.0 + s, "MSusc15270Hz[1/1000]": -12.0}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_normalise_renames_ip_qd_and_takes_lines_from_constant_x():
+    df, msgs = G.normalise_columns(_gbf_export())
+    assert {"I_15270Hz", "Q_15270Hz"} <= set(df.columns) and "Ip_15270Hz" not in df.columns
+    assert df["Line"].tolist() == [0.0] * 21 + [1.0] * 21 + [2.0] * 21
+    assert any("constant X" in m and "3 lines" in m for m in msgs)
+    assert G.find_channels(df.columns)["I"] == {"15270Hz": "I_15270Hz"}
+
+
+def test_lines_from_constant_y_from_time_gaps_or_one_line():
+    df, _ = G.normalise_columns(_gbf_export(along="X"))
+    assert df["Line"].nunique() == 3
+    rng = np.random.default_rng(0)
+    gps = _gbf_export()
+    gps["X"] += rng.normal(0, 0.01, len(gps))      # GPS positions: no coordinate stays constant
+    gps["Y"] += rng.normal(0, 0.01, len(gps))
+    df, msgs = G.normalise_columns(gps)
+    assert df["Line"].nunique() == 3 and any("time" in m for m in msgs)
+    df, msgs = G.normalise_columns(gps.drop(columns="Time[ms]"))
+    assert df["Line"].nunique() == 1 and any("one line" in m for m in msgs)
+
+
+def test_normalise_leaves_wingem_exports_alone():
+    df = _export()
+    out, msgs = G.normalise_columns(df)
+    assert out.equals(df) and msgs == []

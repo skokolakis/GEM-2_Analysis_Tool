@@ -93,9 +93,163 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 
+SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choices
+    "altitude": (
+        "Column with the sensor height of each reading. Readings are corrected to the "
+        "reference height with a fitted height response."
+    ),
+    "altitude_ref": (
+        "Height every reading is corrected to; 0 uses the median height."
+    ),
+    "area_map": (
+        "Grids the readings over the survey area from their coordinates and draws a contour "
+        "map of each channel."
+    ),
+    "background": (
+        "Shifts each EC channel so its median equals this value, e.g. from a reference "
+        "measurement. Removes a constant calibration offset."
+    ),
+    "bucking": (
+        "Distance from the transmitter to the bucking coil, which cancels the primary field "
+        "at the receiver (1.035 m on the GEM-2). 0 models a plain coil pair."
+    ),
+    "cell": (
+        "Grid spacing of the map. Auto gives about one grid node per reading. Smaller cells "
+        "draw a finer map but cannot add detail between lines that were not measured."
+    ),
+    "clip": (
+        "Blanks the most extreme values of each channel, e.g. readings near metal."
+    ),
+    "clip_range": (
+        "Values below the lower or above the upper percentile are blanked."
+    ),
+    "coil_axis": (
+        "Direction of the coil axis (the walking direction) on the map; the footprint is "
+        "longer along it."
+    ),
+    "combined": (
+        "Merged: one map from several surveys, each levelled to the others where they "
+        "overlap. Difference: the change between two surveys of the same area (B − A)."
+    ),
+    "deconv_reg": (
+        "Damping of the deconvolution: smaller values sharpen more but amplify noise."
+    ),
+    "despike": (
+        "Blanks single readings that jump away from their neighbours (metal, knocks) by more "
+        "than the threshold × the noise σ."
+    ),
+    "despike_threshold": (
+        "How far from the running median a reading must be, in units of the robust noise σ, "
+        "to count as a spike. Lower values remove more."
+    ),
+    "despike_window": (
+        "Number of readings in the running median each reading is compared with."
+    ),
+    "distance_step": (
+        "Spacing of the common distance grid every pass is resampled onto, and so of the "
+        "representative profile."
+    ),
+    "drift_model": (
+        "How instrument drift between base-station visits is followed: piecewise linear "
+        "through every visit, or one straight line through all of them."
+    ),
+    "ec25": (
+        "Converts EC to its value at 25 °C (EC rises about 2 % per °C), so surveys made at "
+        "different temperatures can be compared."
+    ),
+    "edge_distance": (
+        "Readings of two surveys closer than this are compared to find the level shift "
+        "between them."
+    ),
+    "edge_match": (
+        "Shifts each survey by the median difference to the earlier ones where they overlap, "
+        "removing calibration offsets between days."
+    ),
+    "gridding": (
+        "How values between readings are estimated. Thin-plate spline: smooth surface through "
+        "the data. Ordinary kriging: weights from the spatial correlation (variogram), with "
+        "an error map. Linear: flat triangles between readings, no smoothing."
+    ),
+    "heading": (
+        "Keeps only readings walked within a range of headings, e.g. to check for heading "
+        "error on lines walked back and forth."
+    ),
+    "heading_dir": (
+        "Walking direction to keep, clockwise from north (or from the +Y axis)."
+    ),
+    "heading_tol": (
+        "Readings within this many degrees of the heading are kept."
+    ),
+    "height": (
+        "Height of the coils above the ground. The response weakens with height and comes "
+        "from deeper on average. Used by the physics tools, the EC / MS recompute and the "
+        "inversion."
+    ),
+    "interpolation": (
+        "How each pass is resampled onto the common grid. Linear and nearest are the most "
+        "conservative; cubic, quadratic, PCHIP and Akima are smooth (PCHIP and Akima do not "
+        "overshoot); polynomial fits a trend and lowers the noise."
+    ),
+    "lag_channel": (
+        "Channel compared between neighbouring lines; one with clear anomalies works best."
+    ),
+    "levels": (
+        "Number of colour bands between the lowest and highest mapped value."
+    ),
+    "map_despike": (
+        "How far from the local median a cell must be, in robust σ units, to be replaced."
+    ),
+    "map_filter": (
+        "Despike replaces isolated outlier cells. Low-pass smooths. High-pass removes the "
+        "regional trend to show local anomalies."
+    ),
+    "map_window": (
+        "Size of the moving window, in cells per side."
+    ),
+    "pseudosection": (
+        "Frequency against distance for each line. Lower frequencies see deeper on average, "
+        "but the frequency axis is not a calibrated depth (McNeill, 1980)."
+    ),
+    "ref_method": (
+        "Regression: least-squares line through the matched pairs. Moments: gain and offset "
+        "that match the mean and spread of the reference values."
+    ),
+    "ref_radius": (
+        "Survey readings within this distance of a reference point are matched to it (their "
+        "median)."
+    ),
+    "separation": (
+        "Distance from the transmitter to the receiver coil (1.66 m on the GEM-2). Wider "
+        "separation sees deeper."
+    ),
+    "smooth": (
+        "Centred moving average along each line. Lowers noise but blurs small anomalies (and "
+        "raises the scores)."
+    ),
+    "spacing": (
+        "Reading number: distance walked between two readings. Markers: distance between two "
+        "event markers; readings in between are spread evenly (dead reckoning)."
+    ),
+    "temperature": (
+        "Column with the instrument or air temperature. Its effect is measured at the base "
+        "station and removed from every reading."
+    ),
+    "variogram": (
+        "Shape of the spatial correlation used by kriging. Spherical and exponential suit "
+        "rough fields (they rise linearly at short distances); gaussian suits very smooth "
+        "ones."
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Graph editor options
 # ---------------------------------------------------------------------------
+
+PROFILE_X = "Distance along line (m)"          # graph-editor choices that keep the profile view
+PROFILE_Y = "Representative profiles"
+TIME_X = "Time (s)"
+
 
 @dataclass
 class GraphOptions:
@@ -111,6 +265,13 @@ class GraphOptions:
     plot_title: str = ""   # empty → use auto-generated default
     x_label: str = ""      # empty → "Distance (m)"
     y_label: str = ""      # empty → profile_label(mode, is_gem)
+    x_column: str = PROFILE_X   # what is plotted (plot_axis_options)
+    y_column: str = PROFILE_Y
+
+    @property
+    def readings(self) -> bool:
+        """True when a column is chosen for Y: plot the readings instead of the profiles."""
+        return self.y_column != PROFILE_Y
 
 
 @dataclass(frozen=True)
@@ -148,7 +309,8 @@ LEVELLING_HELP = (
 # ---------------------------------------------------------------------------
 
 def is_gem_format(df: pd.DataFrame) -> bool:
-    """Return True if *df* has the GEM instrument column structure."""
+    """Return True if *df* has the GEM instrument column structure (after gem_io.normalise_columns)."""
+    df, _ = gem_io.normalise_columns(df)
     cols = set(str(c) for c in df.columns)
     if not GEM_REQUIRED_COLS.issubset(cols):
         return False
@@ -690,6 +852,76 @@ def make_overview_figure(
     return fig
 
 
+def plot_axis_options(table: pd.DataFrame | None, mode: str = "") -> tuple[list[str], list[str]]:
+    """
+    Choices of the graph editor's X and Y drop-downs. X: distance along the
+    line (the representative-profile view), the position, time and reading
+    columns, then every data channel (for cross-plots). Y: the representative
+    profiles, then every data channel, those of *mode* first. Only the
+    profile view without a prepared GEM table (legacy files).
+    """
+    xs, ys = [PROFILE_X], [PROFILE_Y]
+    if table is None:
+        return xs, ys
+    lower = {str(c).strip().lower(): str(c) for c in table.columns}
+    for name in ("x", "y", "lat", "latitude", "lon", "long", "longitude", "sample"):
+        if name in lower:
+            xs.append(lower[name])
+    if gem_io.time_seconds(table) is not None:
+        xs.append(TIME_X)
+    found = gem_io.find_channels(table.columns)
+    order = [mode] + [m for m in gem_io.GEM_MODES if m != mode] if mode in found else list(gem_io.GEM_MODES)
+    data = [col for m in order for col in found[m].values()]
+    return xs + data, ys + data
+
+
+def _axis_values(table: pd.DataFrame, choice: str) -> np.ndarray:
+    """Values plotted for one drop-down choice: distance, time since the first reading, or a column."""
+    if choice == PROFILE_X:
+        return pd.to_numeric(table[pipeline.DISTANCE_COL], errors="coerce").to_numpy(dtype=float)
+    if choice == TIME_X:
+        t = gem_io.time_seconds(table)
+        return t - np.nanmin(t)
+    return pd.to_numeric(table[choice], errors="coerce").to_numpy(dtype=float)
+
+
+def make_readings_figure(table: pd.DataFrame, opts: GraphOptions, title: str) -> plt.Figure:
+    """
+    The readings of the prepared table: opts.y_column against opts.x_column,
+    one colour per line. Readings are joined in reading order where X runs
+    one way along the line (distance, time, position), and drawn as points
+    otherwise (cross-plots of two channels).
+    """
+    x = _axis_values(table, opts.x_column)
+    y = _axis_values(table, opts.y_column)
+    lines = gem_io.line_labels(table["Line"]) if "Line" in table.columns else pd.Series("0", index=table.index)
+    groups = list(pd.Series(np.arange(len(table))).groupby(lines.to_numpy(), sort=False))
+    cmap = plt.get_cmap("viridis", max(len(groups), 2))
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for k, (label, idx) in enumerate(groups):
+        xi, yi = x[idx.to_numpy()], y[idx.to_numpy()]
+        ok = np.isfinite(xi) & np.isfinite(yi)
+        step = np.diff(xi[ok])
+        colour = cmap(k)
+        if ok.sum() > 1 and (np.all(step >= 0) or np.all(step <= 0)):
+            ax.plot(xi, yi, color=colour, linewidth=0.5 * opts.line_width, linestyle=opts.line_style,
+                    label=f"Line {label}")
+        else:
+            ax.scatter(xi, yi, color=colour, s=4, label=f"Line {label}")
+    if len(groups) <= 12:
+        ax.legend(fontsize=8)
+    ax.set_xlabel(opts.x_label or opts.x_column)
+    ax.set_ylabel(opts.y_label or opts.y_column)
+    ax.set_title(opts.plot_title or f"{title} ({len(groups)} line{'s' if len(groups) != 1 else ''})")
+    ax.grid(opts.show_grid, alpha=0.4)
+    if opts.x_lim is not None:
+        ax.set_xlim(opts.x_lim)
+    if opts.y_lim is not None:
+        ax.set_ylim(opts.y_lim)
+    fig.tight_layout()
+    return fig
+
+
 def make_sheet_figure(
     sheet_name: str,
     interp_df: pd.DataFrame,
@@ -996,6 +1228,8 @@ def fig_to_png(fig: plt.Figure) -> bytes:
 def render_graph_editor(
     output_data: dict[str, pd.DataFrame],
     file_key: str,
+    table: pd.DataFrame | None = None,
+    mode: str = "",
 ) -> GraphOptions:
     """
     Render the graph editor expander and return the current GraphOptions.
@@ -1004,6 +1238,8 @@ def render_graph_editor(
     ----------
     output_data : processed sheets for this file
     file_key    : unique string used to namespace widget keys per file
+    table       : prepared GEM table (offers its columns in the X / Y drop-downs)
+    mode        : the tab's mode, whose channels come first in the Y drop-down
     """
     all_sheet_names = list(output_data.keys())
 
@@ -1018,8 +1254,30 @@ def render_graph_editor(
     y_data_max = float(valid_y.max()) if len(valid_y) else 1.0
 
     opts = GraphOptions()
+    x_options, y_options = plot_axis_options(table, mode)
 
     with st.expander("Graph Editor", expanded=False):
+        st.markdown("**Plot**")
+        pc1, pc2 = st.columns(2)
+        opts.x_column = pc1.selectbox(
+            "X axis", x_options, key=f"ge_xcol_{file_key}",
+            help="Distance along line shows the representative profiles. Position, time or a "
+                 "channel plots the individual readings, one colour per line (two channels give "
+                 "a cross-plot).",
+        )
+        opts.y_column = pc2.selectbox(
+            "Y axis", y_options, key=f"ge_ycol_{file_key}",
+            help="Representative profiles: the mean of all passes of each channel on the common "
+                 "distance grid. A channel: its readings after the corrections and filters.",
+        )
+        if opts.readings and table is not None:
+            x_vals = _axis_values(table, opts.x_column)
+            y_vals = _axis_values(table, opts.y_column) if opts.y_column != PROFILE_Y else x_vals
+            x_ok, y_ok = x_vals[np.isfinite(x_vals)], y_vals[np.isfinite(y_vals)]
+            if x_ok.size:
+                x_data_min, x_data_max = float(x_ok.min()), float(x_ok.max())
+            if y_ok.size and opts.y_column != PROFILE_Y:
+                y_data_min, y_data_max = float(y_ok.min()), float(y_ok.max())
         col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
@@ -1069,7 +1327,7 @@ def render_graph_editor(
             opts.line_style = LINE_STYLES[style_label]
 
         with col_axes:
-            st.markdown("**X axis**")
+            st.markdown("**X axis range**")
             x_auto = st.checkbox("Auto", value=True, key=f"ge_xauto_{file_key}")
             if not x_auto:
                 xc1, xc2 = st.columns(2)
@@ -1084,7 +1342,7 @@ def render_graph_editor(
                 else:
                     st.caption("X min must be < X max")
 
-            st.markdown("**Y axis**")
+            st.markdown("**Y axis range**")
             y_auto = st.checkbox("Auto", value=True, key=f"ge_yauto_{file_key}")
             if not y_auto:
                 yc1, yc2 = st.columns(2)
@@ -1138,6 +1396,7 @@ def _render_mode_section(
     scoring: bool = True,
     markers: list[float] | None = None,
     sensor: emphysics.Sensor | None = None,
+    table: pd.DataFrame | None = None,
 ) -> None:
     """
     Render ranking table (or channel list), graph editor, plots, and downloads for one mode.
@@ -1152,6 +1411,7 @@ def _render_mode_section(
     is_gem      : True for GEM files (known units); False for legacy files
     scoring     : show the frequency ranking and scores (never for AUX channels)
     markers     : event-marker distances drawn on the profiles
+    table       : prepared GEM table, for plots of chosen columns (graph editor)
     """
     if not output_data:
         st.error("No usable frequencies / sheets found.")
@@ -1172,13 +1432,25 @@ def _render_mode_section(
         st.caption(ui_tools.PERMITTIVITY_CAPTION)
 
     # ── Graph editor ─────────────────────────────────────────────────────
-    opts = render_graph_editor(output_data, file_key=file_key)
+    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode)
+    readings = opts.readings and table is not None
+
+    def overview() -> plt.Figure:
+        if readings:
+            return make_readings_figure(
+                table, opts, f"{opts.y_column} against {opts.x_column} — {file_name}"
+            )
+        return make_overview_figure(output_data, scores, mode, file_name, opts, is_gem, show_scores, markers)
 
     # ── Overview plot ────────────────────────────────────────────────────
-    st.markdown("### All representative profiles")
-    overview_fig = make_overview_figure(
-        output_data, scores, mode, file_name, opts, is_gem, show_scores, markers
-    )
+    if readings:
+        st.markdown(f"### {opts.y_column} against {opts.x_column}")
+    else:
+        st.markdown("### All representative profiles")
+        if opts.x_column != PROFILE_X:
+            st.caption("Representative profiles are drawn against distance along the line; "
+                       "choose a channel for Y to plot against another X.")
+    overview_fig = overview()
     st.pyplot(overview_fig, use_container_width=True)
     plt.close(overview_fig)
 
@@ -1226,9 +1498,7 @@ def _render_mode_section(
             )
 
     with columns[-1]:
-        download_fig = make_overview_figure(
-            output_data, scores, mode, file_name, opts, is_gem, show_scores, markers
-        )
+        download_fig = overview()
         png_bytes = fig_to_png(download_fig)
         plt.close(download_fig)
         st.download_button(
@@ -1378,6 +1648,7 @@ def render_data_sidebar() -> pipeline.PrepSettings:
         spacing = st.number_input(
             "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
             min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
+            help=SCIENCE_HELP["spacing"],
         )
     sensor, recompute, viscosity_pair = render_sensor_sidebar()
     return pipeline.PrepSettings(
@@ -1392,10 +1663,12 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float]
     """Coil geometry and height for the physics tools; EC/MS recomputation; viscosity pair."""
     with st.expander("Sensor geometry", expanded=False):
         st.caption("GEM-2 defaults (Won et al., 1996). Check them against your sensor's .gem file.")
-        separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep")
+        separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep",
+                                     help=SCIENCE_HELP["separation"])
         bucking = st.number_input("Tx–bucking coil (m, 0 = none)", 0.0, 10.0, 1.035, step=0.005,
-                                  format="%.3f", key="sen_buck")
-        height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key="sen_h")
+                                  format="%.3f", key="sen_buck", help=SCIENCE_HELP["bucking"])
+        height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key="sen_h",
+                                 help=SCIENCE_HELP["height"])
         recompute = st.checkbox(
             "Recompute EC / MS from I / Q", key="sen_recompute",
             help="Half-space conversion of each reading (Huang & Won, 2000) with this geometry "
@@ -1437,18 +1710,21 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
     """Corrections & filters applied to GEM tables before profiles and maps."""
     with st.expander("Corrections & filters", expanded=False):
         st.markdown("**Filters**")
-        despike = st.checkbox("Despike (running median)", key="cor_despike")
+        despike = st.checkbox("Despike (running median)", key="cor_despike", help=SCIENCE_HELP["despike"])
         window, threshold = 5, 4.0
         if despike:
-            window = st.slider("Despike window (readings)", 3, 21, 5, step=2, key="cor_dwin")
+            window = st.slider("Despike window (readings)", 3, 21, 5, step=2, key="cor_dwin",
+                               help=SCIENCE_HELP["despike_window"])
             threshold = st.number_input("Despike threshold (× noise σ)", 1.0, 20.0, 4.0,
-                                        step=0.5, key="cor_dthr")
-        clip = st.checkbox("Clip to percentiles", key="cor_clip")
+                                        step=0.5, key="cor_dthr", help=SCIENCE_HELP["despike_threshold"])
+        clip = st.checkbox("Clip to percentiles", key="cor_clip", help=SCIENCE_HELP["clip"])
         clip_range = None
         if clip:
-            lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key="cor_crange")
+            lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key="cor_crange",
+                               help=SCIENCE_HELP["clip_range"])
             clip_range = (float(lo), float(hi))
-        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key="cor_smooth")
+        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key="cor_smooth",
+                           help=SCIENCE_HELP["smooth"])
         pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key="cor_pca",
                               help="Minsley et al. (2010): channels of a mode are strongly "
                                    "correlated, trailing components are mostly noise.")
@@ -1459,15 +1735,16 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
                                    help="Lines recorded at a fixed base station during the "
                                         "survey. Needs a Time column. They are removed after "
                                         "the correction.")
-        drift_model = st.selectbox("Drift model", ["piecewise", "linear"], key="cor_dmodel")
+        drift_model = st.selectbox("Drift model", ["piecewise", "linear"], key="cor_dmodel",
+                                   help=SCIENCE_HELP["drift_model"])
         temp_col = st.text_input("Temperature column (needs ≥ 3 base-station lines)",
-                                 key="cor_temp").strip()
+                                 key="cor_temp", help=SCIENCE_HELP["temperature"]).strip()
         alt_col = st.text_input("Sensor-height column (e.g. drone altitude above ground)",
-                                key="cor_alt").strip()
+                                key="cor_alt", help=SCIENCE_HELP["altitude"]).strip()
         alt_ref = None
         if alt_col:
             alt_ref_value = st.number_input("Reference height (m, 0 = median)", 0.0, 100.0, 0.0,
-                                            step=0.1, key="cor_altref")
+                                            step=0.1, key="cor_altref", help=SCIENCE_HELP["altitude_ref"])
             alt_ref = float(alt_ref_value) or None
 
         st.markdown("**Calibration**")
@@ -1477,28 +1754,31 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
                  "Produced by 'Multi-height calibration' under a file.",
         )
         background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
-                                     key="cor_bg")
+                                     key="cor_bg", help=SCIENCE_HELP["background"])
         ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key="cor_ref",
                                     help="Same coordinate columns as the survey (X/Y or "
                                          "Lat/Lon) plus one column per channel to calibrate, "
                                          "named like the survey column, e.g. EC1525Hz[mS/m].")
         ref_radius, ref_method = 2.0, "regression"
         if ref_file is not None:
-            ref_radius = st.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key="cor_rrad")
-            ref_method = st.selectbox("Calibration fit", ["regression", "moments"], key="cor_rmeth")
+            ref_radius = st.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key="cor_rrad",
+                                         help=SCIENCE_HELP["ref_radius"])
+            ref_method = st.selectbox("Calibration fit", ["regression", "moments"], key="cor_rmeth",
+                                      help=SCIENCE_HELP["ref_method"])
         soil_t = st.number_input("Soil temperature for EC at 25 °C (°C, 0 = off)", 0.0, 50.0, 0.0,
-                                 key="cor_soilt")
+                                 key="cor_soilt", help=SCIENCE_HELP["ec25"])
 
         st.markdown("**Positioning**")
         lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key="cor_lag",
                               help="Positive: readings were logged after the position. Use "
                                    "'Estimate GPS lag' under a file to find it.")
-        heading = st.checkbox("Keep one walking direction", key="cor_head")
+        heading = st.checkbox("Keep one walking direction", key="cor_head", help=SCIENCE_HELP["heading"])
         bearing_center, bearing_tol = None, 30.0
         if heading:
             bearing_center = float(st.number_input("Heading (° from north)", 0.0, 359.0, 0.0,
-                                                    key="cor_hdir"))
-            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key="cor_htol"))
+                                                    key="cor_hdir", help=SCIENCE_HELP["heading_dir"]))
+            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key="cor_htol",
+                                                help=SCIENCE_HELP["heading_tol"]))
 
     return corrections.CorrectionSettings(
         despike=despike, despike_window=int(window), despike_threshold=float(threshold),
@@ -1532,7 +1812,7 @@ def render_lag_estimate(
         columns = corrections.channel_columns(table)
         if not columns:
             return
-        column = st.selectbox("Channel", columns, key=f"lag_col_{file_key}")
+        column = st.selectbox("Channel", columns, key=f"lag_col_{file_key}", help=SCIENCE_HELP["lag_channel"])
         if st.button("Estimate", key=f"lag_btn_{file_key}"):
             try:
                 with st.spinner("Searching lags from −2 s to +2 s…"):
@@ -1554,8 +1834,8 @@ def render_contouring_sidebar() -> ContourSettings:
     """Sidebar controls for 2D contouring; call inside `with st.sidebar`."""
     st.divider()
     st.subheader("2D contouring")
-    area = st.toggle("Area map (plan view)", value=False, key="ct_area")
-    pseudo = st.toggle("Pseudo-section", value=False, key="ct_pseudo")
+    area = st.toggle("Area map (plan view)", value=False, key="ct_area", help=SCIENCE_HELP["area_map"])
+    pseudo = st.toggle("Pseudo-section", value=False, key="ct_pseudo", help=SCIENCE_HELP["pseudosection"])
     if not area:
         return ContourSettings(area_map=False, pseudosection=pseudo)
 
@@ -1567,6 +1847,7 @@ def render_contouring_sidebar() -> ContourSettings:
     )
     method = st.selectbox(
         "Gridding method", list(ctr.METHODS), format_func=ctr.METHODS.get, key="ct_method",
+        help=SCIENCE_HELP["gridding"],
     )
     smoothing = 0.0
     variogram_model = "spherical"
@@ -1577,11 +1858,11 @@ def render_contouring_sidebar() -> ContourSettings:
         )
     if method == "kriging":
         variogram_model = st.selectbox(
-            "Variogram model", ctr.VARIOGRAM_MODELS, key="ct_vario",
+            "Variogram model", ctr.VARIOGRAM_MODELS, key="ct_vario", help=SCIENCE_HELP["variogram"],
         )
     cell = st.number_input(
         "Cell size (m, 0 = auto)", min_value=0.0, value=0.0, step=0.1,
-        format="%.2f", key="ct_cell",
+        format="%.2f", key="ct_cell", help=SCIENCE_HELP["cell"],
     )
     blank = st.number_input(
         "Blanking distance (m, 0 = auto)", min_value=0.0, value=0.0, step=0.5,
@@ -1594,7 +1875,7 @@ def render_contouring_sidebar() -> ContourSettings:
     level = st.checkbox(
         "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
     )
-    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels")
+    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels", help=SCIENCE_HELP["levels"])
     projection = st.selectbox(
         "Projection of Lat/Lon", list(ctr.PROJECTIONS), format_func=ctr.PROJECTIONS.get,
         key="ct_proj", help="UTM gives georeferenced .asc / GeoTIFF exports.",
@@ -1750,13 +2031,14 @@ def _map_processing(
 ) -> tuple[ctr.AreaMapResult, list[str]]:
     """Optional footprint deconvolution and grid filter, chosen in an expander."""
     with st.expander("Map processing (filters, footprint deconvolution)", expanded=False):
-        kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}")
+        kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}",
+                            help=SCIENCE_HELP["map_filter"])
         size = st.slider("Window (cells)", 3, 51, 15 if kind == "high-pass" else 3, step=2,
-                         key=f"mp_size_{key}")
+                         key=f"mp_size_{key}", help=SCIENCE_HELP["map_window"])
         threshold = 4.0
         if kind == "despike":
             threshold = st.number_input("Despike threshold (× robust σ)", 1.0, 20.0, 4.0,
-                                        key=f"mp_thr_{key}")
+                                        key=f"mp_thr_{key}", help=SCIENCE_HELP["map_despike"])
         deconv = st.checkbox(
             "Deconvolve the sensor footprint", key=f"mp_dec_{key}",
             help="Lateral Tikhonov deconvolution of the low-induction-number footprint of the "
@@ -1767,9 +2049,10 @@ def _map_processing(
         reg, angle = 1e-2, axis_angle
         if deconv:
             reg = st.select_slider("Regularisation", [1e-4, 1e-3, 1e-2, 1e-1, 1.0], value=1e-2,
-                                   key=f"mp_reg_{key}")
+                                   key=f"mp_reg_{key}", help=SCIENCE_HELP["deconv_reg"])
             angle = st.number_input("Coil axis (° from map x axis)", 0.0, 180.0,
-                                    float(round(axis_angle, 1)), key=f"mp_ang_{key}")
+                                    float(round(axis_angle, 1)), key=f"mp_ang_{key}",
+                                    help=SCIENCE_HELP["coil_axis"])
     if kind == "none" and not deconv:
         return result, []
     z, msgs = gridtools.process_map(
@@ -1891,12 +2174,13 @@ def render_combined_maps(
     unit = ctr.value_label(mode, True, label)
     names = [n for _, n in gem_files]
     kind = st.radio("Map", ["Merged (edge-matched)", "Difference (B − A)"], horizontal=True,
-                    key="cm_kind")
+                    key="cm_kind", help=SCIENCE_HELP["combined"])
     try:
         if kind.startswith("Merged"):
             chosen = st.multiselect("Surveys", names, default=names, key="cm_files")
-            tol = st.number_input("Edge-matching distance (m)", 0.01, 100.0, 1.0, key="cm_tol")
-            match = st.checkbox("Edge-match levels", True, key="cm_match")
+            tol = st.number_input("Edge-matching distance (m)", 0.01, 100.0, 1.0, key="cm_tol",
+                                  help=SCIENCE_HELP["edge_distance"])
+            match = st.checkbox("Edge-match levels", True, key="cm_match", help=SCIENCE_HELP["edge_match"])
             if len(chosen) < 2:
                 st.info("Choose at least two surveys.")
                 return
@@ -2029,7 +2313,7 @@ def render_gem_results(
         table, _ = prepared_table(file_bytes, file_name, prep)
         markers = gem_io.marker_distances(table, table[pipeline.DISTANCE_COL].to_numpy())
     except (ValueError, KeyError):  # preparation problems are already listed in the warnings
-        markers = []
+        table, markers = None, []
 
     st.caption("GEM format detected — showing every channel in the file")
     prep = prep or pipeline.PrepSettings()
@@ -2060,6 +2344,7 @@ def render_gem_results(
                 scoring=scoring,
                 markers=markers,
                 sensor=prep.sensor,
+                table=table,
             )
             if contour is not None:
                 render_contouring(
@@ -2110,7 +2395,7 @@ def main():
             max_value=100.0,
             value=DEFAULT_DISTANCE_STEP,
             step=0.1,
-            format="%.2f",
+            format="%.2f", help=SCIENCE_HELP["distance_step"],
         )
 
         interp_kind = st.selectbox(
@@ -2118,6 +2403,7 @@ def main():
             ALL_INTERP_METHODS,
             index=0,
             format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
+            help=SCIENCE_HELP["interpolation"],
         )
         if scoring and interp_kind in TREND_FIT_METHODS:
             st.warning(TREND_FIT_WARNING)
