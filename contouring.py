@@ -46,6 +46,11 @@ BLANK_COVERAGE_FACTOR = 1.5     # ... and >= 1.5 x P90 node-to-data distance ins
 KRIGE_CELL_GROWTH = 1.25        # auto cell growth step to respect KRIGE_MAX_POINTS
 NODATA = -9999.0
 
+PROJECTIONS = {
+    "local": "Local metres (about the survey centre)",
+    "utm": "UTM (WGS 84)",
+}
+
 METHODS = {
     "spline": "Thin-plate spline",
     "kriging": "Ordinary kriging",
@@ -70,11 +75,28 @@ class KrigingError(ContouringError):
 # Units
 # ---------------------------------------------------------------------------
 
-def value_label(mode: str, is_gem: bool) -> str:
-    """Axis / colour-bar label with correct GEM units."""
+UNIT_LABELS = {
+    "EC": "EC (mS/m)",
+    "MS": "MS (10⁻³ SI)",
+    "I": "In-phase (ppm)",
+    "Q": "Quadrature (ppm)",
+}
+AUX_LABELS = {
+    "PowerLn": "Power-line noise (mG)",
+    "QSum": "Quadrature sum (ppm)",
+    "TotalEC[mS/m]": "Total EC (mS/m)",
+    "ECqdiff[mS/m]": "EC from quadrature difference (mS/m)",
+    "MagViscosity[1/1000]": "Magnetic viscosity κ″ (10⁻³ SI)",
+}
+
+
+def value_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
+    """Axis / colour-bar label with correct GEM units; AUX channels carry their own."""
     if not is_gem:
         return f"{mode} (input units)"
-    return "EC (mS/m)" if mode == "EC" else "MS (10⁻³ SI)"
+    if mode == "AUX":
+        return AUX_LABELS.get(channel, str(channel) if channel else "Auxiliary channel")
+    return UNIT_LABELS.get(mode, mode)
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +147,19 @@ def find_coordinate_columns(df: pd.DataFrame, mode: str = "auto") -> tuple[str, 
 
 
 def project_to_local_metres(
-    lon: np.ndarray, lat: np.ndarray
+    lon: np.ndarray, lat: np.ndarray, origin: tuple[float, float] | None = None
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
-    """Equirectangular projection about the centroid. Returns (x, y, (lon0, lat0))."""
+    """
+    Equirectangular projection about *origin* (lon0, lat0), by default the
+    centroid. Returns (x, y, (lon0, lat0)).
+    """
     lon = np.asarray(lon, dtype=float)
     lat = np.asarray(lat, dtype=float)
-    lon0 = float(np.nanmean(lon))
-    lat0 = float(np.nanmean(lat))
+    if origin is None:
+        lon0 = float(np.nanmean(lon))
+        lat0 = float(np.nanmean(lat))
+    else:
+        lon0, lat0 = (float(v) for v in origin)
     x = EARTH_RADIUS_M * math.cos(math.radians(lat0)) * np.radians(lon - lon0)
     y = EARTH_RADIUS_M * np.radians(lat - lat0)
     return x, y, (lon0, lat0)
@@ -515,9 +543,50 @@ class AreaMapResult:
     method: str
     variogram: VariogramFit | None      # kriging only
     blank_distance: float
-    origin: tuple[float, float] | None  # (lon0, lat0) if input was degrees
+    origin: tuple[float, float] | None  # (lon0, lat0) if input was degrees, local projection
     levelled: bool
     n_raw: int
+    epsg: int | None = None             # CRS of x / y when known (UTM or user-given)
+
+
+def survey_xy(
+    df: pd.DataFrame,
+    value_col: str,
+    coord_mode: str = "auto",
+    projection: str = "local",
+    xy_epsg: int | None = None,
+    origin: tuple[float, float] | None = None,
+    epsg: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[float, float] | None, int | None]:
+    """
+    Map coordinates in metres and values of the usable readings.
+
+    Degrees are projected to local metres about *origin* (default: the
+    centroid) or, with projection="utm", to UTM (zone of the centroid unless
+    *epsg* is given). Metre coordinates carry *xy_epsg* when known.
+    Returns (x, y, v, keep mask over df rows, origin, epsg).
+    """
+    x_col, y_col, is_deg = find_coordinate_columns(df, coord_mode)
+    x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
+    v = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
+    x, y, v = x[keep], y[keep], v[keep]
+    if not is_deg:
+        return x, y, v, keep, None, xy_epsg or None
+    fix = ~((x == 0) & (y == 0))  # GPS no-fix rows are logged as (0, 0)
+    keep[keep] = fix
+    x, y, v = x[fix], y[fix], v[fix]
+    if projection == "utm":
+        import gridtools
+
+        if x.size == 0:
+            raise ContouringError("No usable coordinates.")
+        epsg = epsg or gridtools.utm_epsg(float(np.mean(x)), float(np.mean(y)))
+        x, y = gridtools.lonlat_to_epsg(x, y, epsg)
+        return x, y, v, keep, None, epsg
+    x, y, origin = project_to_local_metres(x, y, origin)
+    return x, y, v, keep, origin, None
 
 
 def compute_area_map(
@@ -531,21 +600,21 @@ def compute_area_map(
     smoothing: float = 0.0,
     variogram_model: str = "spherical",
     line_col: str = "Line",
+    projection: str = "local",
+    xy_epsg: int | None = None,
+    origin: tuple[float, float] | None = None,
+    epsg: int | None = None,
+    grid_spec: GridSpec | None = None,
 ) -> AreaMapResult:
-    """Full area-map pipeline for one value column of a raw GEM table."""
-    x_col, y_col, is_deg = find_coordinate_columns(df, coord_mode)
-    x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
-    y = pd.to_numeric(df[y_col], errors="coerce").to_numpy(dtype=float)
-    v = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
-    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(v)
-    x, y, v = x[keep], y[keep], v[keep]
+    """
+    Full area-map pipeline for one value column of a raw GEM table.
 
-    origin = None
-    if is_deg:
-        fix = ~((x == 0) & (y == 0))  # GPS no-fix rows are logged as (0, 0)
-        keep[keep] = fix
-        x, y, v = x[fix], y[fix], v[fix]
-        x, y, origin = project_to_local_metres(x, y)
+    *origin*, *epsg* and *grid_spec* pin the projection and grid, so that two
+    surveys can be gridded on the same nodes (difference maps).
+    """
+    x, y, v, keep, origin, epsg = survey_xy(
+        df, value_col, coord_mode, projection, xy_epsg, origin, epsg
+    )
 
     levelled = False
     if level and line_col in df.columns:
@@ -554,10 +623,13 @@ def compute_area_map(
 
     lines = df[line_col].to_numpy()[keep] if line_col in df.columns else None
     check_geometry(x, y, lines)
-    cell = cell_size if cell_size else auto_cell_size(x, y)
-    spec = make_grid(x, y, cell)
+    if grid_spec is not None:
+        spec = grid_spec
+    else:
+        cell = cell_size if cell_size else auto_cell_size(x, y)
+        spec = make_grid(x, y, cell)
     bx, by, bv = block_median(x, y, v, spec)
-    while method == "kriging" and not cell_size and len(bv) > KRIGE_MAX_POINTS:
+    while method == "kriging" and not cell_size and grid_spec is None and len(bv) > KRIGE_MAX_POINTS:
         cell = round_sig(cell * KRIGE_CELL_GROWTH)
         spec = make_grid(x, y, cell)
         bx, by, bv = block_median(x, y, v, spec)
@@ -579,7 +651,41 @@ def compute_area_map(
     return AreaMapResult(
         spec=spec, z=z, variance=var, bx=bx, by=by, bv=bv, method=method,
         variogram=variogram, blank_distance=dist, origin=origin,
-        levelled=levelled, n_raw=int(keep.sum()),
+        levelled=levelled, n_raw=int(keep.sum()), epsg=epsg,
+    )
+
+
+def compute_difference_map(
+    df_a: pd.DataFrame, df_b: pd.DataFrame, value_col: str, **params
+) -> AreaMapResult:
+    """
+    B minus A on one shared grid (time-lapse). Both surveys use the
+    projection and origin of A; the grid covers both; blank where either is.
+    *params* are those of compute_area_map (cell_size None = automatic from A).
+    """
+    coord = {k: params.get(k) for k in ("coord_mode", "projection", "xy_epsg")}
+    coord = {k: v for k, v in coord.items() if v is not None}
+    mode = coord.get("coord_mode", "auto")
+    if find_coordinate_columns(df_a, mode)[2] != find_coordinate_columns(df_b, mode)[2]:
+        raise ContouringError(
+            "The two surveys use different coordinates (one in degrees, one in metres)."
+        )
+    xa, ya, _, _, origin, epsg = survey_xy(df_a, value_col, **coord)
+    xb, yb, _, _, _, _ = survey_xy(df_b, value_col, origin=origin, epsg=epsg, **coord)
+    if xa.size == 0 or xb.size == 0:
+        raise ContouringError("Not enough points to grid.")
+    cell = params.get("cell_size") or auto_cell_size(xa, ya)
+    spec = make_grid(np.concatenate([xa, xb]), np.concatenate([ya, yb]), cell)
+    pinned = {**params, "origin": origin, "epsg": epsg, "grid_spec": spec}
+    a = compute_area_map(df_a, value_col, **pinned)
+    b = compute_area_map(df_b, value_col, **pinned)
+    z = b.z - a.z
+    return AreaMapResult(
+        spec=spec, z=z, variance=None,
+        bx=np.concatenate([a.bx, b.bx]), by=np.concatenate([a.by, b.by]),
+        bv=np.concatenate([-a.bv, b.bv]), method=a.method, variogram=None,
+        blank_distance=max(a.blank_distance, b.blank_distance), origin=origin,
+        levelled=a.levelled, n_raw=a.n_raw + b.n_raw, epsg=epsg,
     )
 
 
@@ -708,11 +814,19 @@ def make_area_map_figure(
     title: str,
     n_levels: int = 20,
     show_points: bool = True,
+    cmap: str = "viridis",
+    symmetric: bool = False,
 ) -> plt.Figure:
-    """Contour map; for kriging, adds a kriging standard-deviation panel."""
+    """
+    Contour map; for kriging, adds a kriging standard-deviation panel.
+    *symmetric* centres the colour levels on zero (difference maps).
+    """
     spec = result.spec
     # Compute levels first: they may raise, and no figure should be left open.
     levels = contour_levels(result.z, n_levels)
+    if symmetric:
+        m = float(np.max(np.abs(levels[[0, -1]])))
+        levels = np.linspace(-m, m, n_levels + 1)
     std = np.sqrt(result.variance) if result.variance is not None else None
     std_levels = contour_levels(std, n_levels) if std is not None else None
     panels = 2 if std is not None else 1
@@ -722,7 +836,7 @@ def make_area_map_figure(
     ax = axes[0, 0]
     cs = ax.contourf(
         xs, ys, np.ma.masked_invalid(result.z),
-        levels=levels, cmap="viridis", extend="both",
+        levels=levels, cmap=cmap, extend="both",
     )
     fig.colorbar(cs, ax=ax, label=label)
     if show_points:
@@ -738,8 +852,12 @@ def make_area_map_figure(
         fig.colorbar(cs2, ax=ax2, label=f"Kriging std. dev. — {label}")
         ax2.set_title("Kriging standard deviation")
 
-    xlab = "Easting (local m)" if result.origin is not None else "X (m)"
-    ylab = "Northing (local m)" if result.origin is not None else "Y (m)"
+    if result.epsg:
+        xlab, ylab = f"Easting (m, EPSG:{result.epsg})", f"Northing (m, EPSG:{result.epsg})"
+    elif result.origin is not None:
+        xlab, ylab = "Easting (local m)", "Northing (local m)"
+    else:
+        xlab, ylab = "X (m)", "Y (m)"
     for a in axes[0]:
         a.ticklabel_format(useOffset=False, style="plain")  # full map coordinates
         a.set_aspect("equal")
@@ -791,6 +909,11 @@ def grid_to_csv(result: AreaMapResult) -> bytes:
         out["variance"] = result.variance[keep]
     if result.origin is not None:
         out["lon"], out["lat"] = local_metres_to_lonlat(out["x"], out["y"], result.origin)
+    elif result.epsg:
+        from pyproj import Transformer
+
+        t = Transformer.from_crs(result.epsg, 4326, always_xy=True)
+        out["lon"], out["lat"] = t.transform(out["x"], out["y"])
     return pd.DataFrame(out).to_csv(index=False).encode()
 
 
