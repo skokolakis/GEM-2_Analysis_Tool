@@ -236,7 +236,7 @@ All methods create a common distance grid using `np.linspace` and interpolate ea
 | **akima** | 5 | Akima (1970) local spline. Derives slopes from neighbouring points only, making it robust to isolated outliers that would disturb a global cubic spline. |
 | **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. Shown as "polynomial (trend fit)" in the sidebar. |
 
-The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison. Its `Exact interpolant` column is `False` for `polynomial`, whose scores are not comparable with the others.
+The **Batch export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison. Its `Exact interpolant` column is `False` for `polynomial`, whose scores are not comparable with the others.
 
 ---
 
