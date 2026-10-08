@@ -233,7 +233,7 @@ def make_spectrum_figure(spectrum: pd.DataFrame, title: str):
     a1.set_xlabel("Frequency (Hz)")
     a1.set_ylabel("Anomaly (ppm)")
     a1.legend()
-    a1.grid(True, alpha=0.4)
+    a1.grid(True)
     a2.plot(spectrum["I anomaly (ppm)"], spectrum["Q anomaly (ppm)"], "o-")
     for _, row in spectrum.iterrows():
         a2.annotate(f"{row['Frequency (Hz)']:g}", (row["I anomaly (ppm)"], row["Q anomaly (ppm)"]),
@@ -241,7 +241,7 @@ def make_spectrum_figure(spectrum: pd.DataFrame, title: str):
     a2.set_xlabel("In-phase anomaly (ppm)")
     a2.set_ylabel("Quadrature anomaly (ppm)")
     a2.set_title("Argand diagram")
-    a2.grid(True, alpha=0.4)
+    a2.grid(True)
     fig.suptitle(title)
     fig.tight_layout()
     return fig

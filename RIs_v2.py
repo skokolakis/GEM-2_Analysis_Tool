@@ -1,5 +1,5 @@
 """
-UltraRank Frequency — Streamlit UI
+Representative Incision Tool — Streamlit UI
 Refactored from RIs_v1.py
 
 Run with:
@@ -67,6 +67,44 @@ LINE_STYLES = {
     "Dash-dot": "-.",
     "Dotted": ":",
 }
+
+# Publication-style figures for every plot in the app: boxed axes with inward
+# ticks, a light grid, and the colour-blind-safe Okabe & Ito (2008) palette
+# (yellow last: it is faint on white).
+PLOT_STYLE = {
+    "axes.prop_cycle": plt.cycler(color=[
+        "#0072B2", "#D55E00", "#009E73", "#E69F00", "#CC79A7", "#56B4E9", "#000000", "#F0E442",
+    ]),
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 8,
+    "axes.linewidth": 0.8,
+    "axes.edgecolor": "0.15",
+    "axes.titlepad": 8,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.top": True,
+    "ytick.right": True,
+    "xtick.minor.visible": True,
+    "ytick.minor.visible": True,
+    "axes.grid": False,
+    "grid.color": "0.88",
+    "grid.linewidth": 0.6,
+    "grid.linestyle": "-",
+    "lines.linewidth": 1.4,
+    "legend.frameon": True,
+    "legend.fancybox": False,
+    "legend.edgecolor": "0.8",
+    "legend.framealpha": 0.9,
+    "image.cmap": "viridis",
+    "figure.dpi": 110,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
+}
+plt.rcParams.update(PLOT_STYLE)
 
 # GEM instrument format detection (column patterns live in gem_io)
 GEM_EC_PATTERN = gem_io.CHANNEL_PATTERNS["EC"]
@@ -843,7 +881,7 @@ def make_overview_figure(
     ax.set_ylabel(opts.y_label or y_label)
     ax.set_title(opts.plot_title or f"Representative profiles [{mode}] — {file_name}")
     ax.legend(fontsize=8)
-    ax.grid(opts.show_grid, alpha=0.4)
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -913,7 +951,7 @@ def make_readings_figure(table: pd.DataFrame, opts: GraphOptions, title: str) ->
     ax.set_xlabel(opts.x_label or opts.x_column)
     ax.set_ylabel(opts.y_label or opts.y_column)
     ax.set_title(opts.plot_title or f"{title} ({len(groups)} line{'s' if len(groups) != 1 else ''})")
-    ax.grid(opts.show_grid, alpha=0.4)
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -946,9 +984,9 @@ def make_sheet_figure(
             ax.plot(
                 common_dist,
                 interp_df[col].values,
-                color="steelblue",
-                alpha=0.25,
-                linewidth=0.8,
+                color="0.55",
+                alpha=0.4,
+                linewidth=0.7,
                 linestyle=opts.line_style,
             )
 
@@ -956,7 +994,7 @@ def make_sheet_figure(
     ax.plot(
         common_dist,
         rep_prof,
-        color="navy",
+        color="C0",
         linewidth=opts.line_width,
         linestyle=opts.line_style,
         label="Mean",
@@ -969,7 +1007,8 @@ def make_sheet_figure(
             rep_prof - std_prof,
             rep_prof + std_prof,
             alpha=0.2,
-            color="navy",
+            color="C0",
+            linewidth=0,
             label="±1σ",
         )
 
@@ -978,7 +1017,7 @@ def make_sheet_figure(
     ax.set_ylabel(opts.y_label or profile_label(mode, is_gem, sheet_name))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
-    ax.grid(opts.show_grid, alpha=0.4)
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -1216,7 +1255,7 @@ def build_all_methods_batch_xlsx(
 
 def fig_to_png(fig: plt.Figure) -> bytes:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=200)
+    fig.savefig(buf, format="png", dpi=300)
     buf.seek(0)
     return buf.read()
 
@@ -1256,7 +1295,7 @@ def render_graph_editor(
     opts = GraphOptions()
     x_options, y_options = plot_axis_options(table, mode)
 
-    with st.expander("Graph Editor", expanded=False):
+    with st.expander("Graph editor", expanded=False):
         st.markdown("**Plot**")
         pc1, pc2 = st.columns(2)
         opts.x_column = pc1.selectbox(
@@ -1281,7 +1320,7 @@ def render_graph_editor(
         col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
-            st.markdown("**Frequencies / Sheets**")
+            st.markdown("**Frequencies / sheets**")
             selected = st.multiselect(
                 "Visible items",
                 options=all_sheet_names,
@@ -1358,7 +1397,7 @@ def render_graph_editor(
                     st.caption("Y min must be < Y max")
 
         st.divider()
-        st.markdown("**Labels & Title**")
+        st.markdown("**Labels & title**")
         lc1, lc2, lc3 = st.columns(3)
         opts.plot_title = lc1.text_input(
             "Overview plot title",
@@ -1444,9 +1483,9 @@ def _render_mode_section(
 
     # ── Overview plot ────────────────────────────────────────────────────
     if readings:
-        st.markdown(f"### {opts.y_column} against {opts.x_column}")
+        st.markdown(f"#### {opts.y_column} against {opts.x_column}")
     else:
-        st.markdown("### All representative profiles")
+        st.markdown("#### Representative profiles")
         if opts.x_column != PROFILE_X:
             st.caption("Representative profiles are drawn against distance along the line; "
                        "choose a channel for Y to plot against another X.")
@@ -1464,8 +1503,8 @@ def _render_mode_section(
             sc = scores[sheet_name]
             if show_scores:
                 st.markdown(
-                    f"**{sheet_name}** — score `{sc['score']:.2f}` | "
-                    f"amp `{sc['amplitude']:.4g}` | σ `{sc['mean_std']:.4g}` "
+                    f"**{sheet_name}** — score {sc['score']:.2f} · "
+                    f"A = {sc['amplitude']:.4g} · σ = {sc['mean_std']:.4g} "
                     f"({sc['noise_method']}, {sc['n_traces']} trace(s))"
                 )
             else:
@@ -1475,7 +1514,7 @@ def _render_mode_section(
             plt.close(sheet_fig)
 
     # ── Downloads ────────────────────────────────────────────────────────
-    st.markdown("### Downloads")
+    st.markdown("#### Downloads")
     columns = st.columns(3 if show_scores else 2)
 
     with columns[0]:
@@ -1514,7 +1553,7 @@ def _render_channel_list(
     output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str, is_gem: bool
 ) -> None:
     """Channels of one mode without scores: passes and covered distance."""
-    st.markdown("### Channels")
+    st.markdown("#### Channels")
     rows = [
         {
             "Channel": name,
@@ -1552,10 +1591,12 @@ def _render_ranking(scores: dict[str, dict]) -> None:
 
     col_table, col_best = st.columns([3, 1])
     with col_table:
-        st.markdown("### Frequency Ranking")
-        styled = rank_df.style
+        st.markdown("#### Frequency ranking")
+        styled = rank_df.style.format(
+            {"Score": "{:.2f}", "Amplitude": "{:.4g}", "Noise (σ)": "{:.4g}"}, na_rep="—"
+        )
         if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
-            styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn")
+            styled = styled.background_gradient(subset=["Score"], cmap="Blues")
         st.dataframe(
             styled,
             use_container_width=True,
@@ -1563,10 +1604,10 @@ def _render_ranking(scores: dict[str, dict]) -> None:
         )
     with col_best:
         best_name, best_metrics = ranking[0]
+        st.metric("Best frequency", best_name)
         st.metric(
-            "Best frequency",
-            best_name,
-            f"score {best_metrics['score']:.2f}",
+            "Score (A / σ)",
+            f"{best_metrics['score']:.2f}",
             help=(
                 "Score = amplitude / noise (σ). "
                 "Multi-trace: σ = pooled sample std across passes (ddof=1), "
@@ -1913,7 +1954,7 @@ def _render_pseudosection(
     contour: ContourSettings,
     is_gem: bool,
 ) -> None:
-    st.markdown("### Pseudo-section")
+    st.markdown("#### Pseudo-section")
     profiles = {name: df.mean(axis=1, skipna=True) for name, df in output_data.items()}
     try:
         ps = ctr.build_pseudosection(profiles)
@@ -1948,7 +1989,7 @@ def _render_area_map(
     is_gem: bool,
     prep: pipeline.PrepSettings | None = None,
 ) -> None:
-    st.markdown("### Area map")
+    st.markdown("#### Area map")
     if not is_gem:
         st.info(
             "Area maps need a GEM file with X/Y or Lat/Lon coordinates; "
@@ -2073,7 +2114,7 @@ def _render_map_statistics(result: ctr.AreaMapResult, label: str, key: str) -> N
         values = result.z[np.isfinite(result.z)]
         fig, ax = plt.subplots(figsize=(6, 2.5))
         flat = np.ptp(values) <= 1e-9 * max(float(np.abs(values).max()), 1e-12)  # round-off only
-        ax.hist(values, bins=1 if flat else 50, color="steelblue")
+        ax.hist(values, bins=1 if flat else 50, color="C0")
         ax.set_xlabel(label)
         ax.set_ylabel("Grid nodes")
         fig.tight_layout()
@@ -2356,6 +2397,7 @@ def render_gem_results(
         table, _ = prepared_table(file_bytes, file_name, prep)
     except ValueError:
         table = None
+    st.markdown("#### Further analysis")
     ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
     if table is not None:
         ui_tools.render_anomaly_spectrum(table, stem)
@@ -2368,17 +2410,20 @@ def render_gem_results(
 
 def main():
     st.set_page_config(
-        page_title="UltraRank Frequency",
+        page_title="Representative Incision Tool",
         page_icon=None,
         layout="wide",
     )
 
     st.title("Representative Incision Tool")
-    st.caption("Geophysical representative profile builder — EC / MS modes")
+    st.caption(
+        "Multi-frequency EMI (GEM-2) survey analysis — representative profiles, "
+        "frequency ranking and 2D mapping · v2.1"
+    )
 
     # ── Sidebar controls ────────────────────────────────────────────────────
     with st.sidebar:
-        st.header("Settings")
+        st.subheader("Processing")
 
         scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
 
@@ -2421,10 +2466,7 @@ def main():
         prep = replace(prep, coord_mode=contour.coord_mode)   # one coordinate choice for all
 
         st.divider()
-        st.markdown("**Output files are available for download after processing.**")
-
-        st.divider()
-        with st.expander("About", expanded=False):
+        with st.expander("About & methods", expanded=False):
             st.markdown(
                 """
 **Representative Incision Tool** — v2.1
@@ -2577,7 +2619,7 @@ ranked last, with a warning.
 | **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). At a repeated distance within a trace only the first reading is kept. Each trace is left blank outside its own measured range. |
 | **3. Score** (optional) | With **Frequency scoring** on, the mean profile and noise metric are computed as above and frequencies are ranked by descending score. |
 | **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
-| **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch Export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
+| **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
 
 > **Precision note:** GEM CSV exports round EC values to integers
 > and MS to one decimal place, discarding the instrument's full
@@ -2600,7 +2642,7 @@ Seven methods are available from the sidebar dropdown. Each is applied uniformly
 | **akima** | 5 | Akima (1970) local spline. Uses only neighbouring points to set slopes, making it robust to isolated outliers that would disturb a global cubic spline. |
 | **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. |
 
-The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
+The **Batch export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
 
 ---
 
@@ -2814,7 +2856,7 @@ Switch on in the sidebar under **2D contouring**.
     # ── Batch download (shown once, above per-file results) ────────────────
     if batch_results:
         st.divider()
-        st.markdown("### Batch Export")
+        st.subheader("Batch export")
 
         dl_col1, dl_col2 = st.columns(2)
 
