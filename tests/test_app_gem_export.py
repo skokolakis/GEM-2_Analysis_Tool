@@ -167,3 +167,92 @@ def test_gem_file_is_prepared_once(monkeypatch):
     R.process_gem_file(_small_gem_csv(), "once.csv", 0.5, "linear", prep)
     R.prepared_table(_small_gem_csv(), "once.csv", prep)
     assert len(calls) == 1
+
+
+def _gbf_csv():
+    import numpy as np
+
+    rows, t0 = [], 0.0
+    for k in range(3):
+        s = np.linspace(0, 10, 41)
+        t = t0 + 100.0 * np.arange(41)
+        t0 = t[-1] + 5000.0
+        rows.append(pd.DataFrame({"X": float(k), "Y": s, "Mark": 0, "Status": 0, "Time[ms]": t,
+                                  "Ip_15270Hz": 1300.0 + k + np.sin(s), "Qd_15270Hz": 1500.0 + s,
+                                  "EC15270Hz[mS/m]": 37.0 + s + 0.1 * k,
+                                  "MSusc15270Hz[1/1000]": -12.0 + np.cos(s)}))
+    return pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+
+
+def test_gbf_converted_export_loads_with_lines_and_iq():
+    import pipeline
+
+    data = _gbf_csv()
+    assert R.is_gem_format(pd.read_csv(io.BytesIO(data), nrows=5))
+    out, scores, warnings = R.process_gem_file(data, "gbf.csv", 0.5, "linear", pipeline.PrepSettings())
+    assert {m for m, v in out.items() if v} == {"EC", "MS", "I", "Q"}
+    assert out["Q"]["15270Hz"].shape[1] == 3                        # three lines
+    assert any("constant X" in w for w in warnings)
+
+
+def test_graph_editor_axis_choices_and_readings_figure():
+    import pipeline
+
+    table, _ = pipeline.prepare_gem_table(pd.read_csv(io.BytesIO(_gbf_csv())))
+    xs, ys = R.plot_axis_options(table, "Q")
+    assert xs[0] == R.PROFILE_X and ys[0] == R.PROFILE_Y
+    assert {"X", "Y", R.TIME_X} <= set(xs) and "EC15270Hz[mS/m]" in xs
+    assert ys[1] == "Q_15270Hz" and "EC15270Hz[mS/m]" in ys        # the tab's own channels first
+    assert R.plot_axis_options(None, "EC") == ([R.PROFILE_X], [R.PROFILE_Y])
+    opts = R.GraphOptions(x_column=R.TIME_X, y_column="EC15270Hz[mS/m]")
+    fig = R.make_readings_figure(table, opts, "t")
+    assert len(fig.axes[0].lines) == 3 and fig.axes[0].get_xlabel() == R.TIME_X
+    plt.close(fig)
+    cross = R.make_readings_figure(table, R.GraphOptions(x_column="I_15270Hz", y_column="Q_15270Hz"), "t")
+    assert len(cross.axes[0].collections) == 3                       # not monotonic: points, not lines
+    plt.close(cross)
+
+
+def _gbf_app():
+    import numpy as np
+    import pandas as pd
+
+    import RIs_v2 as R
+
+    rows, t0 = [], 0.0
+    for k in range(3):
+        s = np.linspace(0, 10, 41)
+        t = t0 + 100.0 * np.arange(41)
+        t0 = t[-1] + 5000.0
+        rows.append(pd.DataFrame({"X": float(k), "Y": s, "Mark": 0, "Status": 0, "Time[ms]": t,
+                                  "Ip_15270Hz": 1300.0 + k + np.sin(s), "Qd_15270Hz": 1500.0 + s,
+                                  "EC15270Hz[mS/m]": 37.0 + s + 0.1 * k,
+                                  "MSusc15270Hz[1/1000]": -12.0 + np.cos(s)}))
+    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+    R.render_gem_results(data, "gbf.csv", 0.5, "linear", None, False, None)
+
+
+def test_graph_editor_plots_chosen_columns_in_the_app():
+    at = AppTest.from_function(_gbf_app, default_timeout=180)
+    at.run()
+    assert not at.exception
+    at.selectbox(key="ge_xcol_gbf_EC").set_value(R.TIME_X).run()
+    at.selectbox(key="ge_ycol_gbf_EC").set_value("EC15270Hz[mS/m]").run()
+    assert not at.exception
+    assert any("EC15270Hz[mS/m] against Time (s)" in m.value for m in at.markdown)
+
+
+def test_science_choices_have_help_tooltips():
+    import inspect
+
+    import ui_tools
+
+    for module in (R, ui_tools):
+        source = inspect.getsource(module)
+        unused = [k for k in module.SCIENCE_HELP if f'SCIENCE_HELP["{k}"]' not in source]
+        assert not unused
+    at = AppTest.from_file("RIs_v2.py", default_timeout=60)
+    at.run()
+    assert at.toggle(key="ct_area").help == R.SCIENCE_HELP["area_map"]
+    assert at.number_input(key="sen_sep").help == R.SCIENCE_HELP["separation"]
+    assert at.checkbox(key="cor_despike").help == R.SCIENCE_HELP["despike"]

@@ -36,6 +36,99 @@ MULTIHEIGHT_MAX_RMS = 50.0            # ppm, about 10 x the GEM-2 noise; worse f
 LAYER_COLUMNS = ["Thickness (m)", "EC (mS/m)", "MS (10⁻³ SI)"]
 
 
+SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choices
+    "fm_freqs": (
+        "Frequencies to model, comma-separated, e.g. those your GEM-2 records."
+    ),
+    "inv_alpha": (
+        "Starting weight of the smoothness constraint. Each iteration adjusts it (Occam): the "
+        "smoothest model that fits the data within their errors."
+    ),
+    "inv_depth": (
+        "Depth of the top of the half-space. Keep it near the depth of investigation of the "
+        "lowest frequency; deeper layers are not resolved."
+    ),
+    "inv_first": (
+        "Thickness of the top layer; the layers below thicken geometrically down to the "
+        "half-space."
+    ),
+    "inv_floor": (
+        "Smallest data error in ppm, added to the relative error."
+    ),
+    "inv_lateral": (
+        "How strongly neighbouring stations are tied together (Auken & Christiansen, 2004). 0 "
+        "inverts each station on its own."
+    ),
+    "inv_layers": (
+        "Number of model layers; the last is a half-space. More layers give a smoother depth "
+        "profile but take longer."
+    ),
+    "inv_noise": (
+        "Uses the noise measured between repeated passes (σ / √passes) where it is larger "
+        "than the relative error plus floor."
+    ),
+    "inv_rel": (
+        "Data error as a percentage of each quadrature value."
+    ),
+    "inv_step": (
+        "Distance between inverted stations along the line (at most 200 stations)."
+    ),
+    "mh_height": (
+        "Column with the sensor height of each calibration reading."
+    ),
+    "mh_lines": (
+        "Lines recorded over one spot at several heights."
+    ),
+    "sel_corr": (
+        "Two frequencies whose readings correlate more strongly than this carry the same "
+        "information; the lower-scoring one is skipped."
+    ),
+    "sel_count": (
+        "How many of the best-scoring frequencies to keep. The GEM-2 shares its transmitter "
+        "power among its frequencies, so fewer give less noise each; at most three are "
+        "recommended (Vilhelmsen & Døssing, 2022)."
+    ),
+    "soil_channels": (
+        "Channels used for the sampling design and the management zones."
+    ),
+    "soil_log": (
+        "Fits ln(property): suits positive, skewed properties such as salinity."
+    ),
+    "soil_m": (
+        "How soft the zone boundaries are (m in fuzzy c-means): 1.1–1.5 is usual for soils; "
+        "larger values share readings between zones."
+    ),
+    "soil_property": (
+        "Measured soil property to calibrate against EC."
+    ),
+    "soil_radius": (
+        "Survey readings within this distance of a sample are matched to it (their median)."
+    ),
+    "soil_sites": (
+        "Number of sampling sites. They cover the range of the selected channels and are "
+        "spread over the field (Lesch, 2005)."
+    ),
+    "soil_trend": (
+        "Adds x and y terms for a gradual change across the field that conductivity does not "
+        "explain."
+    ),
+    "soil_zones": (
+        "Number of management zones; the lowest FPI and MPE in the table suggest it."
+    ),
+    "sp_background": (
+        "Subtracted from the anomaly: the median of a ring from the radius to twice the "
+        "radius around the point, or of the whole survey."
+    ),
+    "sp_line": (
+        "The file has no coordinates, so distances are along each line: the spectrum is taken "
+        "on one line."
+    ),
+    "sp_radius": (
+        "Readings within this distance of the point make up the anomaly."
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -119,7 +212,8 @@ def render_forward_model(sensor: emphysics.Sensor) -> None:
             "top down; the last row is the half-space (its thickness is ignored). A difference "
             "larger than 3 × the noise level is marked detectable."
         )
-        freq_text = st.text_input("Frequencies (Hz)", DEFAULT_FREQUENCIES, key="fm_freqs")
+        freq_text = st.text_input("Frequencies (Hz)", DEFAULT_FREQUENCIES, key="fm_freqs",
+                                  help=SCIENCE_HELP["fm_freqs"])
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Background**")
@@ -223,13 +317,14 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
         if not labels:
             st.info("Needs I_ and Q_ columns.")
             return
-        height_col = st.text_input("Height column", "Height", key=f"mh_col_{file_key}")
+        height_col = st.text_input("Height column", "Height", key=f"mh_col_{file_key}",
+                                   help=SCIENCE_HELP["mh_height"])
         if height_col not in table.columns:
             st.info(f"No column named '{height_col}'.")
             return
         lines = st.multiselect(
             "Calibration line(s)", sorted(gem_io.line_labels(table["Line"]).unique()), key=f"mh_lines_{file_key}"
-        )
+        , help=SCIENCE_HELP["mh_lines"])
         if not lines:
             return
         state_key = f"mh_result_{file_key}"
@@ -311,17 +406,23 @@ def render_inversion(
             "in I/Q bias the result (Minsley et al., 2014)."
         )
         c1, c2, c3 = st.columns(3)
-        n_layers = c1.slider("Layers", 5, 30, 15, key=f"inv_n_{file_key}")
-        max_depth = c1.number_input("Depth to half-space (m)", 0.5, 50.0, 6.0, key=f"inv_d_{file_key}")
-        first = c1.number_input("First layer (m)", 0.01, 5.0, 0.1, key=f"inv_f_{file_key}")
+        n_layers = c1.slider("Layers", 5, 30, 15, key=f"inv_n_{file_key}", help=SCIENCE_HELP["inv_layers"])
+        max_depth = c1.number_input("Depth to half-space (m)", 0.5, 50.0, 6.0, key=f"inv_d_{file_key}",
+                                    help=SCIENCE_HELP["inv_depth"])
+        first = c1.number_input("First layer (m)", 0.01, 5.0, 0.1, key=f"inv_f_{file_key}",
+                                help=SCIENCE_HELP["inv_first"])
         alpha = c2.number_input("Regularisation (start)", 0.001, 10_000.0, 10.0, format="%.3g",
-                                key=f"inv_a_{file_key}")
+                                key=f"inv_a_{file_key}", help=SCIENCE_HELP["inv_alpha"])
         lateral = c2.number_input("Lateral constraint (0 = independent 1D)", 0.0, 100.0, 1.0,
-                                  key=f"inv_l_{file_key}")
-        step = c2.number_input("Station spacing (m)", 0.1, 100.0, 1.0, key=f"inv_s_{file_key}")
-        rel = c3.number_input("Relative error (%)", 0.1, 50.0, 3.0, key=f"inv_r_{file_key}")
-        floor = c3.number_input("Error floor (ppm)", 0.01, 1000.0, 1.0, key=f"inv_fl_{file_key}")
-        use_noise = c3.checkbox("Use measured noise (between passes)", True, key=f"inv_n2_{file_key}")
+                                  key=f"inv_l_{file_key}", help=SCIENCE_HELP["inv_lateral"])
+        step = c2.number_input("Station spacing (m)", 0.1, 100.0, 1.0, key=f"inv_s_{file_key}",
+                               help=SCIENCE_HELP["inv_step"])
+        rel = c3.number_input("Relative error (%)", 0.1, 50.0, 3.0, key=f"inv_r_{file_key}",
+                              help=SCIENCE_HELP["inv_rel"])
+        floor = c3.number_input("Error floor (ppm)", 0.01, 1000.0, 1.0, key=f"inv_fl_{file_key}",
+                                help=SCIENCE_HELP["inv_floor"])
+        use_noise = c3.checkbox("Use measured noise (between passes)", True, key=f"inv_n2_{file_key}",
+                                help=SCIENCE_HELP["inv_noise"])
         try:
             stations = inversion.station_data(output_data, scores, step, sensor)
         except ValueError as exc:
@@ -406,8 +507,9 @@ def render_frequency_selection(
         )
         c1, c2 = st.columns(2)
         count = c1.slider("Frequencies to keep", 1, max(1, len(scores)), min(3, len(scores)),
-                          key=f"sel_n_{file_key}")
-        limit = c2.slider("Redundant above |r|", 0.5, 1.0, 0.95, step=0.01, key=f"sel_r_{file_key}")
+                          key=f"sel_n_{file_key}", help=SCIENCE_HELP["sel_count"])
+        limit = c2.slider("Redundant above |r|", 0.5, 1.0, 0.95, step=0.01, key=f"sel_r_{file_key}",
+                          help=SCIENCE_HELP["sel_corr"])
         corr = interpret.profile_correlation(output_data)
         table = interpret.select_frequencies(scores, corr, count, limit)
         st.dataframe(table.round(3), hide_index=True, use_container_width=True)
@@ -446,15 +548,17 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
             st.caption("Map metres: the projected coordinates the area map uses for Lat/Lon.")
         else:                                    # distances are along each line: pick one
             labels = gem_io.line_labels(table["Line"])
-            line = c2.selectbox("Line", sorted(labels.unique()), key=f"sp_line_{file_key}")
+            line = c2.selectbox("Line", sorted(labels.unique()), key=f"sp_line_{file_key}",
+                                help=SCIENCE_HELP["sp_line"])
             table = table[(labels == line).to_numpy()]
             d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
             centre = float(c1.number_input("Distance (m)", value=float(d.median()), key=f"sp_d_{file_key}"))
-        radius = c3.number_input("Radius (m)", 0.01, 1000.0, 1.0, key=f"sp_r_{file_key}")
+        radius = c3.number_input("Radius (m)", 0.01, 1000.0, 1.0, key=f"sp_r_{file_key}",
+                                 help=SCIENCE_HELP["sp_radius"])
         background = st.radio("Background", ["annulus", "survey"], horizontal=True,
                               format_func={"annulus": "Ring from radius to 2 × radius",
                                            "survey": "Whole survey"}.get,
-                              key=f"sp_bg_{file_key}")
+                              key=f"sp_bg_{file_key}", help=SCIENCE_HELP["sp_background"])
         try:
             spectrum = interpret.anomaly_spectrum(table, centre, float(radius), background)
         except ValueError as exc:
@@ -520,7 +624,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
         except ctr.ContouringError:
             st.info("Needs X/Y or Lat/Lon coordinates.")
             return
-        chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}")
+        chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}",
+                               help=SCIENCE_HELP["soil_channels"])
         if not chans:
             return
         features = table[chans].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
@@ -531,7 +636,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                 "Sampling sites that span the conductivity range and are spread over the field "
                 "(response-surface design after Lesch, 2005; ESAP-RSSD)."
             )
-            n_sites = st.number_input("Sites", 4, 60, 12, key=f"soil_n_{file_key}")
+            n_sites = st.number_input("Sites", 4, 60, 12, key=f"soil_n_{file_key}",
+                                      help=SCIENCE_HELP["soil_sites"])
             try:
                 sites = soiltools.sampling_design(np.column_stack([x, y]), features, int(n_sites))
             except ValueError as exc:
@@ -576,10 +682,14 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                     st.info("No numeric property column in the samples file.")
                 else:
                     c1, c2 = st.columns(2)
-                    prop = c1.selectbox("Property", props, key=f"soil_prop_{file_key}")
-                    radius = c1.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=f"soil_rad_{file_key}")
-                    log_p = c2.checkbox("Fit the property on a log scale", True, key=f"soil_log_{file_key}")
-                    trend = c2.checkbox("Add a trend surface (x, y)", False, key=f"soil_tr_{file_key}")
+                    prop = c1.selectbox("Property", props, key=f"soil_prop_{file_key}",
+                                        help=SCIENCE_HELP["soil_property"])
+                    radius = c1.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=f"soil_rad_{file_key}",
+                                             help=SCIENCE_HELP["soil_radius"])
+                    log_p = c2.checkbox("Fit the property on a log scale", True, key=f"soil_log_{file_key}",
+                                        help=SCIENCE_HELP["soil_log"])
+                    trend = c2.checkbox("Add a trend surface (x, y)", False, key=f"soil_tr_{file_key}",
+                                        help=SCIENCE_HELP["soil_trend"])
                     try:
                         model = soiltools.fit_property_model(table, samples, prop, chans, radius, log_p, trend)
                     except (ValueError, ctr.ContouringError) as exc:
@@ -618,13 +728,14 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                 st.info("Not enough complete readings.")
                 return
             data = soiltools.robust_standardise(features[ok])
-            m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}")
+            m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}",
+                          help=SCIENCE_HELP["soil_m"])
             rng = np.random.default_rng(0)
             subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
             indices = _zone_table(subset, float(m))
             st.dataframe(indices.round(4), hide_index=True)
             best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
-            c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}")
+            c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}", help=SCIENCE_HELP["soil_zones"])
             u = _zone_fit(data, int(c), float(m))
             zone = u.argmax(axis=1) + 1
             if (u.sum(axis=0) < 0.01 * len(u)).any():

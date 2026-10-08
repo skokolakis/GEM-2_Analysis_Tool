@@ -107,8 +107,8 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
     line. Raises ValueError (ContouringError) when distances cannot be built.
     """
     prep = prep or PrepSettings()
-    messages: list[str] = []
-    df = raw.copy()
+    df, messages = gem_io.normalise_columns(raw)     # other export layouts -> WinGEM columns
+    df = df.copy()
 
     # Reading-order distances count every logged reading, so they are computed
     # before flagged, filtered or excluded readings are dropped.
