@@ -612,6 +612,45 @@ def _zone_fit(data: np.ndarray, c: int, m: float) -> np.ndarray:
     return soiltools.fuzzy_cmeans(data, c, m)[0]
 
 
+PLAN_VIEW_WIDTH = 7.0       # in; plan-view maps of the soil tools (height follows the survey's shape)
+
+
+def plan_view(x: np.ndarray, y: np.ndarray, width: float = PLAN_VIEW_WIDTH):
+    """
+    Figure and axes for an equal-axis map of the readings, sized to the
+    survey's shape (height 3-9 in) so the map fills the figure instead of
+    sitting as a strip in a fixed landscape frame.
+    """
+    dx = float(np.nanmax(x) - np.nanmin(x)) or 1.0
+    dy = float(np.nanmax(y) - np.nanmin(y)) or 1.0
+    fig, ax = plt.subplots(figsize=(width, float(np.clip(0.85 * width * dy / dx, 3.0, 9.0))))
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    return fig, ax
+
+
+def zone_figure(x: np.ndarray, y: np.ndarray, zone: np.ndarray, n_zones: int):
+    """Map of the management zones with one colour, and one colour-bar entry, per zone used."""
+    from matplotlib.colors import ListedColormap
+
+    fig, ax = plan_view(x, y)
+    cmap = ListedColormap(plt.get_cmap("tab10").colors[:n_zones])
+    sc = ax.scatter(x, y, c=zone, s=4, cmap=cmap, vmin=0.5, vmax=n_zones + 0.5)
+    fig.colorbar(sc, ax=ax, ticks=range(1, n_zones + 1), label="Zone")
+    fig.tight_layout()
+    return fig
+
+
+def show_plan_view(fig) -> None:
+    """Shows a plan-view map at its own size: stretched to the page width it looks zoomed in."""
+    try:
+        st.pyplot(fig, width="content")
+    except TypeError:                            # Streamlit before the width argument
+        st.pyplot(fig, use_container_width=False)
+    plt.close(fig)
+
+
 def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
     """Sampling design, calibration of a soil property, and management zones from EC channels."""
     with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
@@ -646,17 +685,13 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                 extra = _lonlat_columns(sites["x"].to_numpy(), sites["y"].to_numpy(), origin)
                 sites = sites.assign(**extra)
                 st.dataframe(sites.round(4), hide_index=True, use_container_width=True)
-                fig, ax = plt.subplots(figsize=(6, 4))
+                fig, ax = plan_view(x, y)
                 ax.scatter(x, y, s=2, c="0.7")
                 ax.scatter(sites["x"], sites["y"], c="red", s=25)
                 for k, (sx, sy) in enumerate(zip(sites["x"], sites["y"]), 1):
                     ax.annotate(str(k), (sx, sy), fontsize=8, xytext=(3, 3), textcoords="offset points")
-                ax.set_aspect("equal")
-                ax.set_xlabel("x (m)")
-                ax.set_ylabel("y (m)")
                 fig.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
+                show_plan_view(fig)
                 st.download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
                                    file_name=f"{file_key}_sampling_sites.csv", mime="text/csv",
                                    key=f"soil_dl_sites_{file_key}")
@@ -740,15 +775,7 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             zone = u.argmax(axis=1) + 1
             if (u.sum(axis=0) < 0.01 * len(u)).any():
                 st.warning("A zone holds less than 1 % of the readings: try fewer zones or a larger exponent.")
-            fig, ax = plt.subplots(figsize=(6, 4))
-            sc = ax.scatter(x[ok], y[ok], c=zone, s=4, cmap="tab10", vmin=0.5, vmax=10.5)
-            ax.set_aspect("equal")
-            ax.set_xlabel("x (m)")
-            ax.set_ylabel("y (m)")
-            fig.colorbar(sc, ax=ax, ticks=range(1, int(c) + 1), label="Zone")
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            show_plan_view(zone_figure(x[ok], y[ok], zone, int(c)))
             out = pd.DataFrame({"x": x[ok], "y": y[ok], **_lonlat_columns(x[ok], y[ok], origin), "zone": zone,
                                 **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
             st.download_button("Zones (.csv)", out.to_csv(index=False).encode(),
