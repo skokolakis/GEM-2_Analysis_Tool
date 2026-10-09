@@ -17,7 +17,7 @@ The tool can be also be used online via https://gemris.streamlit.app
 - **Seven interpolation methods**: Linear, cubic, nearest, quadratic, PCHIP, Akima, and polynomial
 - **Batch export**: Single XLSX packaging all files and modes; or run all 7 methods simultaneously for direct comparison
 - **Data quality warnings**: Auto-detects and warns about precision loss in CSV exports
-- **2D contouring** (optional): plan-view area maps (thin-plate spline, ordinary kriging or linear gridding) and distance × frequency pseudo-sections
+- **2D contouring** (optional): plan-view area maps with the gridding methods of Surfer (kriging, minimum curvature, inverse distance, natural neighbour, radial basis functions and more) and Surfer-style colour options, and distance × frequency pseudo-sections
 
 ---
 
@@ -264,11 +264,32 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
    | Thin-plate spline | Minimum-curvature (biharmonic) surface (Briggs, 1974; Sandwell, 1987). Smoothing 0 interpolates exactly. |
    | Ordinary kriging | Widely used for mapping apparent electrical conductivity (Corwin & Lesch, 2005); for regression / cokriging alternatives that use calibration samples see Lesch et al. (1995). The single omnidirectional variogram (spherical / exponential / gaussian) is fitted to log-spaced lag classes up to half the maximum distance with Cressie (1985) weights, which lets the nugget pick up measurement noise where the model shape allows (spherical and exponential models, being linear near the origin, can absorb noise into their slope; check the fitted nugget shown under the map) (Oliver & Webster, 2014); a small nugget floor keeps the gaussian model numerically stable. Kriging needs roughly 30 or more block medians to fit a variogram. Kriging uses the 64 nearest points. A second panel maps the kriging standard deviation. Uses at most 4,000 block medians: with the automatic cell size the cell grows until that holds; with a manual cell size, choose a larger cell if the limit is hit. |
    | Linear | Delaunay triangulation; blank outside the data hull. |
+   | Minimum curvature | The smoothest surface through the data (Briggs, 1974), the usual choice for geophysical maps. Tension 0–0.95 (Smith & Wessel, 1990): 0 is pure minimum curvature, which can overshoot between readings; higher tension pulls the surface tight between them. Solved directly as one sparse least-squares system on the grid (edges free), so it is limited to 300,000 grid nodes. |
+   | Inverse distance to a power | Weighted mean of the 64 nearest block medians, weights 1 / (d² + δ²)^(power/2). Power 2 by default; a smoothing distance δ > 0 stops the surface passing exactly through readings and softens the bull's-eyes this method leaves around them. |
+   | Radial basis function | Multiquadric (Surfer's default), inverse multiquadric, natural cubic spline (r³) or thin-plate spline, with the 64 nearest points above 2,000 block medians. The multiquadric shape follows Surfer: R² = (diagonal of the data extent)² / (25 n). |
+   | Natural neighbour | Sibson weights — the area each reading would give up to a new point — computed in the discrete form of Park et al. (2006) on a raster four times finer than the grid. Smooth, never beyond the data range, and blank-free inside the data. |
+   | Nearest neighbour | Value of the closest block median: no smoothing, useful for dense regular grids. |
+   | Modified Shepard's method | Inverse-distance blend of local quadratics fitted around every reading (Franke & Nielson, 1980), with 13 points per quadratic and 19 for the weights as in Surfer, so it follows trends that plain inverse distance flattens. |
+   | Local polynomial | A polynomial of order 1–3 fitted around each node to its 64 nearest block medians, weights (1 − d / R)^power. |
+   | Polynomial regression | One trend surface (order 1–3) for the whole area, to show or remove a regional trend. |
+   | Moving average | Mean of the block medians within a search radius (automatic: a circle that holds about 16 readings at the survey's mean density). |
+   | Data metrics | A statistic of the block medians within the search radius: number, density, median, minimum, maximum, range or standard deviation. The number and density show the survey coverage. Not cross-validated, since these are summaries rather than estimates. |
+
+   Minimum curvature and natural neighbour are computed on the grid itself; cross-validation grids each training fold and reads it at the held-out points.
 
 5. **Blanking** — grid nodes farther than the blanking distance from any block median are left blank. The default keeps the gaps between survey lines filled: the larger of 2 × median point spacing and 1.5 × the 90th-percentile distance from grid nodes inside the survey to the nearest data point.
 6. **Cross-validation** — 5-fold RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Folds are random, so along densely sampled lines the errors are optimistic; use them to rank methods rather than as absolute accuracy.
 
-Contour colours span the 2nd–98th percentile of the gridded values; values beyond that range are shown in the end colours.
+**Colours** (sidebar, shared by the area map and the pseudo-section):
+
+| Option | Choices |
+|---|---|
+| Colour map | Viridis (default), Rainbow (Surfer), Turbo, Jet, Plasma, Inferno, Magma, Cividis, Terrain, Spectral, Red–yellow–blue, Red–blue, Greyscale; each can be reversed. Viridis and cividis change evenly in brightness; rainbow scales show more detail at a glance but make some value steps look like edges. |
+| Display | Filled contours, or a continuous image that colours every grid cell by its own value (Surfer's image map). Contour lines can be drawn on top of either. |
+| Colour range | Percentiles (default 2nd–98th), the full data range (min–max, as Surfer), or fixed values so several maps share one scale. Values beyond the range take the end colours (arrows on the colour bar). |
+| Colour scale | Linear; logarithmic (positive values only), for skewed data such as EC; or histogram-equalised, where each colour covers the same share of the map. |
+
+To reproduce a Surfer image map: Rainbow (Surfer), continuous image, full data range, linear scale, with minimum curvature or kriging gridding.
 
 **Projection.** `Lat`/`Lon` are projected to local metres about the survey centre (default) or to **UTM (WGS 84)**, zone of the survey centre (sidebar *Projection of Lat/Lon*). For files whose `X`/`Y` are already projected, enter their **EPSG code** (e.g. 32634 for UTM 34N) so the exports carry it.
 
@@ -483,6 +504,14 @@ RIs_v2.py
 40. Boydell, B. & McBratney, A.B. (2002). Identifying potential within-field management zones from cotton-yield estimates. *Precision Agriculture*, **3**, 9–23. https://doi.org/10.1023/A:1013318002609
 
 41. Bezdek, J.C. (1981). *Pattern Recognition with Fuzzy Objective Function Algorithms*. Plenum Press, New York.
+
+42. Smith, W.H.F. & Wessel, P. (1990). Gridding with continuous curvature splines in tension. *Geophysics*, **55**(3), 293–305. https://doi.org/10.1190/1.1442837
+
+43. Franke, R. & Nielson, G. (1980). Smooth interpolation of large sets of scattered data. *International Journal for Numerical Methods in Engineering*, **15**(11), 1691–1704. https://doi.org/10.1002/nme.1620151110
+
+44. Park, S.W., Linsen, L., Kreylos, O., Owens, J.D. & Hamann, B. (2006). Discrete Sibson interpolation. *IEEE Transactions on Visualization and Computer Graphics*, **12**(2), 243–253. https://doi.org/10.1109/TVCG.2006.27
+
+45. Golden Software (n.d.). *Surfer User's Guide*: Gridding methods. Golden, CO.
 
 ---
 

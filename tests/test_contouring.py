@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
+from scipy.interpolate import RegularGridInterpolator  # noqa: E402
 
 import contouring as C  # noqa: E402
 
@@ -299,7 +300,7 @@ def test_linear_is_nan_outside_convex_hull():
 def test_predict_unknown_method():
     with pytest.raises(ValueError, match="Unknown gridding method"):
         C.predict(np.arange(3.0), np.arange(3.0), np.arange(3.0),
-                  np.array([0.0]), np.array([0.0]), "idw")
+                  np.array([0.0]), np.array([0.0]), "bogus")
 
 
 def test_blank_far_masks_distant_nodes():
@@ -666,3 +667,204 @@ def test_kriging_pure_noise_stays_within_noise(model):
     cv = C.cross_validate(res.bx, res.by, res.bv, "kriging", variogram=res.variogram)
     assert cv["rmse"] < 1.5          # block medians of 2 readings: sigma ~0.7
     assert np.nanmax(np.abs(res.z)) < 5.0
+
+
+# ---------------------------------------------------------------------------
+# Surfer gridding methods
+# ---------------------------------------------------------------------------
+
+BUMP_RMSE = {          # cell 1 m, lines 5 m apart; smoothing / non-exact methods get more room
+    "spline": 0.05, "kriging": 0.1, "linear": 0.2, "min_curvature": 0.05, "idw": 0.5,
+    "rbf": 0.1, "natural_neighbor": 0.2, "nearest": 0.6, "shepard": 0.1,
+    "local_polynomial": 0.5, "moving_average": 0.5,
+}
+
+
+@pytest.mark.parametrize("method", list(BUMP_RMSE))
+def test_every_method_maps_the_bump(method):
+    res = C.compute_area_map(line_survey(), VALUE_COL, method=method, cell_size=1.0)
+    assert bump_rmse(res) < BUMP_RMSE[method]
+    assert res.options == C.method_options(method)
+    cv = C.cross_validate(res.bx, res.by, res.bv, method, variogram=res.variogram,
+                          options=res.options, spec=res.spec)
+    assert cv["n"] > 0 and np.isfinite(cv["rmse"])
+
+
+@pytest.mark.parametrize("method,options,tol", [
+    ("min_curvature", {"tension": 0.0}, 1e-6),
+    ("local_polynomial", {"order": 1}, 1e-6),
+    ("polynomial", {"order": 1}, 1e-6),
+    ("natural_neighbor", {}, 0.2),
+])
+def test_methods_reproduce_a_plane_inside_the_survey(method, options, tol):
+    df = line_survey()
+    df[VALUE_COL] = 2.0 * df["X"] + 3.0 * df["Y"]
+    res = C.compute_area_map(df, VALUE_COL, method=method, cell_size=1.0, options=options)
+    xx, yy = np.meshgrid(res.spec.xs, res.spec.ys)
+    inner = np.isfinite(res.z) & (xx > 3) & (xx < 47) & (yy > 3) & (yy < 47)
+    assert np.max(np.abs(res.z - (2.0 * xx + 3.0 * yy))[inner]) < tol
+
+
+@pytest.mark.parametrize("tension", [0.0, 0.5, 0.9])
+def test_min_curvature_honours_the_readings_at_any_tension(tension):
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="min_curvature", cell_size=1.0,
+                             options={"tension": tension})
+    at_points = RegularGridInterpolator((res.spec.ys, res.spec.xs), res.z)(
+        np.column_stack([res.by, res.bx]).clip([res.spec.ys[0], res.spec.xs[0]],
+                                               [res.spec.ys[-1], res.spec.xs[-1]]))
+    inside = (res.bx > res.spec.xs[0]) & (res.bx < res.spec.xs[-1])
+    assert np.max(np.abs(at_points - res.bv)[inside]) < 0.01
+
+
+def test_polynomial_orders_fit_their_own_surfaces():
+    rng = np.random.default_rng(1)
+    px, py = rng.uniform(0, 10, 200), rng.uniform(0, 10, 200)
+    f = 1 + px - 2 * py + 0.3 * px * py - 0.1 * py ** 2 + 0.02 * px ** 3
+    q = np.array([2.0, 7.5]), np.array([3.0, 6.0])
+    exact = 1 + q[0] - 2 * q[1] + 0.3 * q[0] * q[1] - 0.1 * q[1] ** 2 + 0.02 * q[0] ** 3
+    est, _ = C.predict(px, py, f, *q, "polynomial", options={"order": 3})
+    assert np.allclose(est, exact)
+    est, _ = C.predict(px, py, f, *q, "polynomial", options={"order": 1})
+    assert not np.allclose(est, exact)
+    with pytest.raises(C.ContouringError, match="order"):
+        C.predict(px, py, f, *q, "polynomial", options={"order": 4})
+
+
+def test_exact_methods_pass_through_readings():
+    rng = np.random.default_rng(2)
+    px, py, pv = rng.uniform(0, 10, 50), rng.uniform(0, 10, 50), rng.normal(0, 1, 50)
+    for method in ("idw", "nearest", "shepard", "rbf"):
+        est, _ = C.predict(px, py, pv, px[:5], py[:5], method)
+        assert np.allclose(est, pv[:5], atol=1e-6), method
+
+
+def test_idw_power_and_smoothing():
+    px, py, pv = np.array([0.0, 10.0]), np.array([0.0, 0.0]), np.array([0.0, 10.0])
+    q = np.array([2.5]), np.array([0.0])
+    low, _ = C.predict(px, py, pv, *q, "idw", options={"power": 1.0})
+    high, _ = C.predict(px, py, pv, *q, "idw", options={"power": 4.0})
+    assert high[0] < low[0] < 5.0                     # higher power: the near reading dominates
+    on, _ = C.predict(px, py, pv, np.array([0.0]), np.array([0.0]), "idw",
+                      options={"delta": 5.0})
+    assert on[0] > 0.0                                # smoothing no longer honours the reading
+    with pytest.raises(C.ContouringError, match="power"):
+        C.predict(px, py, pv, *q, "idw", options={"power": 0.0})
+
+
+def test_moving_average_and_data_metrics():
+    px = np.array([0.0, 1.0, 0.0, 1.0, 10.0])
+    py = np.array([0.0, 0.0, 1.0, 1.0, 10.0])
+    pv = np.array([1.0, 2.0, 3.0, 6.0, 100.0])
+    q = np.array([0.5, 20.0]), np.array([0.5, 20.0])
+    mean, _ = C.predict(px, py, pv, *q, "moving_average", options={"radius": 2.0})
+    assert mean[0] == pytest.approx(3.0) and np.isnan(mean[1])
+
+    def metric(stat):
+        return C.predict(px, py, pv, *q, "metrics", options={"statistic": stat, "radius": 2.0})[0]
+
+    assert metric("count").tolist() == [4.0, 0.0]
+    assert metric("density")[0] == pytest.approx(4 / (math.pi * 4.0))
+    assert metric("median")[0] == pytest.approx(2.5)
+    assert metric("minimum")[0] == 1.0 and metric("maximum")[0] == 6.0
+    assert metric("range")[0] == 5.0
+    assert metric("std")[0] == pytest.approx(np.std([1, 2, 3, 6], ddof=1))
+
+
+def test_rbf_kernels_and_titles():
+    for kernel in C.RBF_KERNELS:
+        res = C.compute_area_map(line_survey(), VALUE_COL, method="rbf", cell_size=2.0,
+                                 options={"kernel": kernel})
+        assert bump_rmse(res) < 0.5, kernel           # inverse multiquadric is the flattest
+        assert C.RBF_KERNELS[kernel].lower() in C.method_title(res)
+
+
+def test_metrics_label_title_and_no_cross_validation():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="metrics", cell_size=2.0,
+                             options={"statistic": "count"})
+    assert C.result_label(res, "EC (mS/m)") == "Readings within the search radius"
+    assert C.method_title(res) == "Data metrics: number of readings"
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="metrics", cell_size=2.0,
+                             options={"statistic": "median"})
+    assert C.result_label(res, "EC (mS/m)") == "Median of EC (mS/m)"
+    with pytest.raises(C.ContouringError, match="summaries"):
+        C.cross_validate(res.bx, res.by, res.bv, "metrics", options=res.options)
+
+
+def test_grid_methods_need_the_grid_and_limit_its_size():
+    with pytest.raises(ValueError, match="predict_grid"):
+        C.predict(np.arange(3.0), np.arange(3.0), np.arange(3.0),
+                  np.array([0.0]), np.array([0.0]), "min_curvature")
+    spec = C.GridSpec(x0=0.0, y0=0.0, cell=1.0, nx=1000, ny=1000)
+    with pytest.raises(C.GridTooLargeError, match="Minimum curvature"):
+        C.predict_grid(np.arange(3.0), np.arange(3.0), np.arange(3.0), spec, "min_curvature")
+    with pytest.raises(C.ContouringError, match="tension"):
+        C.compute_area_map(line_survey(), VALUE_COL, method="min_curvature", cell_size=2.0,
+                           options={"tension": 1.0})
+
+
+def test_method_options_fill_defaults_and_ignore_other_keys():
+    assert C.method_options("idw", {"power": 3.0, "kernel": "cubic"}) == {"power": 3.0, "delta": 0.0}
+    assert C.method_options("spline", {"power": 3.0}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+
+def test_colour_ranges():
+    v = np.arange(101.0)
+    assert C.colour_levels(v, C.ColourStyle(n_levels=4)).tolist() == [2, 26, 50, 74, 98]
+    lv = C.colour_levels(v, C.ColourStyle(n_levels=4, range_mode="minmax"))
+    assert lv[0] == 0 and lv[-1] == 100
+    lv = C.colour_levels(v, C.ColourStyle(n_levels=4, percentiles=(10, 90)))
+    assert lv[0] == 10 and lv[-1] == 90
+    lv = C.colour_levels(v, C.ColourStyle(n_levels=4, range_mode="fixed", vmin=20, vmax=40))
+    assert lv.tolist() == [20, 25, 30, 35, 40]
+    with pytest.raises(C.ContouringError, match="maximum"):
+        C.colour_levels(v, C.ColourStyle(range_mode="fixed", vmin=40, vmax=20))
+    with pytest.raises(C.ContouringError, match="percentiles"):
+        C.colour_levels(v, C.ColourStyle(percentiles=(90, 10)))
+
+
+def test_colour_scales():
+    v = np.exp(np.linspace(0, 5, 500))                   # skewed, like EC
+    lv = C.colour_levels(v, C.ColourStyle(n_levels=5, scale="log", range_mode="minmax"))
+    assert np.allclose(np.diff(np.log(lv)), np.log(lv[1] / lv[0]))
+    eq = C.colour_levels(v, C.ColourStyle(n_levels=5, scale="equalised", range_mode="minmax"))
+    counts = np.histogram(v, eq)[0]
+    assert counts.max() - counts.min() <= 2              # equal share of values per colour
+    with pytest.raises(C.ContouringError, match="positive"):
+        C.colour_levels(v - 10, C.ColourStyle(scale="log"))
+    flat = C.colour_levels(np.full(50, 3.0), C.ColourStyle(scale="equalised"))
+    assert np.all(np.diff(flat) > 0)
+
+
+def test_colour_maps_including_surfer_rainbow():
+    for name in C.COLOUR_MAPS:
+        assert C.colour_map(name).N > 0
+    rainbow = C.colour_map("surfer_rainbow")
+    assert rainbow(0.0)[2] > rainbow(0.0)[1] and rainbow(1.0)[0] == 1.0   # purple-blue to red
+    assert C.colour_map("surfer_rainbow", reverse=True)(0.0) == rainbow(1.0)
+
+
+@pytest.mark.parametrize("display", list(C.MAP_DISPLAYS))
+@pytest.mark.parametrize("scale", list(C.COLOUR_SCALES))
+def test_area_map_figure_displays_and_scales(display, scale):
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="min_curvature", cell_size=2.0)
+    style = C.ColourStyle(cmap="surfer_rainbow", display=display, scale=scale,
+                          range_mode="minmax", contour_lines=True, n_levels=12)
+    fig = C.make_area_map_figure(res, "EC (mS/m)", "t", style=style, show_points=False)
+    ax = fig.axes[0]
+    assert ax.get_xlim() == (res.spec.x0, res.spec.x0 + res.spec.nx * res.spec.cell)
+    assert len(fig.axes) == 2
+    fig.canvas.draw()                                     # norms and colour bar render
+    plt.close(fig)
+
+
+def test_pseudosection_figure_takes_a_colour_style():
+    s = pd.Series(np.arange(1.0, 11.0), index=np.arange(10.0))
+    ps = C.build_pseudosection({"1000Hz": s, "10000Hz": s + 1})
+    fig = C.make_pseudosection_figure(ps, "EC", "t", style=C.ColourStyle(
+        display="image", scale="log", cmap="turbo", reverse=True))
+    fig.canvas.draw()
+    plt.close(fig)

@@ -11,12 +11,15 @@ from __future__ import annotations
 import io
 import math
 import re
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field, replace
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.interpolate import RBFInterpolator, griddata
+from matplotlib.colors import BoundaryNorm, FuncNorm, LinearSegmentedColormap, LogNorm, Normalize
+from scipy.interpolate import RBFInterpolator, RegularGridInterpolator, griddata
 from scipy.optimize import curve_fit
 from scipy.spatial import Delaunay, QhullError, cKDTree
 from scipy.spatial.distance import pdist
@@ -51,12 +54,89 @@ PROJECTIONS = {
     "utm": "UTM (WGS 84)",
 }
 
+# The gridding methods of Surfer (Golden Software), in the order of its Grid Data dialog
+# after the original three.
 METHODS = {
     "spline": "Thin-plate spline",
     "kriging": "Ordinary kriging",
     "linear": "Linear (Delaunay)",
+    "min_curvature": "Minimum curvature",
+    "idw": "Inverse distance to a power",
+    "rbf": "Radial basis function",
+    "natural_neighbor": "Natural neighbour",
+    "nearest": "Nearest neighbour",
+    "shepard": "Modified Shepard's method",
+    "local_polynomial": "Local polynomial",
+    "polynomial": "Polynomial regression (trend surface)",
+    "moving_average": "Moving average",
+    "metrics": "Data metrics",
+}
+GRID_METHODS = ("min_curvature", "natural_neighbor")   # solved on the grid nodes themselves
+METHOD_DEFAULTS = {                                      # Surfer's defaults where it has them
+    "idw": {"power": 2.0, "delta": 0.0},
+    "min_curvature": {"tension": 0.0},
+    "rbf": {"kernel": "multiquadric"},
+    "local_polynomial": {"order": 1, "power": 2.0},
+    "polynomial": {"order": 1},
+    "moving_average": {"radius": 0.0},
+    "metrics": {"statistic": "count", "radius": 0.0},
+}
+RBF_KERNELS = {
+    "multiquadric": "Multiquadric",
+    "inverse_multiquadric": "Inverse multiquadric",
+    "cubic": "Natural cubic spline (r³)",
+    "thin_plate_spline": "Thin-plate spline",
+}
+METRICS = {
+    "count": "Number of readings",
+    "density": "Readings per m²",
+    "median": "Median",
+    "minimum": "Minimum",
+    "maximum": "Maximum",
+    "range": "Range",
+    "std": "Standard deviation",
 }
 VARIOGRAM_MODELS = ["spherical", "exponential", "gaussian"]
+SEARCH_POINTS = 64              # readings used per estimate (Surfer's default maximum)
+METRICS_MAX_POINTS = 256        # readings counted per node by the data metrics
+MOVING_AVERAGE_POINTS = 16      # the automatic search radius holds about this many readings
+MIN_CURVATURE_MAX_NODES = 300_000   # sparse direct solve; larger grids take too long
+MIN_CURVATURE_DATA_WEIGHT = 1e3     # data misfit weight against the curvature energy
+SHEPARD_QUADRATIC_POINTS = 13   # Franke & Nielson (1980) / Renka (1988) defaults, as in Surfer
+SHEPARD_WEIGHT_POINTS = 19
+NATURAL_NEIGHBOUR_MAX_WORK = 2e8    # node visits of the discrete Sibson scatter
+NATURAL_NEIGHBOUR_SUPERSAMPLE = 4   # raster points per cell side for the stolen areas
+
+COLOUR_MAPS = {
+    "viridis": "Viridis (perceptually uniform)",
+    "surfer_rainbow": "Rainbow (Surfer)",
+    "turbo": "Turbo (smooth rainbow)",
+    "jet": "Jet",
+    "plasma": "Plasma",
+    "inferno": "Inferno",
+    "magma": "Magma",
+    "cividis": "Cividis (colour-blind safe)",
+    "terrain": "Terrain",
+    "Spectral_r": "Spectral",
+    "RdYlBu_r": "Red–yellow–blue",
+    "RdBu_r": "Red–blue (diverging)",
+    "gray": "Greyscale",
+}
+SURFER_RAINBOW = ["#a87cf0", "#2020ff", "#00b4ff", "#00e000", "#ffff00", "#ff8000", "#ff0000"]
+COLOUR_RANGES = {
+    "percentile": "Percentiles",
+    "minmax": "Full data range (min–max)",
+    "fixed": "Fixed values",
+}
+COLOUR_SCALES = {
+    "linear": "Linear",
+    "log": "Logarithmic",
+    "equalised": "Histogram-equalised",
+}
+MAP_DISPLAYS = {
+    "filled": "Filled contours",
+    "image": "Continuous image",
+}
 
 
 class ContouringError(ValueError):
@@ -401,6 +481,13 @@ def fit_variogram(
 # Interpolation
 # ---------------------------------------------------------------------------
 
+def method_options(method: str, options: dict | None = None) -> dict:
+    """The settings of *method*: its METHOD_DEFAULTS updated by *options* (other keys ignored)."""
+    out = dict(METHOD_DEFAULTS.get(method, {}))
+    out.update({k: v for k, v in (options or {}).items() if k in out})
+    return out
+
+
 def predict(
     px: np.ndarray,
     py: np.ndarray,
@@ -411,29 +498,36 @@ def predict(
     smoothing: float = 0.0,
     variogram: VariogramFit | None = None,
     variogram_model: str = "spherical",
+    options: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Interpolate scattered (px, py, pv) at query points (qx, qy).
 
     Returns (estimate, variance); variance is None except for kriging. For
-    kriging, *variogram* is fitted from the data when not supplied.
+    kriging, *variogram* is fitted from the data when not supplied. *options*
+    are the method's settings (see METHOD_DEFAULTS). GRID_METHODS estimate
+    grid nodes only: use predict_grid for them.
     Coordinates are centred on the data centroid for numerical conditioning.
     """
+    if method in GRID_METHODS:
+        raise ValueError(f"{METHODS[method]} works on grid nodes: use predict_grid.")
     px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
     cx, cy = float(np.mean(px)), float(np.mean(py))
     p = np.column_stack([px - cx, py - cy])
     q = np.column_stack([np.ravel(qx) - cx, np.ravel(qy) - cy])
+    opts = method_options(method, options)
 
-    if method in ("spline", "linear"):
+    if method in ("spline", "rbf", "linear"):
         try:
-            if method == "spline":
-                neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
-                rbf = RBFInterpolator(
-                    p, pv, kernel="thin_plate_spline", smoothing=smoothing,
-                    neighbors=neighbours,
-                )
-                return rbf(q), None
-            return griddata(p, pv, q, method="linear"), None
+            if method == "linear":
+                return griddata(p, pv, q, method="linear"), None
+            kernel = "thin_plate_spline" if method == "spline" else opts["kernel"]
+            neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
+            shape = {"epsilon": _rbf_epsilon(p)} if "multiquadric" in kernel else {}
+            rbf = RBFInterpolator(
+                p, pv, kernel=kernel, smoothing=smoothing, neighbors=neighbours, **shape,
+            )
+            return rbf(q), None
         except (np.linalg.LinAlgError, QhullError, ValueError) as exc:
             raise ContouringError(
                 f"Gridding failed ({exc}). Try a larger cell size or another method."
@@ -444,7 +538,346 @@ def predict(
             variogram = fit_variogram(p[:, 0], p[:, 1], pv, variogram_model)
         return _krige(p, pv, q, variogram)
 
+    if method == "idw":
+        return _idw(p, pv, q, float(opts["power"]), float(opts["delta"])), None
+    if method == "nearest":
+        return pv[cKDTree(p).query(q)[1]], None
+    if method == "shepard":
+        return _shepard(p, pv, q), None
+    if method == "local_polynomial":
+        return _local_polynomial(p, pv, q, int(opts["order"]), float(opts["power"])), None
+    if method == "polynomial":
+        return _polynomial(p, pv, q, int(opts["order"])), None
+    if method == "moving_average":
+        return _search_statistic(p, pv, q, float(opts["radius"]), "mean"), None
+    if method == "metrics":
+        return _search_statistic(p, pv, q, float(opts["radius"]), opts["statistic"]), None
+
     raise ValueError(f"Unknown gridding method: {method!r}")
+
+
+def predict_grid(
+    px: np.ndarray,
+    py: np.ndarray,
+    pv: np.ndarray,
+    spec: GridSpec,
+    method: str,
+    smoothing: float = 0.0,
+    variogram: VariogramFit | None = None,
+    variogram_model: str = "spherical",
+    options: dict | None = None,
+    max_distance: float | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Estimate (and kriging variance) at every node of *spec*, as (ny, nx)
+    arrays. *max_distance* (the blanking distance) bounds the work of the
+    natural-neighbour method; nodes farther from the data are blanked later.
+    """
+    opts = method_options(method, options)
+    px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    if method == "min_curvature":
+        return _min_curvature(px, py, pv, spec, float(opts["tension"])), None
+    if method == "natural_neighbor":
+        return _natural_neighbour(px, py, pv, spec, max_distance), None
+    xx, yy = np.meshgrid(spec.xs, spec.ys)
+    z, var = predict(px, py, pv, xx, yy, method, smoothing, variogram, variogram_model, options)
+    shape = (spec.ny, spec.nx)
+    return z.reshape(shape), (var.reshape(shape) if var is not None else None)
+
+
+def _rbf_epsilon(p: np.ndarray) -> float:
+    """
+    Shape parameter of the multiquadric kernels: 1 / R with Surfer's default
+    R² = (diagonal of the data extent)² / (25 n). The scale-free kernels
+    (thin-plate spline, cubic) take none.
+    """
+    diagonal = float(np.hypot(*np.ptp(p, axis=0)))
+    r = diagonal / (5.0 * math.sqrt(len(p)))
+    return 1.0 / r if r > 0 else 1.0
+
+
+def _neighbours(p: np.ndarray, q: np.ndarray, k: int, radius: float = np.inf):
+    """(distance, index) of the k nearest points, always 2-D; inf / len(p) beyond *radius*."""
+    k = min(k, len(p))
+    d, i = cKDTree(p).query(q, k=k, distance_upper_bound=radius)
+    return d.reshape(len(q), k), i.reshape(len(q), k)
+
+
+def _idw(p: np.ndarray, pv: np.ndarray, q: np.ndarray, power: float, delta: float) -> np.ndarray:
+    """
+    Inverse distance to a power over the SEARCH_POINTS nearest readings:
+    weights 1 / (d² + δ²)^(power / 2). With δ = 0 a node on a reading takes
+    its value exactly; δ > 0 smooths (Surfer's smoothing parameter).
+    """
+    if power <= 0:
+        raise ContouringError("The inverse-distance power must be above 0.")
+    d, i = _neighbours(p, q, SEARCH_POINTS)
+    d2 = d ** 2 + delta ** 2
+    hit = d2[:, 0] == 0
+    w = 1.0 / np.where(d2 == 0, 1.0, d2) ** (power / 2.0)
+    z = np.sum(w * pv[i], axis=1) / np.sum(w, axis=1)
+    z[hit] = pv[i[hit, 0]]
+    return z
+
+
+def _poly_design(x: np.ndarray, y: np.ndarray, order: int) -> np.ndarray:
+    """Columns x^a y^b for a + b <= order, constant first; shape x.shape + (n_terms,)."""
+    if order not in (1, 2, 3):
+        raise ContouringError("The polynomial order must be 1, 2 or 3.")
+    terms = [x ** (t - b) * y ** b for t in range(order + 1) for b in range(t + 1)]
+    return np.stack(terms, axis=-1)
+
+
+def _polynomial(p: np.ndarray, pv: np.ndarray, q: np.ndarray, order: int) -> np.ndarray:
+    """Least-squares trend surface of the given order over all the data."""
+    scale = max(float(np.ptp(p, axis=0).max()), 1e-12)
+    a = _poly_design(p[:, 0] / scale, p[:, 1] / scale, order)
+    if len(pv) < a.shape[1]:
+        raise ContouringError(f"A order-{order} trend surface needs at least {a.shape[1]} points.")
+    coef, *_ = np.linalg.lstsq(a, pv, rcond=None)
+    return _poly_design(q[:, 0] / scale, q[:, 1] / scale, order) @ coef
+
+
+def _local_polynomial(
+    p: np.ndarray, pv: np.ndarray, q: np.ndarray, order: int, power: float, chunk: int = 4096
+) -> np.ndarray:
+    """
+    Weighted least-squares polynomial about each node over its SEARCH_POINTS
+    nearest readings, weights (1 - d / R)^power with R the distance to the
+    farthest of them (Surfer's local polynomial). The estimate is the fitted
+    constant term.
+    """
+    n_terms = _poly_design(np.zeros(1), np.zeros(1), order).shape[-1]
+    if len(pv) <= n_terms:
+        raise ContouringError(f"A local order-{order} polynomial needs more than {n_terms} points.")
+    out = np.empty(len(q))
+    for s in range(0, len(q), chunk):
+        qs = q[s:s + chunk]
+        d, i = _neighbours(p, qs, SEARCH_POINTS)
+        r = d[:, -1:] * 1.0001 + 1e-12
+        w = (1.0 - d / r) ** power
+        a = _poly_design((p[i, 0] - qs[:, :1]) / r, (p[i, 1] - qs[:, 1:]) / r, order)
+        aw = a * w[..., None]
+        m = np.einsum("nki,nkj->nij", aw, a)
+        rhs = np.einsum("nki,nk->ni", aw, pv[i])
+        out[s:s + chunk] = np.einsum("nj,nj->n", np.linalg.pinv(m)[:, 0, :], rhs)
+    return out
+
+
+def _shepard(p: np.ndarray, pv: np.ndarray, q: np.ndarray, chunk: int = 8192) -> np.ndarray:
+    """
+    Modified Shepard's method (Franke & Nielson, 1980): a quadratic is fitted
+    about every reading to its SHEPARD_QUADRATIC_POINTS neighbours, and the
+    nodes blend the quadratics with weights ((R - d)+ / (R d))², R being the
+    radius of each reading's SHEPARD_WEIGHT_POINTS neighbours.
+    """
+    n = len(pv)
+    if n < 6:
+        raise ContouringError("Modified Shepard's method needs at least 6 points.")
+    tree = cKDTree(p)
+    nq = min(SHEPARD_QUADRATIC_POINTS, n - 1)
+    dq, iq = tree.query(p, k=nq + 1)
+    dq, iq = dq[:, 1:], iq[:, 1:]                      # drop the reading itself
+    rq = dq[:, -1:] * 1.01 + 1e-12
+    wq = (np.clip(rq - dq, 0, None) / (rq * np.where(dq == 0, 1.0, dq))) ** 2
+    dx, dy = p[iq, 0] - p[:, None, 0], p[iq, 1] - p[:, None, 1]
+    a = np.stack([dx, dy, dx * dx, dx * dy, dy * dy], axis=-1)
+    aw = a * wq[..., None]
+    coef = np.einsum(
+        "nij,nj->ni", np.linalg.pinv(np.einsum("nki,nkj->nij", aw, a)),
+        np.einsum("nki,nk->ni", aw, pv[iq] - pv[:, None]),
+    )
+    nw = min(SHEPARD_WEIGHT_POINTS, n - 1)
+    rw = tree.query(p, k=nw + 1)[0][:, -1]
+
+    out = np.empty(len(q))
+    for s in range(0, len(q), chunk):
+        qs = q[s:s + chunk]
+        d, i = _neighbours(p, qs, 2 * nw)
+        r = rw[i]
+        safe = np.where(d == 0, 1.0, d)
+        w = (np.clip(r - d, 0, None) / (r * safe)) ** 2
+        none = w.sum(axis=1) == 0                     # outside every reading's radius
+        w[none] = 1.0 / safe[none] ** 2
+        ex, ey = qs[:, None, 0] - p[i, 0], qs[:, None, 1] - p[i, 1]
+        c = coef[i]
+        local = (pv[i] + c[..., 0] * ex + c[..., 1] * ey
+                 + c[..., 2] * ex * ex + c[..., 3] * ex * ey + c[..., 4] * ey * ey)
+        z = np.sum(w * local, axis=1) / np.sum(w, axis=1)
+        hit = d[:, 0] == 0
+        z[hit] = pv[i[hit, 0]]
+        out[s:s + chunk] = z
+    return out
+
+
+def auto_search_radius(p: np.ndarray, points: int = MOVING_AVERAGE_POINTS) -> float:
+    """Radius of a circle holding about *points* readings at the survey's mean density."""
+    area = float(np.prod(np.ptp(p, axis=0)))
+    if area <= 0:
+        raise ContouringError("Could not determine a search radius (the data have no area).")
+    return math.sqrt(points * area / (math.pi * len(p)))
+
+
+def _search_statistic(
+    p: np.ndarray, pv: np.ndarray, q: np.ndarray, radius: float, statistic: str
+) -> np.ndarray:
+    """
+    A statistic of the readings within *radius* of each node (0 = automatic,
+    see auto_search_radius): the mean for the moving average, else one of
+    METRICS. Nodes with no reading in range are blank (count and density: 0).
+    """
+    if statistic != "mean" and statistic not in METRICS:
+        raise ValueError(f"Unknown statistic: {statistic!r}")
+    radius = radius if radius > 0 else auto_search_radius(p)
+    k = SEARCH_POINTS if statistic == "mean" else METRICS_MAX_POINTS
+    d, i = _neighbours(p, q, k, radius)
+    inside = np.isfinite(d)
+    count = inside.sum(axis=1).astype(float)
+    if statistic == "count":
+        return count
+    if statistic == "density":
+        return count / (math.pi * radius ** 2)
+    v = np.where(inside, pv[np.where(inside, i, 0)], np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # nodes with no reading in range
+        if statistic == "mean":
+            return np.nanmean(v, axis=1)
+        if statistic == "median":
+            return np.nanmedian(v, axis=1)
+        if statistic == "minimum":
+            return np.nanmin(v, axis=1)
+        if statistic == "maximum":
+            return np.nanmax(v, axis=1)
+        if statistic == "range":
+            return np.nanmax(v, axis=1) - np.nanmin(v, axis=1)
+        return np.nanstd(v, axis=1, ddof=1)
+
+
+def _min_curvature(
+    px: np.ndarray, py: np.ndarray, pv: np.ndarray, spec: GridSpec, tension: float
+) -> np.ndarray:
+    """
+    Minimum curvature (Briggs, 1974) with tension (Smith & Wessel, 1990): the
+    grid that minimises (1 - T) × the thin-plate curvature energy
+    (z_xx² + 2 z_xy² + z_yy²) + T × the gradient energy, while its bilinear
+    interpolation passes through the readings (weighted least squares,
+    MIN_CURVATURE_DATA_WEIGHT). Edges are free. Solved directly as one sparse
+    system rather than by Surfer's iterations.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+
+    if not 0.0 <= tension < 1.0:
+        raise ContouringError("The tension must be at least 0 and below 1.")
+    nx, ny = spec.nx, spec.ny
+    n = nx * ny
+    if n > MIN_CURVATURE_MAX_NODES:
+        raise GridTooLargeError(
+            f"Minimum curvature is limited to {MIN_CURVATURE_MAX_NODES:,} grid nodes "
+            f"(this grid has {n:,}) — increase the cell size."
+        )
+    if nx < 3 or ny < 3:
+        raise ContouringError("Minimum curvature needs a grid of at least 3 × 3 nodes.")
+    idx = np.arange(n).reshape(ny, nx)
+
+    def stencil(*terms):
+        rows = np.arange(terms[0][0].size)
+        return sparse.csr_matrix(
+            (np.concatenate([np.full(rows.size, c, dtype=float) for _, c in terms]),
+             (np.tile(rows, len(terms)), np.concatenate([ids.ravel() for ids, _ in terms]))),
+            shape=(rows.size, n),
+        )
+
+    dxx = stencil((idx[:, :-2], 1), (idx[:, 1:-1], -2), (idx[:, 2:], 1))
+    dyy = stencil((idx[:-2], 1), (idx[1:-1], -2), (idx[2:], 1))
+    dxy = stencil((idx[:-1, :-1], 1), (idx[:-1, 1:], -1), (idx[1:, :-1], -1), (idx[1:, 1:], 1))
+    dx = stencil((idx[:, :-1], -1), (idx[:, 1:], 1))
+    dy = stencil((idx[:-1], -1), (idx[1:], 1))
+
+    # readings up to half a cell outside the outer nodes extrapolate the edge cells linearly
+    fx = (px - spec.xs[0]) / spec.cell
+    fy = (py - spec.ys[0]) / spec.cell
+    i0 = np.clip(np.floor(fx).astype(np.int64), 0, nx - 2)
+    j0 = np.clip(np.floor(fy).astype(np.int64), 0, ny - 2)
+    tx, ty = fx - i0, fy - j0
+    rows = np.arange(len(pv))
+    b = sparse.csr_matrix(
+        (np.concatenate([(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty]),
+         (np.tile(rows, 4), np.concatenate([idx[j0, i0], idx[j0, i0 + 1],
+                                            idx[j0 + 1, i0], idx[j0 + 1, i0 + 1]]))),
+        shape=(len(pv), n),
+    )
+    w = MIN_CURVATURE_DATA_WEIGHT
+    a = ((1.0 - tension) * (dxx.T @ dxx + dyy.T @ dyy + 2.0 * (dxy.T @ dxy))
+         + tension * (dx.T @ dx + dy.T @ dy) + w * (b.T @ b))
+    mean = float(np.mean(pv))
+    try:
+        z = spsolve(a.tocsc(), w * (b.T @ (pv - mean)))
+    except RuntimeError as exc:          # singular: e.g. all readings on one line
+        raise ContouringError(f"Minimum curvature failed ({exc}).") from exc
+    if not np.all(np.isfinite(z)):
+        raise ContouringError("Minimum curvature failed (the readings do not span an area).")
+    return (z + mean).reshape(ny, nx)
+
+
+def _natural_neighbour(
+    px: np.ndarray, py: np.ndarray, pv: np.ndarray, spec: GridSpec,
+    max_distance: float | None = None,
+) -> np.ndarray:
+    """
+    Natural-neighbour (Sibson) interpolation in its discrete form (Park et
+    al., 2006): every point of a raster NATURAL_NEIGHBOUR_SUPERSAMPLE times
+    finer than the grid takes the value of its nearest reading and passes it
+    to all grid nodes within that distance; each node is the mean of what it
+    receives, i.e. readings weighted by the area each would lose to the node.
+    Distances are capped at *max_distance* (the blanking distance).
+    """
+    s = NATURAL_NEIGHBOUR_SUPERSAMPLE
+    h = spec.cell / s
+    fx = spec.x0 + (np.arange(spec.nx * s) + 0.5) * h
+    fy = spec.y0 + (np.arange(spec.ny * s) + 0.5) * h
+    rx, ry = (a.ravel() for a in np.meshgrid(fx, fy))
+    d, i = cKDTree(np.column_stack([px, py])).query(np.column_stack([rx, ry]))
+    if max_distance:
+        d = np.minimum(d, max_distance)
+    if float(np.sum(np.pi * (d / spec.cell) ** 2 + 1.0)) > NATURAL_NEIGHBOUR_MAX_WORK:
+        raise GridTooLargeError(
+            "Natural neighbour would take too long on this grid — increase the cell size "
+            "or set a smaller blanking distance."
+        )
+    values = pv[i]
+    # grid node nearest each raster point, and the raster point's offset from it (cells)
+    bi = np.minimum(np.floor((rx - spec.x0) / spec.cell).astype(np.int64), spec.nx - 1)
+    bj = np.minimum(np.floor((ry - spec.y0) / spec.cell).astype(np.int64), spec.ny - 1)
+    ox = (rx - spec.xs[bi]) / spec.cell
+    oy = (ry - spec.ys[bj]) / spec.cell
+    r = d / spec.cell
+    by_radius = np.argsort(-r, kind="stable")
+    r_ascending = np.sort(r)
+    n = spec.n_nodes
+    total = np.zeros(n)
+    count = np.zeros(n)
+    reach = int(math.ceil(float(r.max()) + 0.5))
+    for dj in range(-reach, reach + 1):
+        for di in range(-reach, reach + 1):
+            nearest = max(math.hypot(di, dj) - math.sqrt(0.5), 0.0)   # closest a raster point can be
+            src = by_radius[: r.size - np.searchsorted(r_ascending, nearest, side="left")]
+            if src.size == 0:
+                continue
+            tx, ty = bi[src] + di, bj[src] + dj
+            ok = ((tx >= 0) & (tx < spec.nx) & (ty >= 0) & (ty < spec.ny)
+                  & (np.hypot(di - ox[src], dj - oy[src]) <= r[src]))
+            target = ty[ok] * spec.nx + tx[ok]
+            total += np.bincount(target, weights=values[src[ok]], minlength=n)
+            count += np.bincount(target, minlength=n)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = total / count
+    if np.isnan(z).any():   # a node no raster point reached: its own nearest reading
+        miss = np.isnan(z)
+        xx, yy = np.meshgrid(spec.xs, spec.ys)
+        z[miss] = pv[cKDTree(np.column_stack([px, py])).query(
+            np.column_stack([xx.ravel()[miss], yy.ravel()[miss]]))[1]]
+    return z.reshape(spec.ny, spec.nx)
 
 
 def _krige(
@@ -515,17 +948,129 @@ def default_blank_distance(spec: GridSpec, px: np.ndarray, py: np.ndarray) -> fl
     return max(nn, BLANK_COVERAGE_FACTOR * float(np.percentile(d, 90)))
 
 
-def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
-    """n_levels + 1 evenly spaced boundaries spanning the 2nd-98th percentile."""
+@dataclass(frozen=True)
+class ColourStyle:
+    """How a map or pseudo-section is coloured (keys of the COLOUR_* / MAP_DISPLAYS tables)."""
+    cmap: str = "viridis"
+    reverse: bool = False
+    range_mode: str = "percentile"
+    percentiles: tuple[float, float] = (2.0, 98.0)
+    vmin: float | None = None             # range_mode "fixed"; None = data minimum
+    vmax: float | None = None
+    scale: str = "linear"
+    display: str = "filled"
+    contour_lines: bool = False
+    n_levels: int = 20
+
+
+def colour_map(name: str, reverse: bool = False):
+    """Matplotlib colour map by COLOUR_MAPS key (or any Matplotlib name)."""
+    if name == "surfer_rainbow":
+        cmap = LinearSegmentedColormap.from_list("surfer_rainbow", SURFER_RAINBOW)
+    else:
+        cmap = matplotlib.colormaps[name]
+    return cmap.reversed() if reverse else cmap
+
+
+def colour_levels(values: np.ndarray, style: ColourStyle) -> np.ndarray:
+    """
+    style.n_levels + 1 increasing colour boundaries over the style's range:
+    evenly spaced (linear), geometric (log) or at quantiles of the values
+    (histogram-equalised, equal map area per colour).
+    """
     finite = np.asarray(values, dtype=float)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         raise ContouringError("Nothing to contour (all values blank).")
-    lo, hi = np.percentile(finite, [2, 98])
+    if style.range_mode == "minmax":
+        lo, hi = float(finite.min()), float(finite.max())
+    elif style.range_mode == "fixed":
+        lo = float(finite.min()) if style.vmin is None else float(style.vmin)
+        hi = float(finite.max()) if style.vmax is None else float(style.vmax)
+        if hi <= lo:
+            raise ContouringError("The colour maximum must be above the colour minimum.")
+    else:
+        p_lo, p_hi = style.percentiles
+        if not 0.0 <= p_lo < p_hi <= 100.0:
+            raise ContouringError("The colour percentiles must satisfy 0 ≤ lower < upper ≤ 100.")
+        lo, hi = (float(v) for v in np.percentile(finite, [p_lo, p_hi]))
     if hi - lo <= 1e-9 * max(abs(lo), abs(hi), 1e-12):  # flat up to round-off
         pad = max(abs(lo) * 1e-6, 1e-12)
         lo, hi = lo - pad, hi + pad
-    return np.linspace(lo, hi, n_levels + 1)
+    n = style.n_levels
+    if style.scale == "log":
+        if lo <= 0:
+            raise ContouringError(
+                f"A logarithmic colour scale needs positive values; this map goes down to "
+                f"{lo:.4g}. Use a linear scale or a fixed minimum above 0."
+            )
+        return np.geomspace(lo, hi, n + 1)
+    if style.scale == "equalised":
+        inside = finite[(finite >= lo) & (finite <= hi)]
+        levels = np.unique(np.quantile(inside, np.linspace(0.0, 1.0, n + 1)))
+        if levels.size >= 3:
+            levels[0], levels[-1] = lo, hi
+            return levels
+    return np.linspace(lo, hi, n + 1)
+
+
+def contour_levels(values: np.ndarray, n_levels: int) -> np.ndarray:
+    """n_levels + 1 evenly spaced boundaries spanning the 2nd-98th percentile."""
+    return colour_levels(values, ColourStyle(n_levels=n_levels))
+
+
+def _extend(style: ColourStyle) -> str:
+    """Colour-bar arrows for values beyond the range; the full data range has none."""
+    return "neither" if style.range_mode == "minmax" else "both"
+
+
+def _colour_norm(levels: np.ndarray, style: ColourStyle, n_colours: int):
+    """Norm placing the colours: None lets filled linear contours map levels evenly."""
+    if style.display == "filled":
+        if style.scale == "linear":
+            return None
+        return BoundaryNorm(levels, n_colours, extend=_extend(style))
+    if style.scale == "log":
+        return LogNorm(levels[0], levels[-1])
+    if style.scale == "equalised":
+        u = np.linspace(0.0, 1.0, len(levels))
+        return FuncNorm(
+            (lambda x: np.interp(x, levels, u), lambda y: np.interp(y, u, levels)),
+            vmin=levels[0], vmax=levels[-1],
+        )
+    return Normalize(levels[0], levels[-1])
+
+
+def _draw_field(ax, x, y, z, style: ColourStyle, levels: np.ndarray, edges=None):
+    """
+    Draws z (rows along y) as filled contours or a continuous image, with
+    optional contour lines. *edges* (x, y cell edges) draws the image cells
+    exactly; without them cells are centred on x, y. Returns the mappable.
+    """
+    cmap = colour_map(style.cmap, style.reverse)
+    norm = _colour_norm(levels, style, cmap.N)
+    zm = np.ma.masked_invalid(z)
+    if style.display == "image":
+        if edges is not None:
+            mappable = ax.pcolormesh(edges[0], edges[1], zm, cmap=cmap, norm=norm, shading="flat")
+        else:
+            mappable = ax.pcolormesh(x, y, zm, cmap=cmap, norm=norm, shading="nearest")
+    else:
+        mappable = ax.contourf(x, y, zm, levels=levels, cmap=cmap, norm=norm,
+                               extend=_extend(style))
+    if style.contour_lines:
+        ax.contour(x, y, zm, levels=levels, colors="k", linewidths=0.4, alpha=0.6)
+    return mappable
+
+
+def _colour_bar(fig, mappable, ax, label: str, levels: np.ndarray, style: ColourStyle):
+    """Colour bar with arrows for values beyond the range; at most ~10 labelled ticks."""
+    extend = {"extend": _extend(style)} if style.display == "image" else {}
+    bar = fig.colorbar(mappable, ax=ax, label=label, **extend)
+    if style.display == "filled" and style.scale != "linear":
+        ticks = levels[:: max(1, math.ceil(len(levels) / 10))]
+        bar.set_ticks(ticks, labels=[f"{t:.4g}" for t in ticks])
+    return bar
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +1092,31 @@ class AreaMapResult:
     levelled: bool
     n_raw: int
     epsg: int | None = None             # CRS of x / y when known (UTM or user-given)
+    options: dict = field(default_factory=dict)   # the method's settings (method_options)
+
+
+def method_title(result: AreaMapResult) -> str:
+    """Method name for titles, with the setting that changes what the map shows."""
+    name = METHODS[result.method]
+    if result.method == "rbf":
+        return f"{name} ({RBF_KERNELS[result.options['kernel']].lower()})"
+    if result.method == "metrics":
+        return f"{name}: {METRICS[result.options['statistic']].lower()}"
+    if result.method in ("polynomial", "local_polynomial"):
+        return f"{name}, order {result.options['order']}"
+    return name
+
+
+def result_label(result: AreaMapResult, label: str) -> str:
+    """Colour-bar label: data metrics other than value statistics are not in the data's units."""
+    if result.method != "metrics":
+        return label
+    statistic = result.options["statistic"]
+    if statistic == "count":
+        return "Readings within the search radius"
+    if statistic == "density":
+        return "Readings per m²"
+    return f"{METRICS[statistic]} of {label}"
 
 
 def survey_xy(
@@ -605,9 +1175,11 @@ def compute_area_map(
     origin: tuple[float, float] | None = None,
     epsg: int | None = None,
     grid_spec: GridSpec | None = None,
+    options: dict | None = None,
 ) -> AreaMapResult:
     """
     Full area-map pipeline for one value column of a raw GEM table.
+    *options* are the method's settings (see METHOD_DEFAULTS).
 
     *origin*, *epsg* and *grid_spec* pin the projection and grid, so that two
     surveys can be gridded on the same nodes (difference maps).
@@ -637,13 +1209,9 @@ def compute_area_map(
         raise ContouringError("Not enough points to grid.")
 
     variogram = fit_variogram(bx, by, bv, variogram_model) if method == "kriging" else None
-    xx, yy = np.meshgrid(spec.xs, spec.ys)
-    z, var = predict(bx, by, bv, xx, yy, method, smoothing, variogram)
-    z = z.reshape(spec.ny, spec.nx)
-    if var is not None:
-        var = var.reshape(spec.ny, spec.nx)
-
     dist = blank_distance if blank_distance else default_blank_distance(spec, bx, by)
+    z, var = predict_grid(bx, by, bv, spec, method, smoothing, variogram,
+                          options=options, max_distance=dist)
     z = blank_far(z, spec, bx, by, dist)
     if var is not None:
         var = blank_far(var, spec, bx, by, dist)
@@ -652,6 +1220,7 @@ def compute_area_map(
         spec=spec, z=z, variance=var, bx=bx, by=by, bv=bv, method=method,
         variogram=variogram, blank_distance=dist, origin=origin,
         levelled=levelled, n_raw=int(keep.sum()), epsg=epsg,
+        options=method_options(method, options),
     )
 
 
@@ -685,7 +1254,7 @@ def compute_difference_map(
         bx=np.concatenate([a.bx, b.bx]), by=np.concatenate([a.by, b.by]),
         bv=np.concatenate([-a.bv, b.bv]), method=a.method, variogram=None,
         blank_distance=max(a.blank_distance, b.blank_distance), origin=origin,
-        levelled=a.levelled, n_raw=a.n_raw + b.n_raw, epsg=epsg,
+        levelled=a.levelled, n_raw=a.n_raw + b.n_raw, epsg=epsg, options=a.options,
     )
 
 
@@ -698,23 +1267,41 @@ def cross_validate(
     variogram: VariogramFit | None = None,
     k: int = 5,
     seed: int = 0,
+    options: dict | None = None,
+    spec: GridSpec | None = None,
 ) -> dict[str, float]:
     """
     k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted points).
 
     For kriging the variogram is held fixed across folds (pass the fit used
-    for the map).
+    for the map). GRID_METHODS grid each training fold on *spec* (default:
+    automatic cell size) and are read at the held-out points bilinearly.
     """
+    if method == "metrics":
+        raise ContouringError(
+            "Cross-validation compares estimates with held-out readings; data metrics are "
+            "summaries of the readings, not estimates."
+        )
     px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
+    if method in GRID_METHODS and spec is None:
+        spec = make_grid(px, py, auto_cell_size(px, py))
     folds = np.random.default_rng(seed).permutation(len(pv)) % k
     errors = []
     for f in range(k):
         test = folds == f
         train = ~test
-        est, _ = predict(
-            px[train], py[train], pv[train], px[test], py[test],
-            method, smoothing, variogram,
-        )
+        if method in GRID_METHODS:
+            dist = default_blank_distance(spec, px[train], py[train])
+            grid, _ = predict_grid(px[train], py[train], pv[train], spec, method,
+                                   options=options, max_distance=dist)
+            est = RegularGridInterpolator(
+                (spec.ys, spec.xs), grid, bounds_error=False, fill_value=np.nan,
+            )(np.column_stack([py[test], px[test]]))
+        else:
+            est, _ = predict(
+                px[train], py[train], pv[train], px[test], py[test],
+                method, smoothing, variogram, options=options,
+            )
         errors.append(est - pv[test])
     err = np.concatenate(errors)
     err = err[np.isfinite(err)]
@@ -816,40 +1403,43 @@ def make_area_map_figure(
     show_points: bool = True,
     cmap: str = "viridis",
     symmetric: bool = False,
+    style: ColourStyle | None = None,
 ) -> plt.Figure:
     """
-    Contour map; for kriging, adds a kriging standard-deviation panel.
-    *symmetric* centres the colour levels on zero (difference maps).
+    Contour map or image; for kriging, adds a kriging standard-deviation panel.
+    *style* sets the colours (default: *cmap* with *n_levels* filled contours
+    over the 2nd-98th percentile). *symmetric* centres a linear colour range
+    on zero (difference maps).
     """
     spec = result.spec
+    style = style or ColourStyle(cmap=cmap, n_levels=n_levels)
+    if symmetric:
+        style = replace(style, scale="linear")
     # Compute levels first: they may raise, and no figure should be left open.
-    levels = contour_levels(result.z, n_levels)
+    levels = colour_levels(result.z, style)
     if symmetric:
         m = float(np.max(np.abs(levels[[0, -1]])))
-        levels = np.linspace(-m, m, n_levels + 1)
+        levels = np.linspace(-m, m, style.n_levels + 1)
     std = np.sqrt(result.variance) if result.variance is not None else None
-    std_levels = contour_levels(std, n_levels) if std is not None else None
+    std_style = ColourStyle(cmap="magma", n_levels=style.n_levels, display=style.display)
+    std_levels = colour_levels(std, std_style) if std is not None else None
     panels = 2 if std is not None else 1
     fig, axes = plt.subplots(1, panels, figsize=(7 * panels, 6), squeeze=False)
     xs, ys = spec.xs, spec.ys
+    edges = (spec.x0 + spec.cell * np.arange(spec.nx + 1),
+             spec.y0 + spec.cell * np.arange(spec.ny + 1))
 
     ax = axes[0, 0]
-    cs = ax.contourf(
-        xs, ys, np.ma.masked_invalid(result.z),
-        levels=levels, cmap=cmap, extend="both",
-    )
-    fig.colorbar(cs, ax=ax, label=label)
+    mappable = _draw_field(ax, xs, ys, result.z, style, levels, edges)
+    _colour_bar(fig, mappable, ax, label, levels, style)
     if show_points:
         ax.plot(result.bx, result.by, ",", color="k", alpha=0.4)
     ax.set_title(title + (" — line-levelled (per-line median)" if result.levelled else ""))
 
     if std is not None:
         ax2 = axes[0, 1]
-        cs2 = ax2.contourf(
-            xs, ys, np.ma.masked_invalid(std),
-            levels=std_levels, cmap="magma", extend="both",
-        )
-        fig.colorbar(cs2, ax=ax2, label=f"Kriging std. dev. — {label}")
+        mappable2 = _draw_field(ax2, xs, ys, std, std_style, std_levels, edges)
+        _colour_bar(fig, mappable2, ax2, f"Kriging std. dev. — {label}", std_levels, std_style)
         ax2.set_title("Kriging standard deviation")
 
     if result.epsg:
@@ -860,6 +1450,8 @@ def make_area_map_figure(
         xlab, ylab = "X (m)", "Y (m)"
     for a in axes[0]:
         a.ticklabel_format(useOffset=False, style="plain")  # full map coordinates
+        a.set_xlim(edges[0][0], edges[0][-1])               # the grid, without margins
+        a.set_ylim(edges[1][0], edges[1][-1])
         a.set_aspect("equal")
         a.set_xlabel(xlab)
         a.set_ylabel(ylab)
@@ -868,10 +1460,12 @@ def make_area_map_figure(
 
 
 def make_pseudosection_figure(
-    ps: PseudoSection, label: str, title: str, n_levels: int = 20
+    ps: PseudoSection, label: str, title: str, n_levels: int = 20,
+    style: ColourStyle | None = None,
 ) -> plt.Figure:
     """Distance x frequency contour with a white line at each measured frequency."""
-    levels = contour_levels(ps.values, n_levels)  # may raise; before any figure exists
+    style = style or ColourStyle(n_levels=n_levels)
+    levels = colour_levels(ps.values, style)  # may raise; before any figure exists
     fig, ax = plt.subplots(figsize=(10, 4.5))
     if ps.frequencies is not None:
         # Contour against log10(f) so values between rows are interpolated on the log axis.
@@ -882,13 +1476,10 @@ def make_pseudosection_figure(
         ax.set_ylabel("Frequency / sheet")
     ax.set_yticks(rows, labels=ps.labels)
     ax.ticklabel_format(axis="x", useOffset=False, style="plain")
-    cs = ax.contourf(
-        ps.distance, rows, np.ma.masked_invalid(ps.values),
-        levels=levels, cmap="viridis", extend="both",
-    )
+    mappable = _draw_field(ax, ps.distance, rows, ps.values, style, levels)
     for r in rows:
         ax.axhline(r, color="white", linewidth=0.6, alpha=0.8)
-    fig.colorbar(cs, ax=ax, label=label)
+    _colour_bar(fig, mappable, ax, label, levels, style)
     ax.set_xlabel("Distance (m)")
     ax.set_title(title)
     fig.tight_layout()
