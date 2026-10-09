@@ -1,6 +1,5 @@
 """
-Representative Incision Tool — Streamlit UI
-Refactored from RIs_v1.py
+GEM-2 Analysis Tool — Streamlit UI
 
 Run with:
     streamlit run RIs_v2.py
@@ -2569,15 +2568,15 @@ def render_gem_results(
 
 def main():
     st.set_page_config(
-        page_title="Representative Incision Tool",
+        page_title="GEM-2 Analysis Tool",
         page_icon=None,
         layout="wide",
     )
 
-    st.title("Representative Incision Tool")
+    st.title("GEM-2 Analysis Tool")
     st.caption(
-        "Multi-frequency EMI (GEM-2) survey analysis — representative profiles, "
-        "frequency ranking and 2D mapping · v2.1"
+        "Multi-frequency EMI survey analysis for the GEM-2 — profiles, frequency ranking, "
+        "corrections, sensor physics and 2D mapping · v2.1"
     )
 
     # ── Sidebar controls ────────────────────────────────────────────────────
@@ -2628,7 +2627,7 @@ def main():
         with st.expander("About & methods", expanded=False):
             st.markdown(
                 """
-**Representative Incision Tool** — v2.1
+**GEM-2 Analysis Tool** — v2.1 · [documentation](https://github.com/skokolakis/GEM-2_Analysis_Tool#readme)
 
 #### Geophysical background
 
@@ -2818,12 +2817,17 @@ Switch on in the sidebar under **2D contouring**.
 - **Area map** — plan-view grid of one frequency from the X/Y (or
   Lat/Lon) coordinates of all lines: optional per-line median
   levelling (a simple form; cf. Mauring & Kihle, 2006),
-  block-median reduction, then
+  block-median reduction, then one of Surfer's gridding methods:
   thin-plate spline (Briggs, 1974; Sandwell, 1987), ordinary
   kriging with a fitted variogram and standard-deviation map
   (Corwin & Lesch, 2005; Oliver & Webster, 2014; for
-  regression / cokriging alternatives see Lesch et al., 1995) or
-  linear triangulation. Nodes far from data are blanked.
+  regression / cokriging alternatives see Lesch et al., 1995),
+  minimum curvature with tension (Briggs, 1974; Smith & Wessel,
+  1990), inverse distance, radial basis functions, natural
+  neighbour, nearest neighbour, modified Shepard's method
+  (Franke & Nielson, 1980), local polynomial, polynomial
+  regression, moving average, data metrics or linear
+  triangulation. Nodes far from data are blanked.
   Use **Cross-validate** to compare methods (Li & Heap, 2011).
 
 ---
@@ -2952,6 +2956,15 @@ Switch on in the sidebar under **2D contouring**.
 - Huang, H. (2005). Depth of investigation for small broadband
   electromagnetic sensors. *Geophysics*, **70**(6), G135–G142.
   [doi:10.1190/1.2122412](https://doi.org/10.1190/1.2122412)
+
+- Smith, W.H.F. & Wessel, P. (1990). Gridding with continuous
+  curvature splines in tension. *Geophysics*, **55**(3), 293–305.
+  [doi:10.1190/1.1442837](https://doi.org/10.1190/1.1442837)
+
+- Franke, R. & Nielson, G. (1980). Smooth interpolation of large
+  sets of scattered data. *Int. J. Numer. Methods Eng.*, **15**(11),
+  1691–1704.
+  [doi:10.1002/nme.1620151110](https://doi.org/10.1002/nme.1620151110)
                 """
             )
 

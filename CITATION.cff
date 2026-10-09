@@ -1,8 +1,9 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
-title: "GEM Representative Insicision script (GRIs)"
+title: "GEM-2 Analysis Tool"
 authors:
   - name: "Stratos Kokolakis"
 doi: "10.5281/zenodo.18302817"
 url: "https://doi.org/10.5281/zenodo.18302817"
+repository-code: "https://github.com/skokolakis/GEM-2_Analysis_Tool"
 date-released: "2026-01-19"
