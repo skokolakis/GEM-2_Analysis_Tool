@@ -159,6 +159,7 @@ def test_sidebar_offers_method_settings_and_colours():
     at.sidebar.selectbox(key="ct_range").set_value("fixed").run()
     at.sidebar.number_input(key="ct_vmax").set_value(80.0).run()
     assert not at.exception
+    assert [e.label for e in at.sidebar.expander] == ["Area map gridding", "Map colours"]
     shown = at.main.markdown[-1].value
     assert "method='idw'" in shown and "('power', 3.0)" in shown
     assert "cmap='surfer_rainbow'" in shown and "vmax=80.0" in shown

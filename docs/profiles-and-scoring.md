@@ -16,7 +16,7 @@ The core of the app: every survey line (pass) of a channel is resampled onto a c
 
 Each trace is used only inside its own measured distance range — grid points outside it are left blank for that trace, so nothing is extrapolated. At a repeated distance within a trace only the first reading is kept (with a warning): averaging would lower that trace's noise alone.
 
-## Sidebar → Processing
+## Sidebar → Profiles → Profile interpolation & scoring
 
 | Setting | Effect |
 |---|---|
@@ -72,7 +72,7 @@ Columns with fewer than the minimum number of points are skipped with a warning.
 Each mode tab shows:
 
 - **Channels** — the frequencies / channels found, or the **Frequency ranking** table when scoring is on.
-- **Representative profiles** — every frequency's mean profile on one axes (scores in the legend when scoring is on), with event markers as dotted lines.
+- **Representative profiles** (collapsed; click to open) — every frequency's mean profile on one axes (scores in the legend when scoring is on), with event markers as dotted lines.
 - **Graph editor** — choose the **X axis** (distance along line, X, Y, Lat/Lon, time, reading number, or a channel for cross-plots) and the **Y axis** (the representative profiles, or any channel of the file — readings are then plotted one colour per line); toggle frequencies; set axis limits, line width and style, labels and title; show or hide individual traces and the ±1σ envelope.
 - **Per-frequency detail plots** — individual traces (thin, semi-transparent), the mean profile (bold) and the ±1σ envelope.
 - **Downloads** — see [Outputs](outputs.md).

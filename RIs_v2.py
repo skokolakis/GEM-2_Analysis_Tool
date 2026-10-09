@@ -47,6 +47,12 @@ MODES = {
     "EC": "Electrical conductivity",
     "MS": "Magnetic susceptibility",
 }
+# Modes that get 2D contouring. Raw in-phase and quadrature (ppm) grow with
+# frequency, so their pseudo-sections show that trend rather than the ground;
+# AUX channels are not frequencies but can be mapped (e.g. power-line noise).
+PSEUDOSECTION_MODES = tuple(MODES)
+AREA_MAP_MODES = (*MODES, "AUX")
+PREP_APPLIES_TO = "Applied to every GEM file before its profiles, maps and further analysis."
 
 ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
 
@@ -140,7 +146,7 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     ),
     "area_map": (
         "Grids the readings over the survey area from their coordinates and draws a contour "
-        "map of each channel."
+        "map of one channel, on the EC, MS and AUX tabs."
     ),
     "background": (
         "Shifts each EC channel so its median equals this value, e.g. from a reference "
@@ -303,8 +309,9 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "membrane (Smith & Wessel, 1990). 0.25–0.35 suits steep anomalies."
     ),
     "pseudosection": (
-        "Frequency against distance for each line. Lower frequencies see deeper on average, "
-        "but the frequency axis is not a calibrated depth (McNeill, 1980)."
+        "Frequency against distance for each line, on the EC and MS tabs (raw in-phase and "
+        "quadrature grow with frequency, so they are left out). Lower frequencies see deeper "
+        "on average, but the frequency axis is not a calibrated depth (McNeill, 1980)."
     ),
     "rbf_kernel": (
         "Basis function of the surface. Multiquadric (Surfer's default) gives a smooth "
@@ -1768,16 +1775,14 @@ def _render_mode_section(
         return make_overview_figure(output_data, scores, mode, file_name, opts, is_gem, show_scores, markers)
 
     # ── Overview plot ────────────────────────────────────────────────────
-    if readings:
-        st.markdown(f"#### {opts.y_column} against {opts.x_column}")
-    else:
-        st.markdown("#### Representative profiles")
-        if opts.x_column != PROFILE_X:
+    title = f"{opts.y_column} against {opts.x_column}" if readings else "Representative profiles"
+    with st.expander(title, expanded=False):
+        if not readings and opts.x_column != PROFILE_X:
             st.caption("Representative profiles are drawn against distance along the line; "
                        "choose a channel for Y to plot against another X.")
-    overview_fig = overview()
-    st.pyplot(overview_fig, use_container_width=True)
-    plt.close(overview_fig)
+        overview_fig = overview()
+        st.pyplot(overview_fig, use_container_width=True)
+        plt.close(overview_fig)
 
     # ── Per-sheet detail ─────────────────────────────────────────────────
     with st.expander("Per-frequency detail plots", expanded=False):
@@ -1955,29 +1960,31 @@ def compute_area_map_cached(
 
 
 def render_data_sidebar() -> pipeline.PrepSettings:
-    """Sidebar controls for quality flags and along-line distance (GEM files)."""
+    """Sidebar groups for GEM files: data preparation, sensor geometry, corrections & filters."""
     st.divider()
-    st.subheader("GEM data")
-    drop_flagged = st.checkbox(
-        "Drop readings with a Status flag", value=True, key="prep_status",
-        help="The GEM-2 sets Status to a non-zero value when a reading has a "
-             "problem such as ADC overload.",
-    )
-    exclude = st.text_input(
-        "Lines to leave out (comma-separated)", key="prep_exclude",
-        help="For example calibration or test lines recorded in the same file.",
-    )
-    method = st.selectbox(
-        "Distance along line", list(gem_io.DISTANCE_METHODS),
-        format_func=gem_io.DISTANCE_METHODS.get, key="prep_distance", help=DISTANCE_HELP,
-    )
-    spacing = 1.0
-    if method in ("sample", "markers"):
-        spacing = st.number_input(
-            "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
-            min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
-            help=SCIENCE_HELP["spacing"],
+    st.subheader("GEM files")
+    with st.expander("GEM data preparation", expanded=False):
+        st.caption(PREP_APPLIES_TO)
+        drop_flagged = st.checkbox(
+            "Drop readings with a Status flag", value=True, key="prep_status",
+            help="The GEM-2 sets Status to a non-zero value when a reading has a "
+                 "problem such as ADC overload.",
         )
+        exclude = st.text_input(
+            "Lines to leave out (comma-separated)", key="prep_exclude",
+            help="For example calibration or test lines recorded in the same file.",
+        )
+        method = st.selectbox(
+            "Distance along line", list(gem_io.DISTANCE_METHODS),
+            format_func=gem_io.DISTANCE_METHODS.get, key="prep_distance", help=DISTANCE_HELP,
+        )
+        spacing = 1.0
+        if method in ("sample", "markers"):
+            spacing = st.number_input(
+                "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
+                min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
+                help=SCIENCE_HELP["spacing"],
+            )
     sensor, recompute, viscosity_pair = render_sensor_sidebar()
     return pipeline.PrepSettings(
         drop_flagged=drop_flagged, exclude_lines=_parse_labels(exclude),
@@ -1990,6 +1997,9 @@ def render_data_sidebar() -> pipeline.PrepSettings:
 def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float] | None]:
     """Coil geometry and height for the physics tools; EC/MS recomputation; viscosity pair."""
     with st.expander("Sensor geometry", expanded=False):
+        st.caption("Used by: forward model, frequency information, multi-height calibration, "
+                   "layered-earth inversion, footprint deconvolution and the EC / MS "
+                   "recomputation below.")
         st.caption("GEM-2 defaults (Won et al., 1996). Check them against your sensor's .gem file.")
         separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep",
                                      help=SCIENCE_HELP["separation"])
@@ -2037,6 +2047,7 @@ def _parse_labels(text: str) -> tuple[str, ...]:
 def render_corrections_sidebar() -> corrections.CorrectionSettings:
     """Corrections & filters applied to GEM tables before profiles and maps."""
     with st.expander("Corrections & filters", expanded=False):
+        st.caption(PREP_APPLIES_TO + " Multi-height calibration uses the readings as recorded.")
         st.markdown("**Filters**")
         despike = st.checkbox("Despike (running median)", key="cor_despike", help=SCIENCE_HELP["despike"])
         window, threshold = 5, 4.0
@@ -2167,9 +2178,28 @@ def render_contouring_sidebar() -> ContourSettings:
     if not area:
         if not pseudo:
             return ContourSettings()
-        colours = render_colour_controls()
+        with st.expander("Map colours", expanded=False):
+            st.caption("Used by: pseudo-sections.")
+            colours = render_colour_controls()
         return ContourSettings(pseudosection=True, n_levels=colours.n_levels, colours=colours)
 
+    with st.expander("Area map gridding", expanded=False):
+        st.caption("Used by: area maps and combined surveys.")
+        grid = _render_gridding_controls()
+    with st.expander("Map colours", expanded=False):
+        st.caption("Used by: area maps, combined surveys"
+                   + (" and pseudo-sections." if pseudo else "."))
+        colours = render_colour_controls()
+        show_points = st.checkbox("Show data points", value=True, key="ct_points",
+                                  help="Marks the readings used for gridding (one per grid cell).")
+    return ContourSettings(
+        area_map=True, pseudosection=pseudo, n_levels=colours.n_levels, colours=colours,
+        show_points=show_points, **grid,
+    )
+
+
+def _render_gridding_controls() -> dict:
+    """Area-map gridding inputs; returns the matching ContourSettings fields."""
     coord_mode = st.selectbox(
         "Coordinates", ["auto", "metres", "degrees"],
         format_func=str.capitalize, key="ct_coords",
@@ -2225,12 +2255,7 @@ def render_contouring_sidebar() -> ContourSettings:
     if problem:
         st.warning(problem)
         xy_epsg = None
-    colours = render_colour_controls()
-    show_points = st.checkbox("Show data points", value=True, key="ct_points",
-                              help="Marks the readings used for gridding (one per grid cell).")
-    return ContourSettings(
-        area_map=True,
-        pseudosection=pseudo,
+    return dict(
         coord_mode=coord_mode,
         method=method,
         smoothing=float(smoothing),
@@ -2238,12 +2263,9 @@ def render_contouring_sidebar() -> ContourSettings:
         cell_size=float(cell) or None,
         blank_distance=float(blank) or None,
         level_lines=level,
-        n_levels=colours.n_levels,
         projection=projection,
         xy_epsg=xy_epsg,
         method_options=method_options,
-        colours=colours,
-        show_points=show_points,
     )
 
 
@@ -2284,7 +2306,6 @@ def render_method_options(method: str) -> tuple:
 
 def render_colour_controls() -> ctr.ColourStyle:
     """Sidebar colour settings shared by area maps and pseudo-sections."""
-    st.markdown("**Colours**")
     cmap = st.selectbox("Colour map", list(ctr.COLOUR_MAPS), format_func=ctr.COLOUR_MAPS.get,
                         key="ct_cmap", help=SCIENCE_HELP["colour_map"])
     reverse = st.checkbox("Reverse colours", value=False, key="ct_cmap_reverse")
@@ -2538,9 +2559,9 @@ def render_contouring(
     """Render the enabled 2D contouring sections for one file and mode."""
     if not output_data:
         return
-    if contour.pseudosection and mode != "AUX":   # AUX channels are not frequencies
+    if contour.pseudosection and mode in PSEUDOSECTION_MODES:
         _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
-    if contour.area_map:
+    if contour.area_map and mode in AREA_MAP_MODES:
         _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
 
 
@@ -2576,12 +2597,13 @@ def render_combined_maps(
         st.info(str(exc))
         return
     common = set.intersection(*[set(corrections.channel_columns(t)) for t in tables])
-    if not common:
-        st.info("The files share no channel.")
+    found = gem_io.find_channels(common)
+    channels = {col: (m, label) for m in AREA_MAP_MODES for label, col in found[m].items()}
+    if not channels:
+        st.info("The files share no EC, MS or AUX channel.")
         return
-    col = st.selectbox("Channel", sorted(common), key="cm_col")
-    found = {m: chans for m, chans in gem_io.find_channels([col]).items() if chans}
-    mode, label = next((m, next(iter(ch))) for m, ch in found.items())
+    col = st.selectbox("Channel", sorted(channels), key="cm_col")
+    mode, label = channels[col]
     unit = ctr.value_label(mode, True, label)
     names = [n for _, n in gem_files]
     kind = st.radio("Map", ["Merged (edge-matched)", "Difference (B − A)"], horizontal=True,
@@ -2797,41 +2819,43 @@ def main():
 
     # ── Sidebar controls ────────────────────────────────────────────────────
     with st.sidebar:
-        st.subheader("Processing")
+        st.subheader("Profiles")
+        with st.expander("Profile interpolation & scoring", expanded=True):
+            st.caption("Used by: representative profiles, per-frequency plots, frequency "
+                       "ranking, pseudo-sections, inversion and batch export.")
+            scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
 
-        scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
-
-        mode = st.radio(
-            "Measurement mode",
-            list(MODES.keys()),
-            horizontal=True,
-            help="For legacy multi-sheet files. GEM files show both EC and MS automatically.",
-        )
-
-        distance_step = st.number_input(
-            "Distance step (m)",
-            min_value=0.01,
-            max_value=100.0,
-            value=DEFAULT_DISTANCE_STEP,
-            step=0.1,
-            format="%.2f", help=SCIENCE_HELP["distance_step"],
-        )
-
-        interp_kind = st.selectbox(
-            "Interpolation method",
-            ALL_INTERP_METHODS,
-            index=0,
-            format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
-            help=SCIENCE_HELP["interpolation"],
-        )
-        if scoring and interp_kind in TREND_FIT_METHODS:
-            st.warning(TREND_FIT_WARNING)
-
-        if distance_step > 10.0:
-            st.warning(
-                f"Distance step is {distance_step:.2f} m. "
-                "If your data spans less than this, all sheets will be skipped."
+            mode = st.radio(
+                "Measurement mode",
+                list(MODES.keys()),
+                horizontal=True,
+                help="For legacy multi-sheet files. GEM files show both EC and MS automatically.",
             )
+
+            distance_step = st.number_input(
+                "Distance step (m)",
+                min_value=0.01,
+                max_value=100.0,
+                value=DEFAULT_DISTANCE_STEP,
+                step=0.1,
+                format="%.2f", help=SCIENCE_HELP["distance_step"],
+            )
+
+            interp_kind = st.selectbox(
+                "Interpolation method",
+                ALL_INTERP_METHODS,
+                index=0,
+                format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
+                help=SCIENCE_HELP["interpolation"],
+            )
+            if scoring and interp_kind in TREND_FIT_METHODS:
+                st.warning(TREND_FIT_WARNING)
+
+            if distance_step > 10.0:
+                st.warning(
+                    f"Distance step is {distance_step:.2f} m. "
+                    "If your data spans less than this, all sheets will be skipped."
+                )
 
         prep = render_data_sidebar()
         if scoring and prep.corrections.lowers_noise:
