@@ -57,7 +57,7 @@ The app opens in your browser at `http://localhost:8501`.
   - MS: `MSusc{freq}Hz[1/1000]`
   - In-phase / quadrature: `I_{freq}Hz`, `Q_{freq}Hz` (ppm)
 - Optional columns used when present: `X`/`Y` or `Lat`/`Lon`, `Sample`, `Mark` (event markers), `Status` (quality flag), `PowerLn` (power-line noise, mG), `QSum`, `TotalEC[mS/m]`
-- Tables converted from `.gbf` files are read too: in-phase / quadrature named `Ip_{freq}Hz` / `Qd_{freq}Hz` are renamed, and without a `Line` column the lines are taken from runs of constant X (lines walked along Y) or constant Y, else from pauses of more than 3 s in the time column. The warnings say how the lines were found.
+- Tables converted from `.gbf` files are read too: in-phase / quadrature named `Ip_{freq}Hz` / `Qd_{freq}Hz` are renamed, and without a `Line` column the lines are taken from runs of constant X (lines walked along Y) or constant Y, and a new line also starts wherever the along-line coordinate restarts (e.g. Y runs 0 → 77 m, then back to 0), so a grid is split correctly even when X never changes; else from pauses of more than 3 s in the time column. The warnings say how the lines were found.
 - Each mode found in the file gets its own tab: **EC**, **MS**, **I**, **Q** and **AUX** (power-line noise, quadrature sum, total EC)
 
 ### GEM data options (sidebar)

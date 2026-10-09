@@ -80,6 +80,24 @@ CHANNEL_ALIASES = {                        # other export names -> WinGEM names
 }
 MIN_LINE_READINGS = 10       # readings per line, on average, for lines taken from a constant coordinate
 LINE_GAP_SECONDS = 3.0       # a pause longer than this starts a new line (when no coordinate is constant)
+RESTART_STEPS = 5            # a jump back longer than this many usual steps starts a new line
+
+
+def _restarts(v: np.ndarray) -> np.ndarray:
+    """
+    Readings where a coordinate walked in one direction jumps back to the
+    start of a line (e.g. Y runs 0 -> 77 m, then 0 again): a step against the
+    usual walking direction and longer than RESTART_STEPS usual steps. A line
+    walked back the other way (serpentine) has no such jump.
+    """
+    out = np.zeros(len(v), dtype=bool)
+    steps = np.diff(v)
+    moving = steps[steps != 0]
+    if len(moving) == 0:
+        return out
+    direction = np.sign(np.median(moving))
+    out[1:] = (np.sign(steps) == -direction) & (np.abs(steps) > RESTART_STEPS * np.median(np.abs(moving)))
+    return out
 
 
 def infer_lines(df: pd.DataFrame) -> tuple[np.ndarray, str]:
@@ -87,31 +105,52 @@ def infer_lines(df: pd.DataFrame) -> tuple[np.ndarray, str]:
     Line labels for a table without a Line column, and how they were found.
     A grid survey keeps one coordinate constant along each line (X for lines
     walked along Y, or Y for lines along X): a new line starts wherever that
-    coordinate changes, and lines are labelled by its value when every line
-    has its own. Otherwise (e.g. GPS positions) a new line starts after a
-    pause of more than LINE_GAP_SECONDS; without a time column the whole file
-    is one line.
+    coordinate changes, and also wherever the other coordinate restarts
+    (jumps back to the start of the line, so one X can hold several lines).
+    Lines are labelled by the constant coordinate when every line has its
+    own value, else numbered from 0. With a single coordinate column, lines
+    are split where it restarts. Otherwise (e.g. GPS positions) a new line
+    starts after a pause of more than LINE_GAP_SECONDS; without a time column
+    the whole file is one line.
     """
     lower = {str(c).strip().lower(): c for c in df.columns}
-    best = None
+    coords = {}
     for name in ("x", "y"):
         if name not in lower:
             continue
         v = pd.to_numeric(df[lower[name]], errors="coerce").ffill().bfill().to_numpy(dtype=float)
-        if len(v) == 0 or not np.isfinite(v).all():
-            continue
+        if len(v) and np.isfinite(v).all():
+            coords[name] = v
+    best = None
+    for name, v in coords.items():
         starts = np.concatenate([[True], np.diff(v) != 0])
         runs = int(starts.sum())
         if runs <= max(1, len(v) // MIN_LINE_READINGS) and (best is None or runs < best[0]):
             best = (runs, name, v, starts)
     if best is not None:
         runs, name, v, starts = best
+        how = f"lines taken from runs of constant {name.upper()}"
+        along = "y" if name == "x" else "x"
+        if along in coords:
+            restarts = _restarts(coords[along])
+            if (restarts & ~starts).any():
+                starts = starts | restarts
+                runs = int(starts.sum())
+                how += f" and where {along.upper()} restarts"
         run_values = v[starts]
         if len(np.unique(run_values)) == runs:
             labels = v
         else:
             labels = (np.cumsum(starts) - 1).astype(float)
-        return labels, f"lines taken from runs of constant {name.upper()} ({runs} lines)"
+        return labels, f"{how} ({runs} lines)"
+    if len(coords) == 1:
+        (name, v), = coords.items()
+        starts = _restarts(v)
+        if starts.any():
+            starts[0] = True
+            return (np.cumsum(starts) - 1).astype(float), (
+                f"lines split where {name.upper()} restarts ({int(starts.sum())} lines)"
+            )
     t = time_seconds(df)
     if t is not None:
         t = pd.Series(t).ffill().bfill().to_numpy()
