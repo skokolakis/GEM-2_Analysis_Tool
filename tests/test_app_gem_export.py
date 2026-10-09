@@ -10,7 +10,9 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 import RIs_v2 as R  # noqa: E402
 
 
-def _full_export(scoring: bool = False, distance_method: str = "Y", status_bad: int = 0):
+def _full_export(
+    scoring: bool = False, distance_method: str = "Y", status_bad: int = 0, contour: bool = False,
+):
     """Script body run by AppTest; all imports must be local."""
     import numpy as np
     import pandas as pd
@@ -35,7 +37,8 @@ def _full_export(scoring: bool = False, distance_method: str = "Y", status_bad: 
     table.loc[: status_bad - 1, "Status"] = 3
     data = table.to_csv(index=False).encode()
     prep = pipeline.PrepSettings(distance_method=distance_method)
-    R.render_gem_results(data, "survey.csv", 0.5, "linear", None, scoring, prep)
+    maps = R.ContourSettings(area_map=True, pseudosection=True) if contour else None
+    R.render_gem_results(data, "survey.csv", 0.5, "linear", maps, scoring, prep)
 
 
 def _texts(at):
@@ -91,6 +94,24 @@ def test_scoring_off_shows_channels_not_ranking():
         "EC (2 frequencies)", "MS (2 frequencies)", "I (2 frequencies)",
         "Q (2 frequencies)", "AUX (2 channels)",
     ]
+
+
+def test_representative_profiles_are_in_a_collapsed_expander():
+    at = AppTest.from_function(_full_export, default_timeout=120)
+    at.run()
+    assert not at.exception
+    profiles = [e for e in at.expander if e.label == "Representative profiles"]
+    assert len(profiles) == 5                         # one per tab: EC, MS, I, Q, AUX
+    assert "#### Representative profiles" not in _texts(at)
+
+
+def test_contouring_skips_in_phase_and_quadrature():
+    at = AppTest.from_function(_full_export, kwargs={"contour": True}, default_timeout=180)
+    at.run()
+    assert not at.exception
+    headings = [m.value for m in at.markdown]
+    assert headings.count("#### Pseudo-section") == 2  # EC, MS
+    assert headings.count("#### Area map") == 3        # EC, MS, AUX
 
 
 def test_scoring_on_ranks_frequency_modes_only():
@@ -239,7 +260,7 @@ def test_graph_editor_plots_chosen_columns_in_the_app():
     at.selectbox(key="ge_xcol_gbf_EC").set_value(R.TIME_X).run()
     at.selectbox(key="ge_ycol_gbf_EC").set_value("EC15270Hz[mS/m]").run()
     assert not at.exception
-    assert any("EC15270Hz[mS/m] against Time (s)" in m.value for m in at.markdown)
+    assert any("EC15270Hz[mS/m] against Time (s)" in e.label for e in at.expander)
 
 
 def test_science_choices_have_help_tooltips():

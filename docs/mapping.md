@@ -2,7 +2,7 @@
 
 [← Documentation index](README.md)
 
-Two optional views, switched on in the sidebar under **2D contouring**; both are off by default. Implementation: [`contouring.py`](../contouring.py) (gridding, pseudo-sections) and [`gridtools.py`](../gridtools.py) (map filters, merging, georeferenced exports). Design notes: [`superpowers/specs/2026-10-05-2d-contouring-design.md`](superpowers/specs/2026-10-05-2d-contouring-design.md).
+Two optional views, switched on in the sidebar under **2D contouring**; both are off by default. Their settings sit below the switches in **Area map gridding** and **Map colours**. Pseudo-sections are drawn on the **EC** and **MS** tabs; area maps on the **EC**, **MS** and **AUX** tabs. The raw **I** and **Q** tabs have neither: in-phase and quadrature (ppm) grow with frequency, so a pseudo-section of them mostly shows that trend rather than the ground. Implementation: [`contouring.py`](../contouring.py) (gridding, pseudo-sections) and [`gridtools.py`](../gridtools.py) (map filters, merging, georeferenced exports). Design notes: [`superpowers/specs/2026-10-05-2d-contouring-design.md`](superpowers/specs/2026-10-05-2d-contouring-design.md).
 
 - [Pseudo-section](#pseudo-section-distance--frequency)
 - [Area map](#area-map-plan-view) — [gridding methods](#gridding-methods), [colours](#colours), [projection](#projection), [map processing](#map-processing), [downloads](#downloads)
@@ -22,7 +22,7 @@ Stacks the line-averaged profiles of all frequencies (the mean across survey lin
 
 For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), one frequency at a time. Narrow corridor surveys are accepted when they have at least three distinct line positions; repeat passes along one transect (lines < 1 m apart) are treated as a transect — use the pseudo-section for those. Try it with the [sample survey](getting-started.md#sample-data).
 
-1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees when they hold at least 10 GPS fixes (rows logged as 0, 0 are treated as "no fix" and dropped); otherwise `X`/`Y`. The sidebar override (auto / metres / degrees) applies to `X`/`Y` only. Degrees are projected as described under [Projection](#projection).
+1. **Coordinates** — `Lat`/`Latitude` + `Lon`/`Long`/`Longitude` columns are used as degrees when they hold at least 10 GPS fixes (rows logged as 0, 0 are treated as "no fix" and dropped); otherwise `X`/`Y`. The override under **Area map gridding** (auto / metres / degrees) applies to `X`/`Y` only. Degrees are projected as described under [Projection](#projection).
 2. **Line levelling** (optional) — shifts each line to the survey median to remove line-to-line offsets (striping). It also removes any real gradient across lines, so compare with levelling off. For more advanced levelling see Mauring & Kihle (2006).
 3. **Block-median reduction** — one median point per grid cell, so densely sampled lines do not dominate. Default cell size = √(bounding-box area / number of readings), about one node per reading.
 4. **Gridding** — see the [table below](#gridding-methods).
@@ -53,7 +53,7 @@ Minimum curvature and natural neighbour are computed on the grid itself; cross-v
 
 ### Colours
 
-Shared by the area map and the pseudo-section (sidebar):
+Shared by the area map and the pseudo-section (sidebar → **Map colours**):
 
 | Option | Choices |
 |---|---|
@@ -66,7 +66,7 @@ To reproduce a Surfer image map: Rainbow (Surfer), continuous image, full data r
 
 ### Projection
 
-`Lat`/`Lon` are projected to local metres about the survey centre (default: equirectangular projection of a spherical Earth about the centroid, good to a few tenths of a percent at site scale) or to **UTM (WGS 84)** in the zone of the survey centre (sidebar *Projection of Lat/Lon*). For files whose `X`/`Y` are already projected, enter their **EPSG code** (e.g. 32634 for UTM 34N) so the exports carry it.
+`Lat`/`Lon` are projected to local metres about the survey centre (default: equirectangular projection of a spherical Earth about the centroid, good to a few tenths of a percent at site scale) or to **UTM (WGS 84)** in the zone of the survey centre (sidebar → **Area map gridding** → *Projection of Lat/Lon*). For files whose `X`/`Y` are already projected, enter their **EPSG code** (e.g. 32634 for UTM 34N) so the exports carry it.
 
 ### Map processing
 

@@ -31,9 +31,9 @@ The light, publication-style theme comes from [`.streamlit/config.toml`](../.str
 ## A first pass through the app
 
 1. **Upload** one or more `.xlsx` or `.csv` files. GEM-2 exports are recognised from their column names; anything else is read as a legacy multi-sheet file — see [Input data](input-data.md).
-2. **Sidebar → Processing**: choose the distance step and interpolation method, and switch on **Frequency scoring** if you want frequencies ranked — see [Profiles, scoring & interpolation](profiles-and-scoring.md).
-3. **Sidebar → GEM data**: Status flags, lines to leave out, how distance along each line is measured, sensor geometry, and [corrections & filters](corrections.md).
-4. **Sidebar → 2D contouring**: switch on area maps or pseudo-sections — see [2D mapping](mapping.md).
+2. **Sidebar → Profiles → Profile interpolation & scoring**: choose the distance step and interpolation method, and switch on **Frequency scoring** if you want frequencies ranked — see [Profiles, scoring & interpolation](profiles-and-scoring.md).
+3. **Sidebar → GEM files**: **GEM data preparation** (Status flags, lines to leave out, how distance along each line is measured), **Sensor geometry** and [**Corrections & filters**](corrections.md). Each sidebar group is named after the tool it sets and starts with a line saying which tools use it.
+4. **Sidebar → 2D contouring**: switch on area maps or pseudo-sections, then set them under **Area map gridding** and **Map colours** — see [2D mapping](mapping.md).
 5. Each file gets one tab per mode found (**EC**, **MS**, **I**, **Q**, **AUX**) with profiles, the graph editor and downloads. Under **Further analysis** are the [sensor physics](sensor-physics.md), [interpretation](interpretation.md) and [soil](soil-tools.md) tools.
 6. The **Forward model** on the main page works without an upload — use it to choose frequencies before a survey.
 
