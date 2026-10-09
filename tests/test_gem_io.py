@@ -171,6 +171,25 @@ def test_lines_from_constant_y_from_time_gaps_or_one_line():
     assert df["Line"].nunique() == 1 and any("one line" in m for m in msgs)
 
 
+def test_lines_split_where_y_restarts():
+    # X never changes: only Y jumping back to the start of the line marks a new line
+    same_x = _gbf_export(lines=4)
+    same_x["X"] = 0.0
+    df, msgs = G.normalise_columns(same_x)
+    assert df["Line"].tolist() == [float(k) for k in range(4) for _ in range(21)]
+    assert any("Y restarts" in m and "4 lines" in m for m in msgs)
+    df, msgs = G.normalise_columns(same_x.drop(columns=["X", "Time[ms]"]))   # no X column at all
+    assert df["Line"].nunique() == 4 and any("Y restarts" in m for m in msgs)
+    two_passes = pd.concat([_gbf_export(lines=2), _gbf_export(lines=2)], ignore_index=True)
+    df, _ = G.normalise_columns(two_passes)                 # each X walked twice
+    assert df["Line"].nunique() == 4
+    serpentine = _gbf_export(lines=3)
+    serpentine["X"] = 0.0
+    serpentine.loc[21:41, "Y"] = serpentine.loc[21:41, "Y"].to_numpy()[::-1]   # walked back
+    df, _ = G.normalise_columns(serpentine)
+    assert df["Line"].nunique() == 1                         # a turn is not a restart
+
+
 def test_normalise_leaves_wingem_exports_alone():
     df = _export()
     out, msgs = G.normalise_columns(df)
