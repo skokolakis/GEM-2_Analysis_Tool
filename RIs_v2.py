@@ -165,6 +165,27 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "Direction of the coil axis (the walking direction) on the map; the footprint is "
         "longer along it."
     ),
+    "colour_lines": (
+        "Draws black contour lines at the colour boundaries on top of the map."
+    ),
+    "colour_map": (
+        "Colours from low to high values. Viridis and cividis change evenly in brightness, so "
+        "equal steps in value look equal; rainbow scales (Surfer's default rainbow, jet, "
+        "turbo) show more detail at a glance but make some value steps look like sharp "
+        "edges."
+    ),
+    "colour_range": (
+        "Values the colours span. Percentiles (default 2–98 %) keep a few extreme readings "
+        "from washing out the rest; the full range shows every value in colour, as Surfer "
+        "does; fixed values give several maps the same scale. Values beyond the range take "
+        "the end colours (arrows on the colour bar)."
+    ),
+    "colour_scale": (
+        "How values map to colours. Linear: equal value steps get equal colour steps. "
+        "Logarithmic: equal ratios do (positive values only), for skewed data such as EC. "
+        "Histogram-equalised: each colour covers the same share of the map, which shows "
+        "the most contrast in skewed data but stretches small differences."
+    ),
     "combined": (
         "Merged: one map from several surveys, each levelled to the others where they "
         "overlap. Difference: the change between two surveys of the same area (B − A)."
@@ -204,9 +225,19 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "removing calibration offsets between days."
     ),
     "gridding": (
-        "How values between readings are estimated. Thin-plate spline: smooth surface through "
-        "the data. Ordinary kriging: weights from the spatial correlation (variogram), with "
-        "an error map. Linear: flat triangles between readings, no smoothing."
+        "How values between readings are estimated (the methods of Surfer's Grid Data). "
+        "Thin-plate spline: smooth surface through the data. Ordinary kriging: weights from "
+        "the spatial correlation (variogram), with an error map. Linear: flat triangles "
+        "between readings. Minimum curvature: the smoothest surface through the data, common "
+        "for geophysical maps. Inverse distance: weighted mean, nearer readings count more; "
+        "leaves bull's-eyes around readings. Radial basis function: spline-like surface from "
+        "a chosen kernel. Natural neighbour: weights from the area each reading would give "
+        "up; smooth and never beyond the data range. Nearest neighbour: value of the closest "
+        "reading. Modified Shepard: inverse distance blending local quadratics, so it "
+        "follows trends. Local polynomial: a weighted polynomial fitted around each node. "
+        "Polynomial regression: one trend surface for the whole area (regional trend). "
+        "Moving average: mean of the readings within a search radius. Data metrics: a "
+        "statistic of the readings within a search radius, e.g. their number."
     ),
     "heading": (
         "Keeps only readings walked within a range of headings, e.g. to check for heading "
@@ -223,6 +254,14 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "from deeper on average. Used by the physics tools, the EC / MS recompute and the "
         "inversion."
     ),
+    "idw_power": (
+        "How fast a reading's weight falls with distance. 2 is the usual choice; higher "
+        "powers follow the nearest readings more closely, lower ones average more."
+    ),
+    "idw_smoothing": (
+        "Adds this distance to every reading's distance, so no reading is matched exactly "
+        "and bull's-eyes soften. 0 passes through the readings."
+    ),
     "interpolation": (
         "How each pass is resampled onto the common grid. Linear and nearest are the most "
         "conservative; cubic, quadratic, PCHIP and Akima are smooth (PCHIP and Akima do not "
@@ -234,8 +273,15 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "levels": (
         "Number of colour bands between the lowest and highest mapped value."
     ),
+    "local_power": (
+        "How fast a reading's weight falls across the search: (1 − d / R)^power."
+    ),
     "map_despike": (
         "How far from the local median a cell must be, in robust σ units, to be replaced."
+    ),
+    "map_display": (
+        "Filled contours group values into the colour bands. A continuous image colours "
+        "every grid cell by its own value, without banding (Surfer's image map)."
     ),
     "map_filter": (
         "Despike replaces isolated outlier cells. Low-pass smooths. High-pass removes the "
@@ -244,9 +290,27 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "map_window": (
         "Size of the moving window, in cells per side."
     ),
+    "method_order": (
+        "Order of the polynomial: 1 is a plane, 2 a quadratic surface, 3 a cubic one. Higher "
+        "orders follow more detail but swing more where readings are sparse."
+    ),
+    "metric": (
+        "Statistic of the readings within the search radius of each node. The number and "
+        "density of readings show the survey coverage; the others summarise the values."
+    ),
+    "min_curvature_tension": (
+        "0 gives the smoothest surface (minimum curvature), which may overshoot between "
+        "readings; values towards 1 pull the surface tight between them, like a stretched "
+        "membrane (Smith & Wessel, 1990). 0.25–0.35 suits steep anomalies."
+    ),
     "pseudosection": (
         "Frequency against distance for each line. Lower frequencies see deeper on average, "
         "but the frequency axis is not a calibrated depth (McNeill, 1980)."
+    ),
+    "rbf_kernel": (
+        "Basis function of the surface. Multiquadric (Surfer's default) gives a smooth "
+        "surface that follows the data closely; inverse multiquadric is flatter away from "
+        "readings; the natural cubic and thin-plate splines bend least."
     ),
     "ref_method": (
         "Regression: least-squares line through the matched pairs. Moments: gain and offset "
@@ -255,6 +319,10 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "ref_radius": (
         "Survey readings within this distance of a reference point are matched to it (their "
         "median)."
+    ),
+    "search_radius": (
+        "Readings within this distance of a node are used. 0 = automatic: a circle that "
+        "holds about 16 readings at the survey's mean density."
     ),
     "separation": (
         "Distance from the transmitter to the receiver coil (1.66 m on the GEM-2). Wider "
@@ -327,6 +395,9 @@ class ContourSettings:
     n_levels: int = 20
     projection: str = "local"             # key of contouring.PROJECTIONS (degrees input)
     xy_epsg: int | None = None            # CRS of metre X/Y when known
+    method_options: tuple = ()            # (name, value) pairs, see contouring.METHOD_DEFAULTS
+    colours: ctr.ColourStyle = ctr.ColourStyle()
+    show_points: bool = True
 
 
 PSEUDOSECTION_CAPTION = (
@@ -1651,6 +1722,7 @@ def grid_params(contour: ContourSettings) -> dict:
         "variogram_model": contour.variogram_model,
         "projection": contour.projection,
         "xy_epsg": contour.xy_epsg,
+        "options": dict(contour.method_options),
     }
 
 
@@ -1878,7 +1950,10 @@ def render_contouring_sidebar() -> ContourSettings:
     area = st.toggle("Area map (plan view)", value=False, key="ct_area", help=SCIENCE_HELP["area_map"])
     pseudo = st.toggle("Pseudo-section", value=False, key="ct_pseudo", help=SCIENCE_HELP["pseudosection"])
     if not area:
-        return ContourSettings(area_map=False, pseudosection=pseudo)
+        if not pseudo:
+            return ContourSettings()
+        colours = render_colour_controls()
+        return ContourSettings(pseudosection=True, n_levels=colours.n_levels, colours=colours)
 
     coord_mode = st.selectbox(
         "Coordinates", ["auto", "metres", "degrees"],
@@ -1897,10 +1972,16 @@ def render_contouring_sidebar() -> ContourSettings:
             "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key="ct_smooth",
             help="0 = exact interpolation; larger values trade fit for smoothness.",
         )
+    if method == "rbf":
+        smoothing = st.number_input(
+            "Smoothing", min_value=0.0, value=0.0, step=0.1, key="ct_rbf_smooth",
+            help="0 = exact interpolation; larger values trade fit for smoothness.",
+        )
     if method == "kriging":
         variogram_model = st.selectbox(
             "Variogram model", ctr.VARIOGRAM_MODELS, key="ct_vario", help=SCIENCE_HELP["variogram"],
         )
+    method_options = render_method_options(method)
     cell = st.number_input(
         "Cell size (m, 0 = auto)", min_value=0.0, value=0.0, step=0.1,
         format="%.2f", key="ct_cell", help=SCIENCE_HELP["cell"],
@@ -1916,7 +1997,6 @@ def render_contouring_sidebar() -> ContourSettings:
     level = st.checkbox(
         "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
     )
-    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels", help=SCIENCE_HELP["levels"])
     projection = st.selectbox(
         "Projection of Lat/Lon", list(ctr.PROJECTIONS), format_func=ctr.PROJECTIONS.get,
         key="ct_proj", help="UTM gives georeferenced .asc / GeoTIFF exports.",
@@ -1930,6 +2010,9 @@ def render_contouring_sidebar() -> ContourSettings:
     if problem:
         st.warning(problem)
         xy_epsg = None
+    colours = render_colour_controls()
+    show_points = st.checkbox("Show data points", value=True, key="ct_points",
+                              help="Marks the readings used for gridding (one per grid cell).")
     return ContourSettings(
         area_map=True,
         pseudosection=pseudo,
@@ -1940,9 +2023,79 @@ def render_contouring_sidebar() -> ContourSettings:
         cell_size=float(cell) or None,
         blank_distance=float(blank) or None,
         level_lines=level,
-        n_levels=int(n_levels),
+        n_levels=colours.n_levels,
         projection=projection,
         xy_epsg=xy_epsg,
+        method_options=method_options,
+        colours=colours,
+        show_points=show_points,
+    )
+
+
+def render_method_options(method: str) -> tuple:
+    """Sidebar inputs for the settings of *method*; returns (name, value) pairs."""
+    defaults = ctr.METHOD_DEFAULTS.get(method, {})
+    opts = {}
+    if method == "idw":
+        opts["power"] = st.number_input("Power", 0.5, 10.0, defaults["power"], step=0.5,
+                                        key="ct_idw_power", help=SCIENCE_HELP["idw_power"])
+        opts["delta"] = st.number_input("Smoothing distance (m)", 0.0, value=defaults["delta"],
+                                        step=0.1, key="ct_idw_delta",
+                                        help=SCIENCE_HELP["idw_smoothing"])
+    elif method == "min_curvature":
+        opts["tension"] = st.slider("Tension", 0.0, 0.95, defaults["tension"], step=0.05,
+                                    key="ct_tension", help=SCIENCE_HELP["min_curvature_tension"])
+    elif method == "rbf":
+        opts["kernel"] = st.selectbox("Basis function", list(ctr.RBF_KERNELS),
+                                      format_func=ctr.RBF_KERNELS.get, key="ct_rbf_kernel",
+                                      help=SCIENCE_HELP["rbf_kernel"])
+    elif method in ("local_polynomial", "polynomial"):
+        opts["order"] = st.selectbox("Polynomial order", [1, 2, 3], key=f"ct_{method}_order",
+                                     help=SCIENCE_HELP["method_order"])
+        if method == "local_polynomial":
+            opts["power"] = st.number_input("Weighting power", 0.0, 10.0, defaults["power"],
+                                            step=0.5, key="ct_local_power",
+                                            help=SCIENCE_HELP["local_power"])
+    elif method in ("moving_average", "metrics"):
+        if method == "metrics":
+            opts["statistic"] = st.selectbox("Statistic", list(ctr.METRICS),
+                                             format_func=ctr.METRICS.get, key="ct_metric",
+                                             help=SCIENCE_HELP["metric"])
+        opts["radius"] = st.number_input("Search radius (m, 0 = auto)", 0.0, value=0.0,
+                                         step=0.5, format="%.2f", key="ct_radius",
+                                         help=SCIENCE_HELP["search_radius"])
+    return tuple(opts.items())
+
+
+def render_colour_controls() -> ctr.ColourStyle:
+    """Sidebar colour settings shared by area maps and pseudo-sections."""
+    st.markdown("**Colours**")
+    cmap = st.selectbox("Colour map", list(ctr.COLOUR_MAPS), format_func=ctr.COLOUR_MAPS.get,
+                        key="ct_cmap", help=SCIENCE_HELP["colour_map"])
+    reverse = st.checkbox("Reverse colours", value=False, key="ct_cmap_reverse")
+    display = st.selectbox("Display", list(ctr.MAP_DISPLAYS), format_func=ctr.MAP_DISPLAYS.get,
+                           key="ct_display", help=SCIENCE_HELP["map_display"])
+    scale = st.selectbox("Colour scale", list(ctr.COLOUR_SCALES),
+                         format_func=ctr.COLOUR_SCALES.get, key="ct_scale",
+                         help=SCIENCE_HELP["colour_scale"])
+    range_mode = st.selectbox("Colour range", list(ctr.COLOUR_RANGES),
+                              format_func=ctr.COLOUR_RANGES.get, key="ct_range",
+                              help=SCIENCE_HELP["colour_range"])
+    percentiles, vmin, vmax = (2.0, 98.0), None, None
+    if range_mode == "percentile":
+        percentiles = st.slider("Percentiles", 0.0, 100.0, (2.0, 98.0), step=0.5,
+                                key="ct_percentiles")
+    elif range_mode == "fixed":
+        vmin = st.number_input("Colour minimum (map units)", value=0.0, key="ct_vmin")
+        vmax = st.number_input("Colour maximum (map units)", value=100.0, key="ct_vmax")
+    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels", help=SCIENCE_HELP["levels"])
+    lines = st.checkbox("Contour lines", value=False, key="ct_lines",
+                        help=SCIENCE_HELP["colour_lines"])
+    return ctr.ColourStyle(
+        cmap=cmap, reverse=reverse, range_mode=range_mode,
+        percentiles=(float(percentiles[0]), float(percentiles[1])),
+        vmin=None if vmin is None else float(vmin), vmax=None if vmax is None else float(vmax),
+        scale=scale, display=display, contour_lines=lines, n_levels=int(n_levels),
     )
 
 
@@ -1960,7 +2113,7 @@ def _render_pseudosection(
         ps = ctr.build_pseudosection(profiles)
         fig = ctr.make_pseudosection_figure(
             ps, ctr.value_label(mode, is_gem),
-            f"Pseudo-section [{mode}] — {file_name}", contour.n_levels,
+            f"Pseudo-section [{mode}] — {file_name}", contour.n_levels, contour.colours,
         )
     except ctr.ContouringError as exc:
         st.info(str(exc))
@@ -2012,9 +2165,10 @@ def _render_area_map(
         result, processing = _map_processing(
             result, file_key, (prep or pipeline.PrepSettings()).sensor, axis
         )
+        label = ctr.result_label(result, label)
         fig = ctr.make_area_map_figure(
-            result, label, f"{freq} [{mode}] — {ctr.METHODS[result.method]}",
-            contour.n_levels,
+            result, label, f"{freq} [{mode}] — {ctr.method_title(result)}",
+            contour.n_levels, show_points=contour.show_points, style=contour.colours,
         )
     except ctr.GridTooLargeError as exc:
         st.warning(str(exc))
@@ -2052,6 +2206,7 @@ def _render_area_map(
                 cv = ctr.cross_validate(
                     result.bx, result.by, result.bv, result.method,
                     contour.smoothing, result.variogram,
+                    options=result.options, spec=result.spec,
                 )
             except ctr.ContouringError as exc:
                 st.error(str(exc))
@@ -2232,7 +2387,10 @@ def render_combined_maps(
                                                      **grid_params(contour))
             st.dataframe(pd.DataFrame({"Survey": chosen, "Offset added": offsets}).round(4),
                          hide_index=True)
-            fig = ctr.make_area_map_figure(result, unit, f"{col} — merged", contour.n_levels)
+            fig = ctr.make_area_map_figure(result, ctr.result_label(result, unit),
+                                           f"{col} — merged", contour.n_levels,
+                                           show_points=contour.show_points,
+                                           style=contour.colours)
             base = f"merged_{label}"
         else:
             c1, c2 = st.columns(2)
@@ -2246,8 +2404,9 @@ def render_combined_maps(
             with st.spinner("Gridding both surveys on one grid…"):
                 result = _difference_map_cached(fa, fb, prep, col, **grid_params(contour))
             fig = ctr.make_area_map_figure(result, f"Δ {unit}", f"{col}: {b} − {a}",
-                                           contour.n_levels, show_points=False,
-                                           cmap="RdBu_r", symmetric=True)
+                                           contour.n_levels, show_points=False, symmetric=True,
+                                           style=replace(contour.colours, cmap="RdBu_r",
+                                                         reverse=False))
             base = f"difference_{label}"
     except ctr.ContouringError as exc:
         st.info(str(exc))
