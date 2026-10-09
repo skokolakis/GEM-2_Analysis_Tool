@@ -411,6 +411,222 @@ LEVELLING_HELP = (
     "lines — compare with levelling off."
 )
 
+DOCS_DIR = Path(__file__).resolve().parent / "docs"
+DOCS_URL = "https://github.com/skokolakis/GEM-2_Analysis_Tool/blob/main/docs"
+
+ABOUT_MD = f"""
+**GEM-2 Analysis Tool** — v2.1 · [documentation]({DOCS_URL}/README.md) ·
+cite as [doi:10.5281/zenodo.18302817](https://doi.org/10.5281/zenodo.18302817)
+
+Profiles, frequency ranking, corrections, sensor physics, inversion,
+2D mapping and soil tools for multi-frequency GEM-2 surveys. Every
+setting has a **?** tooltip with the science behind it.
+
+#### How the GEM-2 measures
+
+The GEM-2 (Won et al., 1996) is a broadband frequency-domain EMI
+sensor. A transmitter coil drives a time-varying primary magnetic
+field that induces eddy currents in the ground; their secondary field
+is measured at the receiver as in-phase (I) and quadrature (Q) parts,
+in ppm of the primary. A bucking coil cancels the primary at the
+receiver.
+
+Under the **low-induction-number (LIN)** approximation (McNeill, 1980)
+the two parts decouple:
+
+| Component | Physical quantity | Unit |
+|---|---|---|
+| **Quadrature** (out-of-phase) | Apparent electrical conductivity (EC) | mS/m |
+| **In-phase** | Apparent magnetic susceptibility (MS) | 10⁻³ SI |
+
+**EC** rises with moisture, clay content and mineralogy, salinity and
+fine texture; low values indicate dry, sandy or gravelly ground
+(Reynolds, 2011). **MS** is raised by ferrimagnetic minerals
+(maghemite, magnetite), pedogenic enhancement of topsoil, burning and
+anthropogenic enrichment (hearths, kilns, iron-rich fills) and mafic
+parent material.
+
+The decoupling is not perfect: a viscous (frequency-dependent)
+susceptibility adds to the quadrature (Simon et al., 2015 — see
+*Magnetic viscosity*), and above about 40 kHz the in-phase can include
+a dielectric-permittivity contribution (Benech et al., 2016).
+
+#### Frequency and depth
+
+The **skin depth**
+
+$$\\delta = \\sqrt{{\\frac{{2}}{{\\omega \\mu \\sigma}}}}$$
+
+is the depth at which the primary field falls to 1/e ≈ 37 % of its
+surface value; it shrinks as frequency and conductivity rise. LIN
+holds when the induction number B = s/δ ≪ 1 (s = coil separation).
+Then δ is much larger than the sensor, and the depth response is set
+by the coil geometry, **not** by frequency (McNeill, 1980; Callegary
+et al., 2007). As B grows — high frequencies, conductive ground — the
+response moves towards the surface and LIN breaks down (Callegary et
+al., 2007; Delefortrie et al., 2014). For small broadband sensors the
+practical depth of investigation grows roughly with √δ, so lower
+frequencies see *somewhat* deeper (Huang, 2005): a qualitative trend,
+not a depth scale. Depth itself comes from varying the coil geometry
+or height, or from inverting a layered model (e.g. De Smedt et al.,
+2013; *Layered-earth inversion* below). The **Frequency information**
+panel (EC tab) shows δ, B and the depth of investigation for your data.
+
+What differs most between frequencies at one site is therefore the
+**noise** — the GEM-2 shares its transmitter power among its
+frequencies, and the noise level depends strongly on the frequency
+choice (Vilhelmsen & Døssing, 2022) — and whether LIN still holds.
+That is why the best frequency is site-specific, and what the score
+measures.
+
+---
+
+#### Representative incision and scoring
+
+A **representative incision** is a survey transect, typically
+50–200 m long, that crosses the main geophysical contrasts expected
+across the site — for example from a high-EC wetland fringe into a
+low-EC sandy terrace — walked at least twice. The repeat passes reveal
+instrument drift, operator-induced variability and short-term
+environmental noise; this replicated design is what makes the
+between-pass spread a meaningful noise estimate.
+
+Each frequency receives a **representativeness score**:
+
+$$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
+
+| Symbol | Meaning |
+|---|---|
+| **A** | Amplitude — max(p̄) − min(p̄) of the mean profile, taken where at least two passes overlap (single-pass files: the whole profile). The total contrast resolved at that frequency. |
+| **σ_noise** | Noise, estimated from the data as below. |
+
+- **≥ 2 passes (recommended):** at each distance step where at least
+  two passes were measured, the sample variance across passes
+  (ddof = 1); σ is the square root of the mean of these variances.
+  The passes are a finite sample of the measurement process, so the
+  sample formula applies (with two passes the population formula would
+  understate σ by √½ ≈ 0.71). Each pass is used only inside its own
+  measured range — nothing is extrapolated.
+- **1 pass (fallback):** from the *measured* samples, not the
+  interpolated grid. Second differences Δ²y cancel a locally linear
+  trend; for white noise var(Δ²y) = 6σ², so
+  σ ≈ 1.4826 · MAD(Δ²y) / √6. The median absolute deviation ignores
+  the few large differences at sharp boundaries, and the estimate does
+  not depend on the distance step or interpolation method.
+  Single-pass scores are less reliable; the ranking warns when they
+  are mixed with multi-pass scores.
+- **σ < 10⁻⁸ or not estimable:** the score is left blank and ranked
+  last, with a warning.
+
+A higher score is a higher signal-to-noise ratio, the standard
+geophysical criterion for data quality (Sheriff & Geldart, 1995;
+Bakulin et al., 2022).
+
+> **Filters change scores.** Despiking, the running mean, PCA and the
+> polynomial trend fit all lower σ and so raise the score. Compare
+> scores only between runs with the same settings.
+
+**Frequency selection** under the ranking keeps up to three
+high-scoring frequencies whose mean profiles are not strongly
+correlated, since correlated frequencies carry the same information
+(Minsley et al., 2010; Vilhelmsen & Døssing, 2022).
+
+---
+
+#### Processing pipeline
+
+| Step | What happens |
+|---|---|
+| **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions); anything else is read as a legacy one-sheet-per-frequency workbook. Readings with a non-zero `Status` are dropped (optional). |
+| **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration, EC at 25 °C, PCA, running mean, heading filter. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
+| **3. Locate** | The distance of each reading along its line is found (sidebar **Distance along line**); each channel becomes a distance × line matrix. |
+| **4. Interpolate** | Every pass is resampled onto a common distance grid (**Distance step**) inside its own measured range. At a repeated distance within a pass only the first reading is kept. |
+| **5. Score** (optional) | With **Frequency scoring** on, the mean profile, σ and score of each frequency; frequencies ranked by descending score. |
+| **6. Visualise & export** | Overview and per-frequency plots (passes, mean profile, ±1σ envelope), graph editor, maps, and per-file and batch downloads. |
+
+> **Precision note:** GEM CSV exports round EC to integers and MS to
+> one decimal place. For quantitative frequency comparison use the
+> XLSX export, which keeps the instrument's full precision.
+
+---
+
+#### Interpolation methods
+
+| Method | Min. points | Characteristics |
+|---|---|---|
+| **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
+| **nearest** | 1 | Value of the closest data point. Useful for step-like signals. |
+| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
+| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Shape-preserving, monotone within each interval — avoids the overshoot of cubic splines. |
+| **akima** | 5 | Akima (1970) local spline. Slopes from neighbouring points only, so robust to isolated outliers. |
+| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Lowers σ and inflates the score — do not compare its scores with the other methods. |
+
+**Batch export — all methods** runs all seven in one step for direct
+comparison.
+
+---
+
+#### Tools
+
+| Area | What it does | Key references |
+|---|---|---|
+| **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration (ERT / TDR), EC at 25 °C, PCA noise reduction, running mean, heading filter | Vilhelmsen & Døssing (2022); Minsley et al. (2010); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
+| **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
+| **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured between-pass noise; EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
+| **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
+| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and Surfer's gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, modified Shepard's method and more — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Franke & Nielson (1980); Renka (1988); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
+| **Soil tools** | Response-surface sampling design, soil-property calibration on ln(EC), fuzzy c-means management zones | Lesch (2005); Lesch et al. (1995); Bezdek (1981); Fridgen et al. (2004); Boydell & McBratney (2002) |
+
+Methods in full: [documentation]({DOCS_URL}/README.md).
+
+---
+
+#### Supported file formats
+
+| Format | Notes |
+|---|---|
+| **GEM-2 `.xlsx`** | Full instrument precision — recommended for scoring |
+| **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
+| **GEM-2 I / Q** | `I_…Hz` / `Q_…Hz` in ppm, plus `PowerLn`, `QSum`, `TotalEC[mS/m]` when present |
+| **`.gbf`-converted tables** | `Ip_` / `Qd_` columns; lines found from X / Y or time when there is no `Line` column |
+| **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = passes |
+
+---
+
+#### Glossary
+
+| Term | Definition |
+|---|---|
+| **EMI** | Frequency-domain electromagnetic induction |
+| **I / Q** | In-phase / quadrature part of the secondary field, in ppm of the primary |
+| **EC** | Apparent electrical conductivity (mS/m) — from the quadrature |
+| **MS** | Apparent magnetic susceptibility (10⁻³ SI) — from the in-phase |
+| **LIN** | Low-induction-number approximation (B = s/δ ≪ 1), under which EC and MS decouple (McNeill, 1980) |
+| **Skin depth (δ)** | Depth at which the primary field falls to 1/e; decreases with frequency and conductivity |
+| **SNR** | Signal-to-noise ratio |
+| **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
+| **Amplitude (A)** | max − min of the mean profile where at least two passes overlap |
+| **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
+| **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
+| **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
+| **Akima spline** | Local spline with slopes from neighbouring points only |
+
+---
+
+#### References
+"""
+
+
+def about_references_markdown() -> str:
+    """Bibliography of the About panel, read from docs/references.md so the
+    app and the documentation always cite the same works."""
+    try:
+        text = (DOCS_DIR / "references.md").read_text(encoding="utf-8")
+    except OSError:
+        return f"See [References]({DOCS_URL}/references.md)."
+    return "\n".join(line for line in text.splitlines() if line.startswith("- "))
+
 
 # ---------------------------------------------------------------------------
 # GEM format detection & pivoting
@@ -2625,348 +2841,8 @@ def main():
 
         st.divider()
         with st.expander("About & methods", expanded=False):
-            st.markdown(
-                """
-**GEM-2 Analysis Tool** — v2.1 · [documentation](https://github.com/skokolakis/GEM-2_Analysis_Tool#readme)
-
-#### Geophysical background
-
-##### How EMI instruments work
-
-The GEM-2 (Won et al., 1996) is a **broadband frequency-domain
-EMI sensor**. A transmitter coil generates a time-varying
-primary magnetic field that induces eddy currents in conductive
-subsurface materials. Those currents produce a secondary magnetic
-field, which the receiver coil measures as a complex voltage
-ratio relative to the primary.
-
-Under the **low-induction-number (LIN) approximation**
-(McNeill, 1980) — valid when the ratio of coil separation to
-skin depth is much less than 1 — the two components of the
-secondary field decouple cleanly:
-
-| Component | Physical quantity | Unit |
-|---|---|---|
-| **Quadrature** (out-of-phase) | Apparent electrical conductivity (EC) | mS/m |
-| **In-phase** | Apparent magnetic susceptibility (MS) | 10⁻³ SI (ppt, dimensionless) |
-
-This separation means a single instrument pass simultaneously
-maps two independent subsurface properties.
-
-##### What EC tells you
-
-**Electrical conductivity** reflects how easily electrical
-current flows through the bulk soil. It is controlled by:
-
-- **Moisture content** — water greatly increases EC
-- **Clay content and mineralogy** — clays with high CEC
-  (e.g. smectite) are strongly conductive
-- **Salinity** — dissolved ions are the primary charge carriers
-- **Soil texture** — fine-grained materials retain more water
-  and conduct better than coarse sands or gravels
-
-High EC values indicate fine-grained, moist, saline, or
-clay-rich substrates. Low values indicate dry, sandy, or
-gravelly soils (Reynolds, 2011).
-
-##### What MS tells you
-
-**Magnetic susceptibility** measures how strongly the soil is
-magnetised by the primary field. Elevated MS is associated with:
-
-- **Ferrimagnetic minerals** — especially maghemite (γ-Fe₂O₃)
-  and magnetite (Fe₃O₄)
-- **Pedogenic enhancement** — topsoil MS is often higher than
-  subsoil due to bacterial reduction–oxidation cycles forming
-  fine-grained magnetite
-- **Burning and anthropogenic enrichment** — fired hearths,
-  kilns, and iron-rich fills are classic high-MS targets in
-  archaeological surveys
-- **Mafic lithologies** — basaltic parent material produces
-  naturally elevated background MS
-
-##### Why frequency matters
-
-The **skin depth** δ (in metres) is the depth at which the
-primary field amplitude falls to 1/e ≈ 37 % of its surface
-value:
-
-$$\\delta = \\sqrt{\\frac{2}{\\omega \\mu \\sigma}}$$
-
-where ω is angular frequency, μ is magnetic permeability, and
-σ is electrical conductivity. Because δ ∝ f⁻¹/², **lower
-frequencies penetrate deeper** while **higher frequencies are
-more sensitive to the shallow subsurface** (Callegary et al.,
-2007). At a given site the optimal frequency is therefore
-site-specific: it depends on the depth of the target and the
-background conductivity.
-
-The LIN approximation holds when the induction number
-B = s/δ ≪ 1, where s is the coil separation. At high
-frequencies or in very conductive soils this condition breaks
-down and the linear relationship between signal and subsurface
-properties no longer holds. The tool's scoring is most reliable
-when the LIN condition is satisfied across all tested
-frequencies.
-
-##### What a representative incision is
-
-A **representative incision** is a carefully chosen survey
-transect, typically 50–200 m long, that crosses the main
-geophysical contrasts expected across the site — for example,
-running from a known high-EC wetland fringe into a low-EC
-sandy terrace. Repeated passes (at least two) along the same
-line allow assessment of instrument drift, operator-induced
-variability, and short-term environmental noise. This replicated
-design is what makes the between-trace standard deviation a
-meaningful noise estimate.
-
----
-
-#### Scoring methodology
-
-Each frequency receives a **representativeness score**:
-
-$$\\text{Score} = \\frac{A}{\\sigma_{\\text{noise}}}$$
-
-| Symbol | Meaning |
-|---|---|
-| **A** | Signal amplitude — the peak-to-trough range of the mean profile: max(p̄) − min(p̄), taken where at least two passes overlap. Captures the total geophysical contrast resolved at that frequency. |
-| **σ_noise** | Noise — estimated from the data depending on how many passes were acquired (see below). |
-
-A higher score means the frequency resolves large subsurface
-contrasts clearly above the noise level. This is equivalent to a
-high signal-to-noise ratio (SNR), the standard geophysical
-criterion for data quality (Sheriff & Geldart, 1995).
-
-**How noise is estimated:**
-
-**With ≥ 2 passes (recommended):**
-At each distance step where at least two passes were measured,
-the sample variance across passes (ddof = 1) is computed; σ is
-the square root of the mean of these variances. The passes are a
-finite sample of the measurement process whose noise is being
-estimated, so the sample formula applies. This σ captures all
-sources of between-pass variability: instrument noise,
-positioning uncertainty, and short-term drift. Each pass is used
-only inside its own measured distance range — nothing is
-extrapolated.
-
-**With 1 pass only (single-trace fallback):**
-Between-trace σ is undefined, so the tool estimates noise from
-the *measured* samples of that pass (not the interpolated grid).
-Second differences Δ²y cancel a locally linear geological trend;
-for white noise var(Δ²y) = 6σ², so σ ≈ 1.4826 · MAD(Δ²y) / √6.
-The median absolute deviation ignores the few large differences
-at sharp boundaries, and the estimate does not depend on the
-distance step or interpolation method. Single-trace scores are
-less reliable — multiple passes are always preferable — and the
-ranking warns when they are mixed with multi-pass scores.
-
-**Zero or undefined noise:**
-When σ < 10⁻⁸ or cannot be estimated, the score is left blank and
-ranked last, with a warning.
-
----
-
-#### Processing pipeline
-
-| Step | What happens |
-|---|---|
-| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`, `I_*Hz`, `Q_*Hz`). Readings with a non-zero `Status` are dropped (optional), the enabled **Corrections & filters** run (despike, height, drift, calibration, GPS lag, …), and the distance of each reading along its line is found (sidebar **Distance along line**). The flat GEM table is pivoted: each channel becomes a matrix with distance as rows and survey lines as columns. |
-| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). At a repeated distance within a trace only the first reading is kept. Each trace is left blank outside its own measured range. |
-| **3. Score** (optional) | With **Frequency scoring** on, the mean profile and noise metric are computed as above and frequencies are ranked by descending score. |
-| **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
-| **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
-
-> **Precision note:** GEM CSV exports round EC values to integers
-> and MS to one decimal place, discarding the instrument's full
-> precision (3+ decimal places available in the XLSX). For
-> quantitative frequency comparison, always use the XLSX export.
-
----
-
-#### Interpolation methods
-
-Seven methods are available from the sidebar dropdown. Each is applied uniformly to all traces within the selected file.
-
-| Method | Min. points | Characteristics |
-|---|---|---|
-| **linear** | 2 | Piecewise linear connection between data points. Conservative, no overshoot. Recommended for noisy or sparse data. |
-| **nearest** | 1 | Assigns each grid point the value of the closest data point. Useful for step-like or categorical-style signals. |
-| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
-| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth, low-noise profiles. May overshoot at sharp boundaries. |
-| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial. Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
-| **akima** | 5 | Akima (1970) local spline. Uses only neighbouring points to set slopes, making it robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. |
-
-The **Batch export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
-
----
-
-#### 2D contouring
-
-Switch on in the sidebar under **2D contouring**.
-
-- **Pseudo-section** — mean profiles of all frequencies as one
-  distance × frequency contour, aligned on their common distance
-  range. The frequency axis is *not* a calibrated depth axis:
-  under LIN the depth response is set by coil geometry (McNeill,
-  1980; Callegary et al., 2007); at most, lower frequencies see
-  somewhat deeper (Huang, 2005).
-- **Area map** — plan-view grid of one frequency from the X/Y (or
-  Lat/Lon) coordinates of all lines: optional per-line median
-  levelling (a simple form; cf. Mauring & Kihle, 2006),
-  block-median reduction, then one of Surfer's gridding methods:
-  thin-plate spline (Briggs, 1974; Sandwell, 1987), ordinary
-  kriging with a fitted variogram and standard-deviation map
-  (Corwin & Lesch, 2005; Oliver & Webster, 2014; for
-  regression / cokriging alternatives see Lesch et al., 1995),
-  minimum curvature with tension (Briggs, 1974; Smith & Wessel,
-  1990), inverse distance, radial basis functions, natural
-  neighbour, nearest neighbour, modified Shepard's method
-  (Franke & Nielson, 1980), local polynomial, polynomial
-  regression, moving average, data metrics or linear
-  triangulation. Nodes far from data are blanked.
-  Use **Cross-validate** to compare methods (Li & Heap, 2011).
-
----
-
-#### Supported file formats
-
-| Format | Notes |
-|---|---|
-| **GEM-2 `.xlsx`** | Full instrument precision — recommended for scoring |
-| **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
-| **GEM-2 I/Q** | `I_*Hz` / `Q_*Hz` in ppm, plus `PowerLn`, `QSum`, `TotalEC[mS/m]` when present |
-| **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = survey traces |
-
----
-
-#### Glossary
-
-| Term | Definition |
-|---|---|
-| **EC** | Apparent electrical conductivity (mS/m) — quadrature EMI response |
-| **MS** | Apparent magnetic susceptibility (10⁻³ SI, ppt) — in-phase EMI response |
-| **EMI** | Frequency-domain electromagnetic induction |
-| **LIN** | Low induction number approximation — the condition under which EC and MS decouple linearly (McNeill, 1980) |
-| **Skin depth (δ)** | Depth at which primary field amplitude falls to 1/e; decreases with frequency and conductivity |
-| **GEM-2** | Multi-frequency broadband EMI sensor (Won et al., 1996) |
-| **SNR** | Signal-to-noise ratio |
-| **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
-| **Amplitude (A)** | max − min of the mean profile across all passes |
-| **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single-pass) |
-| **ddof = 1** | Sample standard deviation; used because the passes are a finite sample of the measurement process |
-| **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
-| **PCHIP** | Piecewise Cubic Hermite Interpolating Polynomial — shape-preserving spline that avoids overshoot |
-| **Akima spline** | Local spline that derives slopes from neighbouring points only, reducing sensitivity to outliers |
-| **Batch export** | Single XLSX download packaging interpolated profiles and scores from all uploaded files |
-
----
-
-#### References
-
-- Won, I.J., Keiswetter, D.A., Fields, G.R.A. & Sutton, L.C.
-  (1996). GEM-2: A new multifrequency electromagnetic sensor.
-  *J. Environ. Eng. Geophys.*, **1**(2), 129–137.
-  [doi:10.4133/JEEG1.2.129](https://doi.org/10.4133/JEEG1.2.129)
-
-- McNeill, J.D. (1980). *Electromagnetic terrain conductivity
-  measurement at low induction numbers*. Technical Note TN-6,
-  Geonics Limited, Mississauga, Canada.
-
-- Callegary, J.B., Ferré, T.P.A. & Groom, R.W. (2007).
-  Vertical spatial sensitivity and exploration depth of
-  low-induction-number electromagnetic-induction instruments.
-  *Vadose Zone J.*, **6**(1), 158–167.
-  [doi:10.2136/vzj2006.0120](https://doi.org/10.2136/vzj2006.0120)
-
-- Delefortrie, S., Saey, T., Van De Vijver, E., De Smedt, P.,
-  Missiaen, T., Demerre, I. & Van Meirvenne, M. (2014).
-  Frequency domain electromagnetic induction survey in the
-  intertidal zone: Limitations of low-induction-number and
-  depth of exploration. *J. Appl. Geophys.*, **100**, 119–130.
-  [doi:10.1016/j.jappgeo.2013.10.017](https://doi.org/10.1016/j.jappgeo.2013.10.017)
-
-- De Smedt, P., Van Meirvenne, M., Herremans, D., De Reu, J.,
-  Saey, T., Meerschman, E., Crombé, P. & De Clercq, W. (2013).
-  The 3-D reconstruction of medieval wetland reclamation through
-  electromagnetic induction survey. *Scientific Reports*,
-  **3**, 1517.
-  [doi:10.1038/srep01517](https://doi.org/10.1038/srep01517)
-
-- Reynolds, J.M. (2011). *An Introduction to Applied and
-  Environmental Geophysics* (2nd ed.). Wiley-Blackwell.
-
-- Sheriff, R.E. & Geldart, L.P. (1995). *Exploration
-  Seismology* (2nd ed.). Cambridge University Press.
-
-- Bakulin, A., Silvestrov, I. & Protasov, M. (2022).
-  Signal-to-noise ratio computation for challenging land data.
-  *Geophys. Prospect.*, **70**, 629–638.
-  [doi:10.1111/1365-2478.13183](https://doi.org/10.1111/1365-2478.13183)
-
-- Akima, H. (1970). A new method of interpolation and smooth
-  curve fitting based on local procedures. *J. ACM*, **17**(4),
-  589–602.
-  [doi:10.1145/321607.321609](https://doi.org/10.1145/321607.321609)
-
-- Fritsch, F.N. & Carlson, R.E. (1980). Monotone piecewise
-  cubic interpolation. *SIAM J. Numer. Anal.*, **17**(2),
-  238–246.
-  [doi:10.1137/0717021](https://doi.org/10.1137/0717021)
-
-- Briggs, I.C. (1974). Machine contouring using minimum
-  curvature. *Geophysics*, **39**(1), 39–48.
-  [doi:10.1190/1.1440410](https://doi.org/10.1190/1.1440410)
-
-- Sandwell, D.T. (1987). Biharmonic spline interpolation of
-  GEOS-3 and SEASAT altimeter data. *Geophys. Res. Lett.*,
-  **14**(2), 139–142.
-  [doi:10.1029/GL014i002p00139](https://doi.org/10.1029/GL014i002p00139)
-
-- Lesch, S.M., Strauss, D.J. & Rhoades, J.D. (1995). Spatial
-  prediction of soil salinity using electromagnetic induction
-  techniques: 1. Statistical prediction models: a comparison of
-  multiple linear regression and cokriging. *Water Resour. Res.*,
-  **31**(2), 373–386.
-  [doi:10.1029/94WR02179](https://doi.org/10.1029/94WR02179)
-
-- Corwin, D.L. & Lesch, S.M. (2005). Apparent soil electrical
-  conductivity measurements in agriculture. *Comput. Electron.
-  Agric.*, **46**, 11–43.
-  [doi:10.1016/j.compag.2004.10.005](https://doi.org/10.1016/j.compag.2004.10.005)
-
-- Oliver, M.A. & Webster, R. (2014). A tutorial guide to
-  geostatistics: computing and modelling variograms and kriging.
-  *Catena*, **113**, 56–69.
-  [doi:10.1016/j.catena.2013.09.006](https://doi.org/10.1016/j.catena.2013.09.006)
-
-- Li, J. & Heap, A.D. (2011). A review of comparative studies of
-  spatial interpolation methods in environmental sciences.
-  *Ecol. Inform.*, **6**, 228–241.
-  [doi:10.1016/j.ecoinf.2010.12.003](https://doi.org/10.1016/j.ecoinf.2010.12.003)
-
-- Mauring, E. & Kihle, O. (2006). Leveling aerogeophysical data
-  using a moving differential median filter. *Geophysics*,
-  **71**(1), L5–L11.
-  [doi:10.1190/1.2163912](https://doi.org/10.1190/1.2163912)
-
-- Huang, H. (2005). Depth of investigation for small broadband
-  electromagnetic sensors. *Geophysics*, **70**(6), G135–G142.
-  [doi:10.1190/1.2122412](https://doi.org/10.1190/1.2122412)
-
-- Smith, W.H.F. & Wessel, P. (1990). Gridding with continuous
-  curvature splines in tension. *Geophysics*, **55**(3), 293–305.
-  [doi:10.1190/1.1442837](https://doi.org/10.1190/1.1442837)
-
-- Franke, R. & Nielson, G. (1980). Smooth interpolation of large
-  sets of scattered data. *Int. J. Numer. Methods Eng.*, **15**(11),
-  1691–1704.
-  [doi:10.1002/nme.1620151110](https://doi.org/10.1002/nme.1620151110)
-                """
-            )
+            st.markdown(ABOUT_MD)
+            st.markdown(about_references_markdown())
 
     ui_tools.render_forward_model(prep.sensor)
 
