@@ -5,7 +5,7 @@
 
 A Streamlit web app for processing, analysing and mapping multi-frequency electromagnetic induction (EMI) surveys from the **GEM-2** broadband sensor (Won et al., 1996): from raw WinGEM exports to corrected profiles, frequency rankings, layered-earth inversions and georeferenced maps.
 
-**Try it online:** https://gemris.streamlit.app
+**Try it online:** https://gem-2-analysis-tool.streamlit.app/
 
 ---
 
