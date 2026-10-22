@@ -418,11 +418,12 @@ LEVELLING_HELP = (
     "lines — compare with levelling off."
 )
 
+APP_VERSION = "2.1"
 DOCS_DIR = Path(__file__).resolve().parent / "docs"
 DOCS_URL = "https://github.com/skokolakis/GEM-2_Analysis_Tool/blob/main/docs"
 
 ABOUT_MD = f"""
-**GEM-2 Analysis Tool** — v2.1 · [documentation]({DOCS_URL}/README.md) ·
+**GEM-2 Analysis Tool** — v{APP_VERSION} · [documentation]({DOCS_URL}/README.md) ·
 cite as [doi:10.5281/zenodo.18302817](https://doi.org/10.5281/zenodo.18302817)
 
 Profiles, frequency ranking, corrections, sensor physics, inversion,
@@ -709,8 +710,8 @@ def parse_gem_dataframe(
         dup = keyed.duplicated(keep="first")
         if dup.any():
             warnings.append(
-                f"{int(dup.sum())} repeated reading(s) at the same distance within "
-                f"{keyed.loc[dup, 'Line'].nunique()} line(s): kept the first reading "
+                f"{ui_tools.plural(int(dup.sum()), 'repeated reading')} at the same distance within "
+                f"{ui_tools.plural(keyed.loc[dup, 'Line'].nunique(), 'line')}: kept the first reading "
                 "of each. If a line was walked out-and-back under one Line number, "
                 "give each direction its own Line."
             )
@@ -948,7 +949,7 @@ def process_sheet(
         n_dup = int(df_xy["d"].duplicated().sum())
         if n_dup:
             col_warnings.append(
-                f"column '{col}': {n_dup} repeated distance value(s), kept the first reading"
+                f"column '{col}': {ui_tools.plural(n_dup, 'repeated distance value')}, kept the first reading"
             )
             df_xy = df_xy.drop_duplicates(subset="d", keep="first")
 
@@ -1483,16 +1484,7 @@ def build_all_methods_batch_xlsx(
             file_name = uploaded_file.name
             stem = Path(file_name).stem
 
-            # Detect format once
-            is_gem = False
-            try:
-                if file_name.lower().endswith(".csv"):
-                    probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
-                else:
-                    probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
-                is_gem = is_gem_format(probe)
-            except Exception:
-                pass
+            is_gem = is_gem_upload(file_bytes, file_name)
 
             for method in ALL_INTERP_METHODS:
                 # Retrieve processed data (uses @st.cache_data — free if already computed)
@@ -1557,11 +1549,21 @@ def fig_to_png(fig: plt.Figure) -> bytes:
 # Graph editor UI helper
 # ---------------------------------------------------------------------------
 
+def item_noun(mode: str, is_gem: bool) -> tuple[str, str]:
+    """(singular, plural) for the items of a mode: AUX channels, legacy sheets, or frequencies."""
+    if mode == "AUX":
+        return "channel", "channels"
+    if not is_gem:
+        return "sheet", "sheets"
+    return "frequency", "frequencies"
+
+
 def render_graph_editor(
     output_data: dict[str, pd.DataFrame],
     file_key: str,
     table: pd.DataFrame | None = None,
     mode: str = "",
+    is_gem: bool = True,
 ) -> GraphOptions:
     """
     Render the graph editor expander and return the current GraphOptions.
@@ -1613,7 +1615,7 @@ def render_graph_editor(
         col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
-            st.markdown("**Frequencies / sheets**")
+            st.markdown(f"**Visible {item_noun(mode, is_gem)[1]}**")
             selected = st.multiselect(
                 "Visible items",
                 options=all_sheet_names,
@@ -1660,7 +1662,7 @@ def render_graph_editor(
 
         with col_axes:
             st.markdown("**X axis range**")
-            x_auto = st.checkbox("Auto", value=True, key=f"ge_xauto_{file_key}")
+            x_auto = st.checkbox("Automatic", value=True, key=f"ge_xauto_{file_key}")
             if not x_auto:
                 xc1, xc2 = st.columns(2)
                 x_min = xc1.number_input(
@@ -1675,7 +1677,7 @@ def render_graph_editor(
                     st.caption("X min must be < X max")
 
             st.markdown("**Y axis range**")
-            y_auto = st.checkbox("Auto", value=True, key=f"ge_yauto_{file_key}")
+            y_auto = st.checkbox("Automatic", value=True, key=f"ge_yauto_{file_key}")
             if not y_auto:
                 yc1, yc2 = st.columns(2)
                 y_min = yc1.number_input(
@@ -1745,8 +1747,9 @@ def _render_mode_section(
     markers     : event-marker distances drawn on the profiles
     table       : prepared GEM table, for plots of chosen columns (graph editor)
     """
+    noun, nouns = item_noun(mode, is_gem)
     if not output_data:
-        st.error("No usable frequencies / sheets found.")
+        st.error(f"No usable {nouns} found.")
         return
 
     stem = Path(file_name).stem
@@ -1764,7 +1767,7 @@ def _render_mode_section(
         st.caption(ui_tools.PERMITTIVITY_CAPTION)
 
     # ── Graph editor ─────────────────────────────────────────────────────
-    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode)
+    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode, is_gem=is_gem)
     readings = opts.readings and table is not None
 
     def overview() -> plt.Figure:
@@ -1780,12 +1783,10 @@ def _render_mode_section(
         if not readings and opts.x_column != PROFILE_X:
             st.caption("Representative profiles are drawn against distance along the line; "
                        "choose a channel for Y to plot against another X.")
-        overview_fig = overview()
-        st.pyplot(overview_fig, use_container_width=True)
-        plt.close(overview_fig)
+        ui_tools.show_figure(overview())
 
     # ── Per-sheet detail ─────────────────────────────────────────────────
-    with st.expander("Per-frequency detail plots", expanded=False):
+    with st.expander(f"Per-{noun} detail plots", expanded=False):
         visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
         for sheet_name in visible:
             interp_df = output_data.get(sheet_name)
@@ -1796,46 +1797,29 @@ def _render_mode_section(
                 st.markdown(
                     f"**{sheet_name}** — score {sc['score']:.2f} · "
                     f"A = {sc['amplitude']:.4g} · σ = {sc['mean_std']:.4g} "
-                    f"({sc['noise_method']}, {sc['n_traces']} trace(s))"
+                    f"({sc['noise_method']}, {ui_tools.plural(sc['n_traces'], 'trace')})"
                 )
             else:
-                st.markdown(f"**{sheet_name}** — {sc['n_traces']} trace(s)")
-            sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem, markers)
-            st.pyplot(sheet_fig, use_container_width=True)
-            plt.close(sheet_fig)
+                st.markdown(f"**{sheet_name}** — {ui_tools.plural(sc['n_traces'], 'trace')}")
+            ui_tools.show_figure(make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem, markers))
 
     # ── Downloads ────────────────────────────────────────────────────────
     st.markdown("#### Downloads")
-    columns = st.columns(3 if show_scores else 2)
-
-    with columns[0]:
-        st.download_button(
-            label="Interpolated profiles (.xlsx)",
-            data=build_excel_download(output_data),
-            file_name=f"{stem}_{mode}_interpolated.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_xlsx_{file_key}",
+    download_fig = overview()
+    png_bytes = fig_to_png(download_fig)
+    plt.close(download_fig)
+    with ui_tools.button_row():
+        ui_tools.download_button(
+            "Interpolated profiles (.xlsx)", build_excel_download(output_data),
+            f"{stem}_{mode}_interpolated.xlsx", key=f"dl_xlsx_{file_key}",
         )
-
-    if show_scores:
-        with columns[1]:
-            st.download_button(
-                label="Scores (.csv)",
-                data=build_scores_csv(scores),
-                file_name=f"{stem}_{mode}_scores.csv",
-                mime="text/csv",
+        if show_scores:
+            ui_tools.download_button(
+                "Scores (.csv)", build_scores_csv(scores), f"{stem}_{mode}_scores.csv",
                 key=f"dl_csv_{file_key}",
             )
-
-    with columns[-1]:
-        download_fig = overview()
-        png_bytes = fig_to_png(download_fig)
-        plt.close(download_fig)
-        st.download_button(
-            label="Overview plot (.png)",
-            data=png_bytes,
-            file_name=f"{stem}_{mode}_overview.png",
-            mime="image/png",
+        ui_tools.download_button(
+            "Overview plot (.png)", png_bytes, f"{stem}_{mode}_overview.png",
             key=f"dl_png_{file_key}",
         )
 
@@ -1855,7 +1839,7 @@ def _render_channel_list(
         }
         for name, df in output_data.items()
     ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    ui_tools.show_table(pd.DataFrame(rows))
 
 
 def _render_ranking(scores: dict[str, dict]) -> None:
@@ -1888,11 +1872,7 @@ def _render_ranking(scores: dict[str, dict]) -> None:
         )
         if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
             styled = styled.background_gradient(subset=["Score"], cmap="Blues")
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-        )
+        ui_tools.show_table(styled)
     with col_best:
         best_name, best_metrics = ranking[0]
         st.metric("Best frequency", best_name)
@@ -2165,8 +2145,7 @@ def render_lag_estimate(
             ax.set_xlabel("Lag (s)")
             ax.set_ylabel("Mean |difference|")
             fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            ui_tools.show_figure(fig, stretch=False)
 
 
 def render_contouring_sidebar() -> ContourSettings:
@@ -2357,14 +2336,12 @@ def _render_pseudosection(
     except Exception as exc:  # last resort: never show a traceback
         st.error(f"Pseudo-section failed: {exc}")
         return
-    st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
-    plt.close(fig)
+    ui_tools.show_figure(fig)
     st.caption(PSEUDOSECTION_CAPTION)
-    st.download_button(
-        "Pseudo-section (.png)", data=png,
-        file_name=f"{Path(file_name).stem}_{mode}_pseudosection.png",
-        mime="image/png", key=f"dl_ps_{file_key}",
+    ui_tools.download_button(
+        "Pseudo-section (.png)", png, f"{Path(file_name).stem}_{mode}_pseudosection.png",
+        key=f"dl_ps_{file_key}",
     )
 
 
@@ -2386,7 +2363,9 @@ def _render_area_map(
         )
         return
 
-    freq = st.selectbox("Channel", list(output_data.keys()), key=f"ct_freq_{file_key}")
+    freq = st.selectbox("Channel", list(output_data.keys()), key=f"ct_freq_{file_key}",
+                        help="Channel to grid and map. Gridding settings are in the sidebar "
+                             "under 2D contouring.")
     label = ctr.value_label(mode, is_gem, freq)
     try:
         with st.spinner("Gridding…"):
@@ -2418,9 +2397,8 @@ def _render_area_map(
     except Exception as exc:  # last resort: never show a traceback
         st.error(f"Area map failed: {exc}")
         return
-    st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
-    plt.close(fig)
+    ui_tools.show_figure(fig)
     for msg in processing:
         st.caption(msg)
 
@@ -2501,7 +2479,7 @@ def _render_map_statistics(result: ctr.AreaMapResult, label: str, key: str) -> N
         except ValueError:
             st.info("No values to summarise.")
             return
-        st.dataframe(pd.DataFrame([stats]).round(4), hide_index=True, use_container_width=True)
+        ui_tools.show_table(pd.DataFrame([stats]).round(4))
         values = result.z[np.isfinite(result.z)]
         fig, ax = plt.subplots(figsize=(6, 2.5))
         flat = np.ptp(values) <= 1e-9 * max(float(np.abs(values).max()), 1e-12)  # round-off only
@@ -2509,35 +2487,22 @@ def _render_map_statistics(result: ctr.AreaMapResult, label: str, key: str) -> N
         ax.set_xlabel(label)
         ax.set_ylabel("Grid nodes")
         fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        ui_tools.show_figure(fig, stretch=False)
 
 
 def _render_map_downloads(result: ctr.AreaMapResult, png: bytes, base: str, key: str) -> None:
-    columns = st.columns(5 if result.epsg else 4)
-    columns[0].download_button(
-        "Area map (.png)", data=png, file_name=f"{base}.png",
-        mime="image/png", key=f"dl_am_png_{key}",
-    )
-    columns[1].download_button(
-        "Grid (.csv)", data=ctr.grid_to_csv(result), file_name=f"{base}.csv",
-        mime="text/csv", key=f"dl_am_csv_{key}",
-    )
-    columns[2].download_button(
-        "Grid (.asc)", data=ctr.grid_to_asc(result), file_name=f"{base}.asc",
-        mime="text/plain", key=f"dl_am_asc_{key}",
-    )
-    columns[3].download_button(
-        "GeoTIFF (.tif)",
-        data=gridtools.geotiff_bytes(result.z, result.spec.x0, result.spec.y0, result.spec.cell,
-                                     result.epsg),
-        file_name=f"{base}.tif", mime="image/tiff", key=f"dl_am_tif_{key}",
-    )
+    files = [
+        ("Area map (.png)", png, "png"),
+        ("Grid (.csv)", ctr.grid_to_csv(result), "csv"),
+        ("Grid (.asc)", ctr.grid_to_asc(result), "asc"),
+        ("GeoTIFF (.tif)", gridtools.geotiff_bytes(result.z, result.spec.x0, result.spec.y0,
+                                                   result.spec.cell, result.epsg), "tif"),
+    ]
     if result.epsg:
-        columns[4].download_button(
-            "Projection (.prj)", data=gridtools.prj_wkt(result.epsg), file_name=f"{base}.prj",
-            mime="text/plain", key=f"dl_am_prj_{key}",
-        )
+        files.append(("Projection (.prj)", gridtools.prj_wkt(result.epsg), "prj"))
+    with ui_tools.button_row():
+        for label, data, ext in files:
+            ui_tools.download_button(label, data, f"{base}.{ext}", key=f"dl_am_{ext}_{key}")
     if result.origin is not None:
         st.warning(
             "Input was in degrees and projected to local metres: the .asc and GeoTIFF are not "
@@ -2623,7 +2588,7 @@ def render_combined_maps(
                 result, offsets = _merged_map_cached(files, prep, col, float(tol), match,
                                                      **grid_params(contour))
             st.dataframe(pd.DataFrame({"Survey": chosen, "Offset added": offsets}).round(4),
-                         hide_index=True)
+                         hide_index=True, width="content")
             fig = ctr.make_area_map_figure(result, ctr.result_label(result, unit),
                                            f"{col} — merged", contour.n_levels,
                                            show_points=contour.show_points,
@@ -2648,9 +2613,8 @@ def render_combined_maps(
     except ctr.ContouringError as exc:
         st.info(str(exc))
         return
-    st.pyplot(fig, use_container_width=True)
     png = fig_to_png(fig)
-    plt.close(fig)
+    ui_tools.show_figure(fig)
     _render_map_downloads(result, png, base, "combined")
 
 
@@ -2693,10 +2657,7 @@ def render_legacy_results(
             interp_kind=interp_kind,
         )
 
-    if warnings:
-        with st.expander(f"{len(warnings)} warning(s)", expanded=False):
-            for w in warnings:
-                st.warning(w)
+    render_file_warnings(warnings)
 
     if not output_data:
         st.error("No usable sheets found in this file.")
@@ -2704,11 +2665,22 @@ def render_legacy_results(
             st.info("Try reducing the distance step in the sidebar.")
         return
 
+    st.caption(f"Legacy workbook — {ui_tools.plural(len(output_data), 'sheet')} read as "
+               f"{MODES[mode]} ({mode}); change this under Legacy workbook mode in the sidebar.")
     _render_mode_section(output_data, scores, mode, file_name, file_key=stem, scoring=scoring)
     if contour is not None:
         render_contouring(
             output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
         )
+
+
+def render_file_warnings(warnings: list[str]) -> None:
+    """Collapsed list of the reading and processing messages of one file."""
+    if warnings:
+        label = f"{ui_tools.plural(len(warnings), 'message')} about this file"
+        with st.expander(label, expanded=False, icon=":material/warning:"):
+            for w in warnings:
+                st.warning(w)
 
 
 def render_gem_results(
@@ -2732,10 +2704,7 @@ def render_gem_results(
             prep=prep,
         )
 
-    if warnings:
-        with st.expander(f"{len(warnings)} warning(s)", expanded=False):
-            for w in warnings:
-                st.warning(w)
+    render_file_warnings(warnings)
 
     # Determine which modes have data
     available_modes = [m for m in gem_io.GEM_MODES if output_data.get(m)]
@@ -2752,20 +2721,10 @@ def render_gem_results(
     except (ValueError, KeyError):  # preparation problems are already listed in the warnings
         table, markers = None, []
 
-    st.caption("GEM format detected — showing every channel in the file")
+    st.caption("GEM-2 export — every channel in the file is shown, one tab per mode.")
     prep = prep or pipeline.PrepSettings()
-    render_lag_estimate(file_bytes, file_name, stem, prep)
-    try:
-        raw_prep = replace(prep, exclude_lines=(), corrections=corrections.CorrectionSettings(),
-                           recompute_from_iq=False)       # calibration lines as recorded
-        calib_table, _ = prepared_table(file_bytes, file_name, raw_prep)
-    except ValueError:
-        calib_table = None
-    if calib_table is not None:
-        ui_tools.render_multiheight(calib_table, stem, prep.sensor)
-
     tabs = st.tabs([
-        f"{m} ({len(output_data[m])} {'channels' if m == 'AUX' else 'frequencies'})"
+        f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m, True))})"
         for m in available_modes
     ])
 
@@ -2789,6 +2748,18 @@ def render_gem_results(
                     f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
                 )
 
+    st.markdown("#### Calibration")
+    st.caption("Values found here are entered in the sidebar under Corrections & filters.")
+    render_lag_estimate(file_bytes, file_name, stem, prep)
+    try:
+        raw_prep = replace(prep, exclude_lines=(), corrections=corrections.CorrectionSettings(),
+                           recompute_from_iq=False)       # calibration lines as recorded
+        calib_table, _ = prepared_table(file_bytes, file_name, raw_prep)
+    except ValueError:
+        calib_table = None
+    if calib_table is not None:
+        ui_tools.render_multiheight(calib_table, stem, prep.sensor)
+
     try:
         table, _ = prepared_table(file_bytes, file_name, prep)
     except ValueError:
@@ -2804,6 +2775,53 @@ def render_gem_results(
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
+SAMPLE_FILE = Path(__file__).resolve().parent / "sample_data" / "synthetic_gem2_area_map.csv"
+SAMPLE_STATE_KEY = "use_sample"
+
+
+@dataclass(frozen=True)
+class SampleFile:
+    """The bundled sample survey, shaped like a Streamlit upload (name + getvalue)."""
+    name: str
+    data: bytes
+
+    def getvalue(self) -> bytes:
+        return self.data
+
+    @classmethod
+    def load(cls) -> "SampleFile":
+        return cls(SAMPLE_FILE.name, SAMPLE_FILE.read_bytes())
+
+
+def render_welcome() -> None:
+    """Empty state: what to upload, a sample to try, and where the settings are."""
+    st.info(
+        "**Upload a GEM-2 export to begin** — profiles, frequency ranking and the further "
+        "analysis tools appear below for each file.\n\n"
+        "Settings live in the sidebar: **Profiles** (distance step, interpolation, scoring), "
+        "**GEM files** (data preparation, sensor geometry, corrections) and "
+        "**2D contouring** (area maps, pseudo-sections). Every setting has a **?** tooltip."
+    )
+    if SAMPLE_FILE.exists() and st.button(
+        "Try the sample survey", key="sample_load",
+        help="A synthetic GEM-2 area survey with five frequencies, coordinates and I/Q.",
+    ):
+        st.session_state[SAMPLE_STATE_KEY] = True
+        st.rerun()
+
+
+def is_gem_upload(file_bytes: bytes, file_name: str) -> bool:
+    """True when the first rows of an upload look like a GEM-2 export (see is_gem_format)."""
+    try:
+        if file_name.lower().endswith(".csv"):
+            probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
+        else:
+            probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
+        return is_gem_format(probe)
+    except Exception:
+        return False
+
+
 def main():
     st.set_page_config(
         page_title="GEM-2 Analysis Tool",
@@ -2814,7 +2832,7 @@ def main():
     st.title("GEM-2 Analysis Tool")
     st.caption(
         "Multi-frequency EMI survey analysis for the GEM-2 — profiles, frequency ranking, "
-        "corrections, sensor physics and 2D mapping · v2.1"
+        f"corrections, sensor physics and 2D mapping · v{APP_VERSION}"
     )
 
     # ── Sidebar controls ────────────────────────────────────────────────────
@@ -2826,10 +2844,11 @@ def main():
             scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
 
             mode = st.radio(
-                "Measurement mode",
+                "Legacy workbook mode",
                 list(MODES.keys()),
                 horizontal=True,
-                help="For legacy multi-sheet files. GEM files show both EC and MS automatically.",
+                help="What the sheets of a legacy one-sheet-per-frequency workbook hold. GEM-2 "
+                     "exports are read from their column names and show every mode.",
             )
 
             distance_step = st.number_input(
@@ -2868,17 +2887,29 @@ def main():
             st.markdown(ABOUT_MD)
             st.markdown(about_references_markdown())
 
-    ui_tools.render_forward_model(prep.sensor)
-
     # ── File uploader ───────────────────────────────────────────────────────
     uploaded_files = st.file_uploader(
         "Upload one or more data files (.xlsx or .csv)",
         type=["xlsx", "csv"],
         accept_multiple_files=True,
+        help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX), .gbf-converted tables, "
+             "or legacy workbooks with one sheet per frequency.",
     )
+    uploaded_files = list(uploaded_files or [])
+    if uploaded_files:
+        st.session_state.pop(SAMPLE_STATE_KEY, None)    # real data replaces the sample
+    elif st.session_state.get(SAMPLE_STATE_KEY):
+        uploaded_files = [SampleFile.load()]
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        c1.info(f"Showing the synthetic sample survey `{SAMPLE_FILE.name}`. "
+                "Upload your own files above to replace it.")
+        if c2.button("Close sample", key="sample_close", width="stretch"):
+            st.session_state.pop(SAMPLE_STATE_KEY, None)
+            st.rerun()
 
     if not uploaded_files:
-        st.info("Upload at least one `.xlsx` or `.csv` file to get started.")
+        render_welcome()
+        render_survey_planning(prep.sensor)
         return
 
     # ── Process each file and accumulate results for batch export ──────────
@@ -2889,16 +2920,7 @@ def main():
         file_name = uploaded_file.name
         stem = Path(file_name).stem
 
-        # Probe for GEM format (read only 5 rows for speed)
-        is_gem = False
-        try:
-            if file_name.lower().endswith(".csv"):
-                probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
-            else:
-                probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
-            is_gem = is_gem_format(probe)
-        except Exception:
-            pass
+        is_gem = is_gem_upload(file_bytes, file_name)
 
         # Collect processed data (cached — no extra computation cost)
         if is_gem:
@@ -2931,41 +2953,33 @@ def main():
         st.subheader("Batch export")
 
         dl_col1, dl_col2 = st.columns(2)
+        what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
+        files = ui_tools.plural(len(uploaded_files), "file")
 
         with dl_col1:
-            what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
-            st.caption(
-                f"{what} for the **selected method** "
-                f"({interp_kind}) across {len(uploaded_files)} file(s)."
-            )
+            st.caption(f"{what} for the **selected method** ({interp_kind}) across {files}.")
             batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
-            st.download_button(
-                label=f"Download — {interp_kind} method (.xlsx)",
-                data=batch_bytes,
-                file_name=f"batch_{interp_kind}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ui_tools.download_button(
+                f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
                 key="dl_batch",
             )
 
         with dl_col2:
             st.caption(
-                f"{what} for **all {len(ALL_INTERP_METHODS)} methods** "
-                f"across {len(uploaded_files)} file(s). May take a moment to generate."
+                f"{what} for **all {len(ALL_INTERP_METHODS)} methods** across {files}. "
+                "May take a moment to generate."
             )
-            if st.button("Generate all-methods export", key="btn_all_methods"):
+            if st.button("Generate all-methods export", key="btn_all_methods",
+                         icon=":material/play_arrow:"):
                 with st.spinner(
-                    f"Running {len(ALL_INTERP_METHODS)} interpolation methods "
-                    f"across {len(uploaded_files)} file(s)…"
+                    f"Running {len(ALL_INTERP_METHODS)} interpolation methods across {files}…"
                 ):
                     all_methods_bytes = build_all_methods_batch_xlsx(
                         uploaded_files, mode, distance_step, scoring, prep
                     )
-                st.download_button(
-                    label="Download — all methods (.xlsx)",
-                    data=all_methods_bytes,
-                    file_name="batch_all_methods.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_all_methods",
+                ui_tools.download_button(
+                    "All files — all methods (.xlsx)", all_methods_bytes,
+                    "batch_all_methods.xlsx", key="dl_all_methods",
                 )
 
     # ── Per-file detailed results ───────────────────────────────────────────
@@ -2978,15 +2992,7 @@ def main():
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
 
-        is_gem = False
-        try:
-            if file_name.lower().endswith(".csv"):
-                probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
-            else:
-                probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
-            is_gem = is_gem_format(probe)
-        except Exception:
-            pass
+        is_gem = is_gem_upload(file_bytes, file_name)
 
         stem = Path(file_name).stem
         if is_gem:
@@ -3003,6 +3009,15 @@ def main():
 
     if contour.area_map and len(gem_files) >= 2:
         render_combined_maps(gem_files, contour, prep)
+
+    render_survey_planning(prep.sensor)
+
+
+def render_survey_planning(sensor: emphysics.Sensor) -> None:
+    """Tools that need no data file: the forward model for planning a survey."""
+    st.divider()
+    st.subheader("Survey planning")
+    ui_tools.render_forward_model(sensor)
 
 
 if __name__ == "__main__":

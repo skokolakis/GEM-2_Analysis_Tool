@@ -51,7 +51,7 @@ Each mode found in the file gets its own tab: **EC**, **MS**, **I**, **Q** and *
 | Sheets | One frequency per sheet (sheet name = frequency label) |
 | Column 0 | Distance along the transect (m, numeric) |
 | Columns 1+ | One column per survey line / pass (numeric) |
-| Mode | Choose **Measurement mode** (EC or MS) in the sidebar — GEM files show every mode automatically |
+| Mode | Choose **Legacy workbook mode** (EC or MS) in the sidebar — GEM files show every mode automatically |
 
 ## CSV vs XLSX precision
 

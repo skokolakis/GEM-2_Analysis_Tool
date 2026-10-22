@@ -29,7 +29,7 @@ Under the low-induction-number (LIN) approximation (McNeill, 1980) the two parts
 |---|---|---|
 | Recompute EC / MS from I / Q | Sensor geometry → checkbox | For every frequency with `I_` and `Q_` columns, finds the homogeneous half-space (conductivity and susceptibility) that reproduces each reading (Huang & Won, 2000), for your geometry and height. Overwrites exported EC / MS; adds them to I/Q-only exports. Readings with quadrature ≤ 0 are left blank |
 | Frequency information | EC tab | Skin depth, induction number and depth of investigation (depth above which 70 % of the quadrature response originates, from the forward model) for the median EC of each frequency, with cumulative-sensitivity curves |
-| Forward model (survey planning) | Main page | Background and target layered models → in-phase, quadrature and apparent EC per frequency; a difference over 3 × the noise level is marked detectable. Works without an upload — use it to choose frequencies before a survey |
+| Forward model (survey planning) | Main page, under Survey planning | Background and target layered models → in-phase, quadrature and apparent EC per frequency; a difference over 3 × the noise level is marked detectable. Works without an upload — use it to choose frequencies before a survey |
 | Multi-height calibration | Under each GEM file | See below |
 | Lines to leave out | GEM data | Removes calibration or test lines from profiles and maps |
 

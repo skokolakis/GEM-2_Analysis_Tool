@@ -1,4 +1,4 @@
-streamlit>=1.26
+streamlit>=1.50  # width= on plots, tables and buttons; button icons
 matplotlib>=3.5
 numpy
 scipy>=1.10
