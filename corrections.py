@@ -64,6 +64,37 @@ class CorrectionSettings:
         """True if a step smooths the data (lowers σ and inflates scores)."""
         return self.despike or self.smooth_window > 1 or self.pca_components > 0
 
+    def describe(self) -> list[str]:
+        """Short names of the enabled steps, in the order they run, e.g. ['despike', 'GPS lag +0.4 s']."""
+        on = []
+        if self.despike:
+            on.append("despike")
+        if self.clip_percentiles is not None:
+            on.append("clip to {:g}–{:g} %".format(*self.clip_percentiles))
+        if self.altitude_column:
+            on.append("sensor-height correction")
+        if self.temperature_column:
+            on.append("temperature correction")
+        if self.drift_lines:
+            on.append(f"base-station drift ({self.drift_model})")
+        if self.iq_offsets is not None:
+            on.append("calibration offsets")
+        if self.lag_seconds:
+            on.append(f"GPS lag {self.lag_seconds:+g} s")
+        if self.ec_background:
+            on.append(f"background EC {self.ec_background:g} mS/m")
+        if self.reference is not None:
+            on.append("reference calibration")
+        if self.soil_temperature:
+            on.append(f"EC at 25 °C (soil at {self.soil_temperature:g} °C)")
+        if self.pca_components:
+            on.append(f"PCA ({self.pca_components} components)")
+        if self.smooth_window > 1:
+            on.append(f"running mean ({self.smooth_window} readings)")
+        if self.bearing_center is not None:
+            on.append(f"heading {self.bearing_center:g}° ± {self.bearing_tolerance:g}°")
+        return on
+
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -181,6 +182,105 @@ def download_button(label: str, data, file_name: str, key: str, help: str | None
         label, data=data, file_name=file_name, key=key, help=help, icon=DOWNLOAD_ICON,
         mime=MIME_TYPES.get(suffix, "application/octet-stream"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Data summary (what a file holds and which tools it supports)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DataSummary:
+    lines: int
+    readings: int
+    line_length: float                # m, distance covered summed over the lines (NaN if unknown)
+    duration: float | None            # s, first to last reading; None without a time column
+    frequencies: tuple[str, ...]      # channel labels such as '1525Hz', low to high
+    has_xy: bool                      # X/Y or Lat/Lon coordinates
+    has_ec: bool
+    has_quadrature: bool
+    has_iq: bool                      # I_ and Q_ of at least one frequency
+    has_time: bool
+
+
+def data_summary(table: pd.DataFrame) -> DataSummary:
+    """Size, extent and contents of a prepared GEM table."""
+    found = gem_io.find_channels(table.columns)
+    labels = {lb for m in gem_io.FREQUENCY_MODES for lb in found[m]}
+    lines = (gem_io.line_labels(table["Line"]) if "Line" in table.columns
+             else pd.Series("0", index=table.index))
+    length = float("nan")
+    if gem_io.DISTANCE_COL in table.columns:
+        d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
+        length = float(d.groupby(lines.to_numpy()).agg(lambda v: v.max() - v.min()).sum())
+    t = gem_io.time_seconds(table)
+    duration = None
+    if t is not None and np.isfinite(t).any():
+        duration = float(np.nanmax(t) - np.nanmin(t))
+    try:
+        x, y, _ = corrections.xy_metres(table)
+        has_xy = bool((np.isfinite(x) & np.isfinite(y)).any())
+    except (ctr.ContouringError, KeyError):
+        has_xy = False
+    return DataSummary(
+        lines=int(lines.nunique()), readings=len(table), line_length=length, duration=duration,
+        frequencies=tuple(sorted(labels, key=lambda lb: ctr.parse_frequency(lb) or 0.0)),
+        has_xy=has_xy, has_ec=bool(found["EC"]), has_quadrature=bool(found["Q"]),
+        has_iq=any(lb in found["I"] for lb in found["Q"]), has_time=duration is not None,
+    )
+
+
+def tool_availability(s: DataSummary) -> list[tuple[str, bool, str]]:
+    """(tool, available, what it needs) for the tools that depend on the file's contents."""
+    return [
+        ("Area maps", s.has_xy, "needs X/Y or Lat/Lon coordinates"),
+        ("Pseudo-sections", len(s.frequencies) >= 2, "needs two or more frequencies"),
+        ("Layered-earth inversion", s.has_ec or s.has_quadrature, "needs EC or Q_ channels"),
+        ("Anomaly spectrum", s.has_iq, "needs I_ and Q_ columns"),
+        ("Multi-height calibration", s.has_iq, "needs I_ and Q_ columns"),
+        ("Base-station drift", s.has_time, "needs a Time column"),
+        ("GPS lag estimate", s.has_time and s.has_xy, "needs a Time column and coordinates"),
+        ("Soil tools", s.has_ec and s.has_xy, "need EC channels and coordinates"),
+    ]
+
+
+def format_duration(seconds: float | None) -> str:
+    """'45 s', '12 min', '2 h 05 min'; '—' when unknown."""
+    if seconds is None or not np.isfinite(seconds):
+        return "—"
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    minutes = int(round(seconds / 60))
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def summary_line(s: DataSummary) -> str:
+    """'**31** lines · **24,806** readings · **2,480 m** along the lines · **47 min** · ...'."""
+    parts = [f"**{plural(s.lines, 'line')}**", f"**{plural(s.readings, 'reading')}**"]
+    if np.isfinite(s.line_length):
+        parts.append(f"**{s.line_length:,.0f} m** along the lines")
+    if s.duration is not None:
+        parts.append(f"**{format_duration(s.duration)}** of recording")
+    if s.frequencies:
+        hz = ", ".join(lb.removesuffix("Hz") for lb in s.frequencies)
+        parts.append(f"**{plural(len(s.frequencies), 'frequency', 'frequencies')}** ({hz} Hz)")
+    return " · ".join(parts)
+
+
+def render_data_summary(table: pd.DataFrame, note: str = "") -> None:
+    """Bordered card: size of the survey, its frequencies, and which tools it supports."""
+    s = data_summary(table)
+    with st.container(border=True):
+        if note:
+            st.caption(note)
+        st.markdown(summary_line(s))
+        tools = tool_availability(s)
+        ready = [name for name, ok, _ in tools if ok]
+        missing = [f"{name} ({why})" for name, ok, why in tools if not ok]
+        if ready:
+            st.caption(":green[:material/check_circle:] **Available:** " + " · ".join(ready))
+        if missing:
+            st.caption(":gray[:material/block:] **Not available:** " + " · ".join(missing))
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +462,7 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
             "Hold the sensor over one spot at several heights and record it as its own line(s) "
             "with a height column. A half-space plus one offset per frequency and component is "
             "fitted (after Minsley et al., 2014). Download the offsets and load them as "
-            "'Calibration offsets' in the sidebar."
+            "'Calibration offsets' in the sidebar (advanced settings)."
         )
         found = gem_io.find_channels(table.columns)
         labels = [lb for lb in found["Q"] if lb in found["I"]]
@@ -704,7 +804,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
         ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
         if not ec_cols:
             st.info("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
-                    "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry to add them.")
+                    "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry (advanced "
+                    "settings) to add them.")
             return
         try:
             x, y, origin = corrections.xy_metres(table)

@@ -274,6 +274,7 @@ def test_science_choices_have_help_tooltips():
         assert not unused
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
+    at.toggle(key=R.ADVANCED_KEY).set_value(True).run()
     assert at.toggle(key="ct_area").help == R.SCIENCE_HELP["area_map"]
     assert at.number_input(key="sen_sep").help == R.SCIENCE_HELP["separation"]
     assert at.checkbox(key="cor_despike").help == R.SCIENCE_HELP["despike"]

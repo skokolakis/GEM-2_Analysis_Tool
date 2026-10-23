@@ -1939,30 +1939,105 @@ def compute_area_map_cached(
     return ctr.compute_area_map(table, value_col, **params)
 
 
+# ---------------------------------------------------------------------------
+# Basic / advanced settings, reset and the summary of changed settings
+# ---------------------------------------------------------------------------
+
+ADVANCED_KEY = "advanced"
+ADVANCED_HELP = (
+    "Shows every setting. Basic mode keeps the expert ones (coil geometry, PCA, calibration "
+    "files, variogram, projection, colour scaling, map filters …) at their defaults, so a hidden "
+    "setting never changes the results."
+)
+ADVANCED_HINT = "More settings with **Show advanced settings** at the top of the sidebar."
+RESET_KEY = "settings_reset"        # counts resets; a new count gives every setting a fresh widget
+
+
+def show_advanced() -> bool:
+    """True when the advanced settings are shown (toggle at the top of the sidebar)."""
+    return bool(st.session_state.get(ADVANCED_KEY, False))
+
+
+def wkey(name: str) -> str:
+    """
+    Widget key of a sidebar setting. After 'Reset all settings' the key gets
+    the reset count, so Streamlit makes a new widget at its default value
+    (including file uploaders, whose value cannot be set from code).
+    """
+    n = st.session_state.get(RESET_KEY, 0)
+    return f"{name}~{n}" if n else name
+
+
+def reset_settings() -> None:
+    st.session_state[RESET_KEY] = st.session_state.get(RESET_KEY, 0) + 1
+
+
+def changed_settings(
+    prep: pipeline.PrepSettings, distance_step: float, interp_kind: str
+) -> list[str]:
+    """Short descriptions of the settings that differ from the defaults and change the results."""
+    default = pipeline.PrepSettings()
+    out = []
+    if distance_step != DEFAULT_DISTANCE_STEP:
+        out.append(f"distance step {distance_step:g} m")
+    if interp_kind != DEFAULT_INTERP_KIND:
+        out.append(f"{interp_kind} interpolation")
+    if not prep.drop_flagged:
+        out.append("flagged readings kept")
+    if prep.exclude_lines:
+        out.append(f"{ui_tools.plural(len(prep.exclude_lines), 'line')} left out")
+    if prep.distance_method != default.distance_method:
+        out.append(f"distance: {gem_io.DISTANCE_METHODS[prep.distance_method].lower()}")
+    if prep.sensor.height != default.sensor.height:
+        out.append(f"sensor height {prep.sensor.height:g} m")
+    if (prep.sensor.separation, prep.sensor.bucking) != (default.sensor.separation,
+                                                          default.sensor.bucking):
+        out.append("custom coil spacing")
+    if prep.recompute_from_iq:
+        out.append("EC / MS recomputed from I / Q")
+    if prep.viscosity_pair:
+        out.append("magnetic-viscosity channels")
+    return out + prep.corrections.describe()
+
+
+def render_settings_status(changed: list[str]) -> None:
+    """Sidebar line naming the settings that change the results, with a reset button."""
+    if changed:
+        st.caption(f"**{ui_tools.plural(len(changed), 'setting')} changed:** " + " · ".join(changed))
+    else:
+        st.caption("All settings that change the results are at their defaults.")
+    st.button("Reset all settings", key="settings_reset_btn", on_click=reset_settings,
+              icon=":material/restart_alt:",
+              help="Puts every sidebar setting back to its default and clears loaded "
+                   "calibration files. Uploaded data files are kept.")
+
+
 def render_data_sidebar() -> pipeline.PrepSettings:
     """Sidebar groups for GEM files: data preparation, sensor geometry, corrections & filters."""
     st.divider()
     st.subheader("GEM files")
     with st.expander("GEM data preparation", expanded=False):
         st.caption(PREP_APPLIES_TO)
-        drop_flagged = st.checkbox(
-            "Drop readings with a Status flag", value=True, key="prep_status",
-            help="The GEM-2 sets Status to a non-zero value when a reading has a "
-                 "problem such as ADC overload.",
-        )
+        drop_flagged = True
+        if show_advanced():
+            drop_flagged = st.checkbox(
+                "Drop readings with a Status flag", value=True, key=wkey("prep_status"),
+                help="The GEM-2 sets Status to a non-zero value when a reading has a "
+                     "problem such as ADC overload.",
+            )
         exclude = st.text_input(
-            "Lines to leave out (comma-separated)", key="prep_exclude",
+            "Lines to leave out (comma-separated)", key=wkey("prep_exclude"),
             help="For example calibration or test lines recorded in the same file.",
         )
         method = st.selectbox(
             "Distance along line", list(gem_io.DISTANCE_METHODS),
-            format_func=gem_io.DISTANCE_METHODS.get, key="prep_distance", help=DISTANCE_HELP,
+            format_func=gem_io.DISTANCE_METHODS.get, key=wkey("prep_distance"), help=DISTANCE_HELP,
         )
         spacing = 1.0
         if method in ("sample", "markers"):
             spacing = st.number_input(
                 "Reading spacing (m)" if method == "sample" else "Marker spacing (m)",
-                min_value=0.001, value=1.0, step=0.1, format="%.3f", key="prep_spacing",
+                min_value=0.001, value=1.0, step=0.1, format="%.3f", key=wkey("prep_spacing"),
                 help=SCIENCE_HELP["spacing"],
             )
     sensor, recompute, viscosity_pair = render_sensor_sidebar()
@@ -1980,25 +2055,30 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float]
         st.caption("Used by: forward model, frequency information, multi-height calibration, "
                    "layered-earth inversion, footprint deconvolution and the EC / MS "
                    "recomputation below.")
-        st.caption("GEM-2 defaults (Won et al., 1996). Check them against your sensor's .gem file.")
-        separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01, key="sen_sep",
-                                     help=SCIENCE_HELP["separation"])
-        bucking = st.number_input("Tx–bucking coil (m, 0 = none)", 0.0, 10.0, 1.035, step=0.005,
-                                  format="%.3f", key="sen_buck", help=SCIENCE_HELP["bucking"])
-        height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key="sen_h",
+        height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key=wkey("sen_h"),
                                  help=SCIENCE_HELP["height"])
-        recompute = st.checkbox(
-            "Recompute EC / MS from I / Q", key="sen_recompute",
-            help="Half-space conversion of each reading (Huang & Won, 2000) with this geometry "
-                 "and height. Overwrites exported EC / MS columns; adds them to I/Q-only files.",
-        )
-        visc_text = st.text_input(
-            "Magnetic viscosity from frequencies (low, high Hz)", key="sen_visc",
-            help="Two frequencies with I_ / Q_ columns, e.g. '1525, 5325'. Adds EC from the "
-                 "quadrature difference and the quadrature susceptibility κ″ to the AUX "
-                 "channels (Simon et al., 2015). Uncalibrated Q offsets shift κ″, so compare "
-                 "contrasts unless Q is calibrated.",
-        )
+        separation, bucking, recompute, visc_text = 1.66, 1.035, False, ""
+        if show_advanced():
+            st.caption("GEM-2 coil spacings (Won et al., 1996). Check them against your sensor's "
+                       ".gem file.")
+            separation = st.number_input("Tx–Rx separation (m)", 0.1, 10.0, 1.66, step=0.01,
+                                         key=wkey("sen_sep"), help=SCIENCE_HELP["separation"])
+            bucking = st.number_input("Tx–bucking coil (m, 0 = none)", 0.0, 10.0, 1.035, step=0.005,
+                                      format="%.3f", key=wkey("sen_buck"), help=SCIENCE_HELP["bucking"])
+            recompute = st.checkbox(
+                "Recompute EC / MS from I / Q", key=wkey("sen_recompute"),
+                help="Half-space conversion of each reading (Huang & Won, 2000) with this geometry "
+                     "and height. Overwrites exported EC / MS columns; adds them to I/Q-only files.",
+            )
+            visc_text = st.text_input(
+                "Magnetic viscosity from frequencies (low, high Hz)", key=wkey("sen_visc"),
+                help="Two frequencies with I_ / Q_ columns, e.g. '1525, 5325'. Adds EC from the "
+                     "quadrature difference and the quadrature susceptibility κ″ to the AUX "
+                     "channels (Simon et al., 2015). Uncalibrated Q offsets shift κ″, so compare "
+                     "contrasts unless Q is calibrated.",
+            )
+        else:
+            st.caption(ADVANCED_HINT)
     try:
         sensor = emphysics.Sensor(float(separation), float(bucking) or None, float(height))
     except ValueError as exc:
@@ -2026,78 +2106,85 @@ def _parse_labels(text: str) -> tuple[str, ...]:
 
 def render_corrections_sidebar() -> corrections.CorrectionSettings:
     """Corrections & filters applied to GEM tables before profiles and maps."""
+    adv = show_advanced()
+    window, threshold, pca = 5, 4.0, 0
+    drift_model, temp_col, alt_col, alt_ref = "piecewise", "", "", None
+    offsets_file = ref_file = None
+    background, soil_t, ref_radius, ref_method = 0.0, 0.0, 2.0, "regression"
+    bearing_center, bearing_tol = None, 30.0
     with st.expander("Corrections & filters", expanded=False):
         st.caption(PREP_APPLIES_TO + " Multi-height calibration uses the readings as recorded.")
         st.markdown("**Filters**")
-        despike = st.checkbox("Despike (running median)", key="cor_despike", help=SCIENCE_HELP["despike"])
-        window, threshold = 5, 4.0
-        if despike:
-            window = st.slider("Despike window (readings)", 3, 21, 5, step=2, key="cor_dwin",
+        despike = st.checkbox("Despike (running median)", key=wkey("cor_despike"), help=SCIENCE_HELP["despike"])
+        if despike and adv:
+            window = st.slider("Despike window (readings)", 3, 21, 5, step=2, key=wkey("cor_dwin"),
                                help=SCIENCE_HELP["despike_window"])
             threshold = st.number_input("Despike threshold (× noise σ)", 1.0, 20.0, 4.0,
-                                        step=0.5, key="cor_dthr", help=SCIENCE_HELP["despike_threshold"])
-        clip = st.checkbox("Clip to percentiles", key="cor_clip", help=SCIENCE_HELP["clip"])
+                                        step=0.5, key=wkey("cor_dthr"), help=SCIENCE_HELP["despike_threshold"])
+        clip = st.checkbox("Clip to percentiles", key=wkey("cor_clip"), help=SCIENCE_HELP["clip"])
         clip_range = None
         if clip:
-            lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key="cor_crange",
+            lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key=wkey("cor_crange"),
                                help=SCIENCE_HELP["clip_range"])
             clip_range = (float(lo), float(hi))
-        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key="cor_smooth",
+        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key=wkey("cor_smooth"),
                            help=SCIENCE_HELP["smooth"])
-        pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key="cor_pca",
-                              help="Minsley et al. (2010): channels of a mode are strongly "
-                                   "correlated, trailing components are mostly noise.")
+        if adv:
+            pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key=wkey("cor_pca"),
+                                  help="Minsley et al. (2010): channels of a mode are strongly "
+                                       "correlated, trailing components are mostly noise.")
 
         st.markdown("**Drift and environment**")
         drift_text = st.text_input("Base-station lines (comma-separated Line labels)",
-                                   key="cor_drift",
+                                   key=wkey("cor_drift"),
                                    help="Lines recorded at a fixed base station during the "
                                         "survey. Needs a Time column. They are removed after "
                                         "the correction.")
-        drift_model = st.selectbox("Drift model", ["piecewise", "linear"], key="cor_dmodel",
-                                   help=SCIENCE_HELP["drift_model"])
-        temp_col = st.text_input("Temperature column (needs ≥ 3 base-station lines)",
-                                 key="cor_temp", help=SCIENCE_HELP["temperature"]).strip()
-        alt_col = st.text_input("Sensor-height column (e.g. drone altitude above ground)",
-                                key="cor_alt", help=SCIENCE_HELP["altitude"]).strip()
-        alt_ref = None
-        if alt_col:
-            alt_ref_value = st.number_input("Reference height (m, 0 = median)", 0.0, 100.0, 0.0,
-                                            step=0.1, key="cor_altref", help=SCIENCE_HELP["altitude_ref"])
-            alt_ref = float(alt_ref_value) or None
+        if adv:
+            drift_model = st.selectbox("Drift model", ["piecewise", "linear"], key=wkey("cor_dmodel"),
+                                       help=SCIENCE_HELP["drift_model"])
+            temp_col = st.text_input("Temperature column (needs ≥ 3 base-station lines)",
+                                     key=wkey("cor_temp"), help=SCIENCE_HELP["temperature"]).strip()
+            alt_col = st.text_input("Sensor-height column (e.g. drone altitude above ground)",
+                                    key=wkey("cor_alt"), help=SCIENCE_HELP["altitude"]).strip()
+            if alt_col:
+                alt_ref_value = st.number_input("Reference height (m, 0 = median)", 0.0, 100.0, 0.0,
+                                                step=0.1, key=wkey("cor_altref"),
+                                                help=SCIENCE_HELP["altitude_ref"])
+                alt_ref = float(alt_ref_value) or None
 
-        st.markdown("**Calibration**")
-        offsets_file = st.file_uploader(
-            "Calibration offsets (.csv)", type=["csv"], key="cor_offsets",
-            help="Columns 'column' and 'offset'; each offset is subtracted from that column. "
-                 "Produced by 'Multi-height calibration' under a file.",
-        )
-        background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
-                                     key="cor_bg", help=SCIENCE_HELP["background"])
-        ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key="cor_ref",
-                                    help="Same coordinate columns as the survey (X/Y or "
-                                         "Lat/Lon) plus one column per channel to calibrate, "
-                                         "named like the survey column, e.g. EC1525Hz[mS/m].")
-        ref_radius, ref_method = 2.0, "regression"
-        if ref_file is not None:
-            ref_radius = st.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key="cor_rrad",
-                                         help=SCIENCE_HELP["ref_radius"])
-            ref_method = st.selectbox("Calibration fit", ["regression", "moments"], key="cor_rmeth",
-                                      help=SCIENCE_HELP["ref_method"])
-        soil_t = st.number_input("Soil temperature for EC at 25 °C (°C, 0 = off)", 0.0, 50.0, 0.0,
-                                 key="cor_soilt", help=SCIENCE_HELP["ec25"])
+        if adv:
+            st.markdown("**Calibration**")
+            offsets_file = st.file_uploader(
+                "Calibration offsets (.csv)", type=["csv"], key=wkey("cor_offsets"),
+                help="Columns 'column' and 'offset'; each offset is subtracted from that column. "
+                     "Produced by 'Multi-height calibration' under a file.",
+            )
+            background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
+                                         key=wkey("cor_bg"), help=SCIENCE_HELP["background"])
+            ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key=wkey("cor_ref"),
+                                        help="Same coordinate columns as the survey (X/Y or "
+                                             "Lat/Lon) plus one column per channel to calibrate, "
+                                             "named like the survey column, e.g. EC1525Hz[mS/m].")
+            if ref_file is not None:
+                ref_radius = st.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=wkey("cor_rrad"),
+                                             help=SCIENCE_HELP["ref_radius"])
+                ref_method = st.selectbox("Calibration fit", ["regression", "moments"], key=wkey("cor_rmeth"),
+                                          help=SCIENCE_HELP["ref_method"])
+            soil_t = st.number_input("Soil temperature for EC at 25 °C (°C, 0 = off)", 0.0, 50.0, 0.0,
+                                     key=wkey("cor_soilt"), help=SCIENCE_HELP["ec25"])
 
         st.markdown("**Positioning**")
-        lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key="cor_lag",
+        lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key=wkey("cor_lag"),
                               help="Positive: readings were logged after the position. Use "
                                    "'Estimate GPS lag' under a file to find it.")
-        heading = st.checkbox("Keep one walking direction", key="cor_head", help=SCIENCE_HELP["heading"])
-        bearing_center, bearing_tol = None, 30.0
-        if heading:
+        if adv and st.checkbox("Keep one walking direction", key=wkey("cor_head"), help=SCIENCE_HELP["heading"]):
             bearing_center = float(st.number_input("Heading (° from north)", 0.0, 359.0, 0.0,
-                                                    key="cor_hdir", help=SCIENCE_HELP["heading_dir"]))
-            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key="cor_htol",
+                                                    key=wkey("cor_hdir"), help=SCIENCE_HELP["heading_dir"]))
+            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key=wkey("cor_htol"),
                                                 help=SCIENCE_HELP["heading_tol"]))
+        if not adv:
+            st.caption(ADVANCED_HINT)
 
     return corrections.CorrectionSettings(
         despike=despike, despike_window=int(window), despike_threshold=float(threshold),
@@ -2152,8 +2239,8 @@ def render_contouring_sidebar() -> ContourSettings:
     """Sidebar controls for 2D contouring; call inside `with st.sidebar`."""
     st.divider()
     st.subheader("2D contouring")
-    area = st.toggle("Area map (plan view)", value=False, key="ct_area", help=SCIENCE_HELP["area_map"])
-    pseudo = st.toggle("Pseudo-section", value=False, key="ct_pseudo", help=SCIENCE_HELP["pseudosection"])
+    area = st.toggle("Area map (plan view)", value=False, key=wkey("ct_area"), help=SCIENCE_HELP["area_map"])
+    pseudo = st.toggle("Pseudo-section", value=False, key=wkey("ct_pseudo"), help=SCIENCE_HELP["pseudosection"])
     if not area:
         if not pseudo:
             return ContourSettings()
@@ -2169,7 +2256,7 @@ def render_contouring_sidebar() -> ContourSettings:
         st.caption("Used by: area maps, combined surveys"
                    + (" and pseudo-sections." if pseudo else "."))
         colours = render_colour_controls()
-        show_points = st.checkbox("Show data points", value=True, key="ct_points",
+        show_points = st.checkbox("Show data points", value=True, key=wkey("ct_points"),
                                   help="Marks the readings used for gridding (one per grid cell).")
     return ContourSettings(
         area_map=True, pseudosection=pseudo, n_levels=colours.n_levels, colours=colours,
@@ -2179,56 +2266,61 @@ def render_contouring_sidebar() -> ContourSettings:
 
 def _render_gridding_controls() -> dict:
     """Area-map gridding inputs; returns the matching ContourSettings fields."""
-    coord_mode = st.selectbox(
-        "Coordinates", ["auto", "metres", "degrees"],
-        format_func=str.capitalize, key="ct_coords",
-        help="Auto: Lat/Lon columns are degrees; X/Y are degrees only if they "
-             "look like lon/lat spanning < 0.05°.",
-    )
+    adv = show_advanced()
+    coord_mode, smoothing, variogram_model = "auto", 0.0, "spherical"
+    blank, projection, xy_epsg = 0.0, "local", 0
+    if adv:
+        coord_mode = st.selectbox(
+            "Coordinates", ["auto", "metres", "degrees"],
+            format_func=str.capitalize, key=wkey("ct_coords"),
+            help="Auto: Lat/Lon columns are degrees; X/Y are degrees only if they "
+                 "look like lon/lat spanning < 0.05°.",
+        )
     method = st.selectbox(
-        "Gridding method", list(ctr.METHODS), format_func=ctr.METHODS.get, key="ct_method",
+        "Gridding method", list(ctr.METHODS), format_func=ctr.METHODS.get, key=wkey("ct_method"),
         help=SCIENCE_HELP["gridding"],
     )
-    smoothing = 0.0
-    variogram_model = "spherical"
-    if method == "spline":
+    if adv and method == "spline":
         smoothing = st.number_input(
-            "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key="ct_smooth",
+            "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_smooth"),
             help="0 = exact interpolation; larger values trade fit for smoothness.",
         )
-    if method == "rbf":
+    if adv and method == "rbf":
         smoothing = st.number_input(
-            "Smoothing", min_value=0.0, value=0.0, step=0.1, key="ct_rbf_smooth",
+            "Smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_rbf_smooth"),
             help="0 = exact interpolation; larger values trade fit for smoothness.",
         )
-    if method == "kriging":
+    if adv and method == "kriging":
         variogram_model = st.selectbox(
-            "Variogram model", ctr.VARIOGRAM_MODELS, key="ct_vario", help=SCIENCE_HELP["variogram"],
+            "Variogram model", ctr.VARIOGRAM_MODELS, key=wkey("ct_vario"), help=SCIENCE_HELP["variogram"],
         )
     method_options = render_method_options(method)
     cell = st.number_input(
         "Cell size (m, 0 = auto)", min_value=0.0, value=0.0, step=0.1,
-        format="%.2f", key="ct_cell", help=SCIENCE_HELP["cell"],
-    )
-    blank = st.number_input(
-        "Blanking distance (m, 0 = auto)", min_value=0.0, value=0.0, step=0.5,
-        format="%.2f", key="ct_blank",
-        help="Grid nodes farther than this from any data point are left blank. "
-             "Auto keeps the gaps between survey lines filled: the larger of "
-             "2 × median point spacing and 1.5 × the 90th-percentile distance "
-             "from grid nodes inside the survey to the nearest data point.",
+        format="%.2f", key=wkey("ct_cell"), help=SCIENCE_HELP["cell"],
     )
     level = st.checkbox(
-        "Line levelling (per-line median)", value=False, key="ct_level", help=LEVELLING_HELP,
+        "Line levelling (per-line median)", value=False, key=wkey("ct_level"), help=LEVELLING_HELP,
     )
-    projection = st.selectbox(
-        "Projection of Lat/Lon", list(ctr.PROJECTIONS), format_func=ctr.PROJECTIONS.get,
-        key="ct_proj", help="UTM gives georeferenced .asc / GeoTIFF exports.",
-    )
-    xy_epsg = st.number_input(
-        "EPSG code of X/Y (0 = unknown)", 0, 99999, 0, key="ct_epsg",
-        help="For files whose X/Y are already projected, e.g. 32634 for UTM 34N.",
-    )
+    if adv:
+        blank = st.number_input(
+            "Blanking distance (m, 0 = auto)", min_value=0.0, value=0.0, step=0.5,
+            format="%.2f", key=wkey("ct_blank"),
+            help="Grid nodes farther than this from any data point are left blank. "
+                 "Auto keeps the gaps between survey lines filled: the larger of "
+                 "2 × median point spacing and 1.5 × the 90th-percentile distance "
+                 "from grid nodes inside the survey to the nearest data point.",
+        )
+        projection = st.selectbox(
+            "Projection of Lat/Lon", list(ctr.PROJECTIONS), format_func=ctr.PROJECTIONS.get,
+            key=wkey("ct_proj"), help="UTM gives georeferenced .asc / GeoTIFF exports.",
+        )
+        xy_epsg = st.number_input(
+            "EPSG code of X/Y (0 = unknown)", 0, 99999, 0, key=wkey("ct_epsg"),
+            help="For files whose X/Y are already projected, e.g. 32634 for UTM 34N.",
+        )
+    else:
+        st.caption(ADVANCED_HINT)
     xy_epsg = int(xy_epsg) or None
     problem = gridtools.epsg_problem(xy_epsg) if xy_epsg else None
     if problem:
@@ -2249,63 +2341,73 @@ def _render_gridding_controls() -> dict:
 
 
 def render_method_options(method: str) -> tuple:
-    """Sidebar inputs for the settings of *method*; returns (name, value) pairs."""
+    """
+    Sidebar inputs for the settings of *method*; returns (name, value) pairs.
+    In basic mode only the data-metrics statistic is offered (it picks what is
+    mapped); the other settings keep contouring.METHOD_DEFAULTS.
+    """
     defaults = ctr.METHOD_DEFAULTS.get(method, {})
     opts = {}
+    if method == "metrics":
+        opts["statistic"] = st.selectbox("Statistic", list(ctr.METRICS),
+                                         format_func=ctr.METRICS.get, key=wkey("ct_metric"),
+                                         help=SCIENCE_HELP["metric"])
+    if not show_advanced():
+        return tuple(opts.items())
     if method == "idw":
         opts["power"] = st.number_input("Power", 0.5, 10.0, defaults["power"], step=0.5,
-                                        key="ct_idw_power", help=SCIENCE_HELP["idw_power"])
+                                        key=wkey("ct_idw_power"), help=SCIENCE_HELP["idw_power"])
         opts["delta"] = st.number_input("Smoothing distance (m)", 0.0, value=defaults["delta"],
-                                        step=0.1, key="ct_idw_delta",
+                                        step=0.1, key=wkey("ct_idw_delta"),
                                         help=SCIENCE_HELP["idw_smoothing"])
     elif method == "min_curvature":
         opts["tension"] = st.slider("Tension", 0.0, 0.95, defaults["tension"], step=0.05,
-                                    key="ct_tension", help=SCIENCE_HELP["min_curvature_tension"])
+                                    key=wkey("ct_tension"), help=SCIENCE_HELP["min_curvature_tension"])
     elif method == "rbf":
         opts["kernel"] = st.selectbox("Basis function", list(ctr.RBF_KERNELS),
-                                      format_func=ctr.RBF_KERNELS.get, key="ct_rbf_kernel",
+                                      format_func=ctr.RBF_KERNELS.get, key=wkey("ct_rbf_kernel"),
                                       help=SCIENCE_HELP["rbf_kernel"])
     elif method in ("local_polynomial", "polynomial"):
-        opts["order"] = st.selectbox("Polynomial order", [1, 2, 3], key=f"ct_{method}_order",
+        opts["order"] = st.selectbox("Polynomial order", [1, 2, 3], key=wkey(f"ct_{method}_order"),
                                      help=SCIENCE_HELP["method_order"])
         if method == "local_polynomial":
             opts["power"] = st.number_input("Weighting power", 0.0, 10.0, defaults["power"],
-                                            step=0.5, key="ct_local_power",
+                                            step=0.5, key=wkey("ct_local_power"),
                                             help=SCIENCE_HELP["local_power"])
-    elif method in ("moving_average", "metrics"):
-        if method == "metrics":
-            opts["statistic"] = st.selectbox("Statistic", list(ctr.METRICS),
-                                             format_func=ctr.METRICS.get, key="ct_metric",
-                                             help=SCIENCE_HELP["metric"])
+    if method in ("moving_average", "metrics"):
         opts["radius"] = st.number_input("Search radius (m, 0 = auto)", 0.0, value=0.0,
-                                         step=0.5, format="%.2f", key="ct_radius",
+                                         step=0.5, format="%.2f", key=wkey("ct_radius"),
                                          help=SCIENCE_HELP["search_radius"])
     return tuple(opts.items())
 
 
 def render_colour_controls() -> ctr.ColourStyle:
     """Sidebar colour settings shared by area maps and pseudo-sections."""
+    adv = show_advanced()
+    reverse, display, scale, lines = False, "filled", "linear", False
     cmap = st.selectbox("Colour map", list(ctr.COLOUR_MAPS), format_func=ctr.COLOUR_MAPS.get,
-                        key="ct_cmap", help=SCIENCE_HELP["colour_map"])
-    reverse = st.checkbox("Reverse colours", value=False, key="ct_cmap_reverse")
-    display = st.selectbox("Display", list(ctr.MAP_DISPLAYS), format_func=ctr.MAP_DISPLAYS.get,
-                           key="ct_display", help=SCIENCE_HELP["map_display"])
-    scale = st.selectbox("Colour scale", list(ctr.COLOUR_SCALES),
-                         format_func=ctr.COLOUR_SCALES.get, key="ct_scale",
-                         help=SCIENCE_HELP["colour_scale"])
+                        key=wkey("ct_cmap"), help=SCIENCE_HELP["colour_map"])
+    if adv:
+        reverse = st.checkbox("Reverse colours", value=False, key=wkey("ct_cmap_reverse"))
+        display = st.selectbox("Display", list(ctr.MAP_DISPLAYS), format_func=ctr.MAP_DISPLAYS.get,
+                               key=wkey("ct_display"), help=SCIENCE_HELP["map_display"])
+        scale = st.selectbox("Colour scale", list(ctr.COLOUR_SCALES),
+                             format_func=ctr.COLOUR_SCALES.get, key=wkey("ct_scale"),
+                             help=SCIENCE_HELP["colour_scale"])
     range_mode = st.selectbox("Colour range", list(ctr.COLOUR_RANGES),
-                              format_func=ctr.COLOUR_RANGES.get, key="ct_range",
+                              format_func=ctr.COLOUR_RANGES.get, key=wkey("ct_range"),
                               help=SCIENCE_HELP["colour_range"])
     percentiles, vmin, vmax = (2.0, 98.0), None, None
     if range_mode == "percentile":
         percentiles = st.slider("Percentiles", 0.0, 100.0, (2.0, 98.0), step=0.5,
-                                key="ct_percentiles")
+                                key=wkey("ct_percentiles"))
     elif range_mode == "fixed":
-        vmin = st.number_input("Colour minimum (map units)", value=0.0, key="ct_vmin")
-        vmax = st.number_input("Colour maximum (map units)", value=100.0, key="ct_vmax")
-    n_levels = st.slider("Contour levels", 5, 50, 20, key="ct_levels", help=SCIENCE_HELP["levels"])
-    lines = st.checkbox("Contour lines", value=False, key="ct_lines",
-                        help=SCIENCE_HELP["colour_lines"])
+        vmin = st.number_input("Colour minimum (map units)", value=0.0, key=wkey("ct_vmin"))
+        vmax = st.number_input("Colour maximum (map units)", value=100.0, key=wkey("ct_vmax"))
+    n_levels = st.slider("Contour levels", 5, 50, 20, key=wkey("ct_levels"), help=SCIENCE_HELP["levels"])
+    if adv:
+        lines = st.checkbox("Contour lines", value=False, key=wkey("ct_lines"),
+                            help=SCIENCE_HELP["colour_lines"])
     return ctr.ColourStyle(
         cmap=cmap, reverse=reverse, range_mode=range_mode,
         percentiles=(float(percentiles[0]), float(percentiles[1])),
@@ -2439,7 +2541,9 @@ def _render_area_map(
 def _map_processing(
     result: ctr.AreaMapResult, key: str, sensor: emphysics.Sensor, axis_angle: float
 ) -> tuple[ctr.AreaMapResult, list[str]]:
-    """Optional footprint deconvolution and grid filter, chosen in an expander."""
+    """Optional footprint deconvolution and grid filter, chosen in an expander (advanced settings)."""
+    if not show_advanced():
+        return result, []
     with st.expander("Map processing (filters, footprint deconvolution)", expanded=False):
         kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}",
                             help=SCIENCE_HELP["map_filter"])
@@ -2506,8 +2610,8 @@ def _render_map_downloads(result: ctr.AreaMapResult, png: bytes, base: str, key:
     if result.origin is not None:
         st.warning(
             "Input was in degrees and projected to local metres: the .asc and GeoTIFF are not "
-            "georeferenced. Choose UTM under 'Projection of Lat/Lon', or use the lon/lat "
-            "columns of the CSV."
+            "georeferenced. Choose UTM under 'Projection of Lat/Lon' (advanced settings), or use "
+            "the lon/lat columns of the CSV."
         )
 
 
@@ -2721,7 +2825,11 @@ def render_gem_results(
     except (ValueError, KeyError):  # preparation problems are already listed in the warnings
         table, markers = None, []
 
-    st.caption("GEM-2 export — every channel in the file is shown, one tab per mode.")
+    note = "GEM-2 export — every channel in the file is shown below, one tab per mode."
+    if table is not None:
+        ui_tools.render_data_summary(table, note)
+    else:
+        st.caption(note)
     prep = prep or pipeline.PrepSettings()
     tabs = st.tabs([
         f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m, True))})"
@@ -2749,7 +2857,8 @@ def render_gem_results(
                 )
 
     st.markdown("#### Calibration")
-    st.caption("Values found here are entered in the sidebar under Corrections & filters.")
+    st.caption("Values found here are entered in the sidebar under Corrections & filters "
+               "(calibration offsets with the advanced settings shown).")
     render_lag_estimate(file_bytes, file_name, stem, prep)
     try:
         raw_prep = replace(prep, exclude_lines=(), corrections=corrections.CorrectionSettings(),
@@ -2837,16 +2946,19 @@ def main():
 
     # ── Sidebar controls ────────────────────────────────────────────────────
     with st.sidebar:
+        st.toggle("Show advanced settings", key=ADVANCED_KEY, help=ADVANCED_HELP)
+        status = st.container()             # filled once every setting is known
+        st.divider()
         st.subheader("Profiles")
         with st.expander("Profile interpolation & scoring", expanded=True):
             st.caption("Used by: representative profiles, per-frequency plots, frequency "
                        "ranking, pseudo-sections, inversion and batch export.")
-            scoring = st.toggle("Frequency scoring", value=False, key="scoring", help=SCORING_HELP)
+            scoring = st.toggle("Frequency scoring", value=False, key=wkey("scoring"), help=SCORING_HELP)
 
             mode = st.radio(
                 "Legacy workbook mode",
                 list(MODES.keys()),
-                horizontal=True,
+                horizontal=True, key=wkey("prof_mode"),
                 help="What the sheets of a legacy one-sheet-per-frequency workbook hold. GEM-2 "
                      "exports are read from their column names and show every mode.",
             )
@@ -2856,14 +2968,14 @@ def main():
                 min_value=0.01,
                 max_value=100.0,
                 value=DEFAULT_DISTANCE_STEP,
-                step=0.1,
+                step=0.1, key=wkey("prof_step"),
                 format="%.2f", help=SCIENCE_HELP["distance_step"],
             )
 
             interp_kind = st.selectbox(
                 "Interpolation method",
                 ALL_INTERP_METHODS,
-                index=0,
+                index=0, key=wkey("prof_interp"),
                 format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
                 help=SCIENCE_HELP["interpolation"],
             )
@@ -2881,6 +2993,9 @@ def main():
             st.warning(SMOOTHING_SCORE_WARNING)
         contour = render_contouring_sidebar()
         prep = replace(prep, coord_mode=contour.coord_mode)   # one coordinate choice for all
+        changed = changed_settings(prep, distance_step, interp_kind)
+        with status:
+            render_settings_status(changed)
 
         st.divider()
         with st.expander("About & methods", expanded=False):
@@ -2911,6 +3026,13 @@ def main():
         render_welcome()
         render_survey_planning(prep.sensor)
         return
+
+    if changed:
+        st.info(
+            f"**Results below use {ui_tools.plural(len(changed), 'changed setting')}:** "
+            + " · ".join(changed) + ". Change or reset them in the sidebar.",
+            icon=":material/tune:",
+        )
 
     # ── Process each file and accumulate results for batch export ──────────
     batch_results: list[dict] = []

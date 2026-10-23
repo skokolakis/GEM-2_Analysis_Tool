@@ -4,6 +4,8 @@
 
 Sidebar → **Corrections & filters**. The steps apply to the EC, MS, I and Q channels of GEM files, before profiles and maps are built, in the order below. Every step that runs is listed with the file's warnings. Implementation: [`corrections.py`](../corrections.py), orchestrated by [`pipeline.py`](../pipeline.py).
 
+Despike, clipping, the running mean, base-station lines and the GPS lag are always shown; the other steps, and the despike window and threshold, appear with **Show advanced settings** — see [Basic and advanced settings](getting-started.md#basic-and-advanced-settings).
+
 | Step | What it does | Needs |
 |---|---|---|
 | Despike | Blanks readings that differ from their running median by more than *threshold* × the robust noise σ (1.4826 · MAD of second differences / √6). Readings within half a window of a line end are not tested | — |

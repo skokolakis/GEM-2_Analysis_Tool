@@ -4,6 +4,8 @@
 
 Two optional views, switched on in the sidebar under **2D contouring**; both are off by default. Their settings sit below the switches in **Area map gridding** and **Map colours**. Pseudo-sections are drawn on the **EC** and **MS** tabs; area maps on the **EC**, **MS** and **AUX** tabs. The raw **I** and **Q** tabs have neither: in-phase and quadrature (ppm) grow with frequency, so a pseudo-section of them mostly shows that trend rather than the ground. Implementation: [`contouring.py`](../contouring.py) (gridding, pseudo-sections) and [`gridtools.py`](../gridtools.py) (map filters, merging, georeferenced exports). Design notes: [`superpowers/specs/2026-10-05-2d-contouring-design.md`](superpowers/specs/2026-10-05-2d-contouring-design.md).
 
+In basic mode the sidebar offers the gridding method, cell size, line levelling, colour map, colour range and contour levels; **Show advanced settings** adds the method's own settings, coordinates, blanking, projection, EPSG code, colour scale and display, contour lines and the map processing under each map — see [Basic and advanced settings](getting-started.md#basic-and-advanced-settings).
+
 - [Pseudo-section](#pseudo-section-distance--frequency)
 - [Area map](#area-map-plan-view) — [gridding methods](#gridding-methods), [colours](#colours), [projection](#projection), [map processing](#map-processing), [downloads](#downloads)
 - [Combined surveys](#combined-surveys)
