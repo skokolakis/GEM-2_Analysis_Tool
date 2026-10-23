@@ -65,7 +65,7 @@ The **skin depth** δ = √(2 / ωμσ) is the depth at which the primary field 
 | **akima** | 5 | Akima (1970) local spline. Derives slopes from neighbouring points only, so it is robust to isolated outliers that would disturb a global cubic spline. |
 | **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. Shown as "polynomial (trend fit)" in the sidebar. |
 
-Columns with fewer than the minimum number of points are skipped with a warning. The **Batch export — all methods** option runs all seven methods in one go for direct comparison ([Outputs](outputs.md#batch-export)).
+Columns with fewer than the minimum number of points are skipped with a warning. **Generate all-methods export** (under **Export all files**) runs all seven methods in one go for direct comparison ([Outputs](outputs.md#batch-export)).
 
 ## Viewing the results
 

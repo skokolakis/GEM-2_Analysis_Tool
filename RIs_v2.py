@@ -7,6 +7,7 @@ Run with:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -420,7 +421,7 @@ LEVELLING_HELP = (
 
 APP_VERSION = "2.1"
 DOCS_DIR = Path(__file__).resolve().parent / "docs"
-DOCS_URL = "https://github.com/skokolakis/GEM-2_Analysis_Tool/blob/main/docs"
+DOCS_URL = ui_tools.DOCS_URL
 
 ABOUT_MD = f"""
 **GEM-2 Analysis Tool** — v{APP_VERSION} · [documentation]({DOCS_URL}/README.md) ·
@@ -570,8 +571,8 @@ correlated, since correlated frequencies carry the same information
 | **akima** | 5 | Akima (1970) local spline. Slopes from neighbouring points only, so robust to isolated outliers. |
 | **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Lowers σ and inflates the score — do not compare its scores with the other methods. |
 
-**Batch export — all methods** runs all seven in one step for direct
-comparison.
+**Generate all-methods export** (under *Export all files*) runs all seven
+in one step for direct comparison.
 
 ---
 
@@ -1972,6 +1973,57 @@ def reset_settings() -> None:
     st.session_state[RESET_KEY] = st.session_state.get(RESET_KEY, 0) + 1
 
 
+def set_setting(name: str, value) -> None:
+    """Button callback: sets a sidebar setting (runs before the widgets of the next run)."""
+    st.session_state[wkey(name)] = value
+
+
+def next_steps(
+    mode: str, n_items: int, scoring: bool, contour: ContourSettings | None, has_xy: bool,
+) -> list[tuple[str, str, str]]:
+    """(label, setting, icon) for the views a tab could show next but has switched off."""
+    steps = []
+    if not scoring and mode in gem_io.FREQUENCY_MODES and n_items > 1:
+        steps.append(("Rank the frequencies", "scoring", ":material/leaderboard:"))
+    if contour is not None and not contour.area_map and mode in AREA_MAP_MODES and has_xy:
+        steps.append(("Map this survey", "ct_area", ":material/map:"))
+    if contour is not None and not contour.pseudosection and mode in PSEUDOSECTION_MODES and n_items > 1:
+        steps.append(("Show a pseudo-section", "ct_pseudo", ":material/stacked_line_chart:"))
+    return steps
+
+
+def render_step_hint(spacing: float, distance_step: float, key: str, failed: bool = False) -> None:
+    """
+    Suggests a distance step that suits the reading spacing, with a button that sets it.
+    *failed*: no profile could be made, so the hint is shown whatever the step.
+    """
+    step = ui_tools.suggested_step(spacing)
+    if step is None or step == distance_step or not (failed or ui_tools.step_mismatch(distance_step, spacing)):
+        return
+    why = ("fewer readings than grid points: most profile values are interpolated"
+           if distance_step < spacing else "much coarser than the readings: detail is lost")
+    if failed:
+        why = "too coarse for these lines"
+    c1, c2 = st.columns([4, 1], vertical_alignment="center")
+    c1.info(f"Readings are about **{spacing:.3g} m** apart along the lines, so a distance step of "
+            f"**{distance_step:g} m** is {why}. A step of **{step:g} m** suits this file.",
+            icon=":material/straighten:")
+    c2.button(f"Use {step:g} m", key=f"step_hint_{key}", on_click=set_setting,
+              args=("prof_step", step), width="stretch",
+              help="Sets Distance step in the sidebar (it applies to every file).")
+
+
+def render_next_steps(steps: list[tuple[str, str, str]], key: str) -> None:
+    """A row of buttons that switch on the next views (the matching sidebar toggles)."""
+    if not steps:
+        return
+    st.markdown("#### Next steps")
+    with ui_tools.button_row():
+        for label, setting, icon in steps:
+            st.button(label, key=f"next_{setting}_{key}", icon=icon, on_click=set_setting,
+                      args=(setting, True), help="Switches this on in the sidebar.")
+
+
 def changed_settings(
     prep: pipeline.PrepSettings, distance_step: float, interp_kind: str
 ) -> list[str]:
@@ -2010,6 +2062,94 @@ def render_settings_status(changed: list[str]) -> None:
               icon=":material/restart_alt:",
               help="Puts every sidebar setting back to its default and clears loaded "
                    "calibration files. Uploaded data files are kept.")
+
+
+# ---------------------------------------------------------------------------
+# Settings files (save / load every sidebar setting)
+# ---------------------------------------------------------------------------
+
+SETTINGS_PREFIXES = ("prof_", "prep_", "sen_", "cor_", "ct_")
+SETTINGS_NAMES = ("scoring", ADVANCED_KEY)
+SETTINGS_SKIPPED = ("cor_offsets", "cor_ref", "ct_freq_", "ct_cv_")   # files, per-file widgets, buttons
+SETTINGS_FILE_KEY = "settings_file"
+SETTINGS_MESSAGE_KEY = "settings_message"
+
+
+def is_saved_setting(name: str) -> bool:
+    """True for the sidebar settings a settings file holds (not uploads, buttons or per-file choices)."""
+    return ((name in SETTINGS_NAMES or name.startswith(SETTINGS_PREFIXES))
+            and not name.startswith(SETTINGS_SKIPPED))
+
+
+def current_settings(state) -> dict:
+    """{setting name: value} of the sidebar settings in *state* (st.session_state), JSON-ready."""
+    n = state.get(RESET_KEY, 0)
+    out = {}
+    for key in list(state.keys()):
+        name, _, generation = str(key).partition("~")
+        if not is_saved_setting(name) or (name != ADVANCED_KEY and int(generation or 0) != n):
+            continue
+        value = state[key]
+        out[name] = list(value) if isinstance(value, tuple) else value
+    return dict(sorted(out.items()))
+
+
+def settings_json(settings: dict) -> bytes:
+    return json.dumps({"app": "GEM-2 Analysis Tool", "version": APP_VERSION, "settings": settings},
+                      indent=2, ensure_ascii=False).encode()
+
+
+def parse_settings(data: bytes) -> dict:
+    """Settings of a saved file; raises ValueError when it is not one."""
+    try:
+        doc = json.loads(data.decode("utf-8-sig"))
+        settings = doc["settings"]
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.") from exc
+    if not isinstance(settings, dict):
+        raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.")
+    return {k: tuple(v) if isinstance(v, list) else v for k, v in settings.items() if is_saved_setting(k)}
+
+
+def apply_settings(state, settings: dict) -> None:
+    """
+    Puts *settings* into *state* (st.session_state) under a new reset count, so
+    every sidebar widget starts afresh: settings missing from the file are defaults.
+    """
+    state[RESET_KEY] = n = state.get(RESET_KEY, 0) + 1
+    for name, value in settings.items():
+        state[name if name == ADVANCED_KEY else f"{name}~{n}"] = value
+
+
+def load_settings_file() -> None:
+    """Uploader callback: replaces the sidebar settings by those of the uploaded file."""
+    upload = st.session_state.get(SETTINGS_FILE_KEY)
+    if upload is None:
+        return
+    try:
+        settings = parse_settings(upload.getvalue())
+    except ValueError as exc:
+        st.session_state[SETTINGS_MESSAGE_KEY] = ("error", str(exc))
+        return
+    apply_settings(st.session_state, settings)
+    st.session_state[SETTINGS_MESSAGE_KEY] = (
+        "success", f"Loaded {ui_tools.plural(len(settings), 'setting')} from {upload.name}.")
+
+
+def render_settings_file() -> None:
+    """Sidebar expander to save the settings to a small file or load them back."""
+    with st.expander("Save or load settings", expanded=False):
+        st.caption("A settings file repeats a run later or on another computer, or shares it "
+                   "with a colleague. Calibration files and uploaded data are not included.")
+        ui_tools.download_button(
+            "Settings (.json)", settings_json(current_settings(st.session_state)),
+            "gem2_settings.json", key="settings_save",
+        )
+        st.file_uploader("Load settings (.json)", type=["json"], key=SETTINGS_FILE_KEY,
+                         on_change=load_settings_file)
+        message = st.session_state.pop(SETTINGS_MESSAGE_KEY, None)
+        if message:
+            (st.success if message[0] == "success" else st.error)(message[1])
 
 
 def render_data_sidebar() -> pipeline.PrepSettings:
@@ -2433,7 +2573,7 @@ def _render_pseudosection(
             f"Pseudo-section [{mode}] — {file_name}", contour.n_levels, contour.colours,
         )
     except ctr.ContouringError as exc:
-        st.info(str(exc))
+        st.info(f"{exc} {ui_tools.doc_link('mapping', 'pseudo-section-distance--frequency')}")
         return
     except Exception as exc:  # last resort: never show a traceback
         st.error(f"Pseudo-section failed: {exc}")
@@ -2494,7 +2634,7 @@ def _render_area_map(
         st.error(str(exc))
         return
     except ctr.ContouringError as exc:
-        st.info(str(exc))
+        st.info(f"{exc} {ui_tools.doc_link('troubleshooting', 'no-area-map')}")
         return
     except Exception as exc:  # last resort: never show a traceback
         st.error(f"Area map failed: {exc}")
@@ -2715,7 +2855,7 @@ def render_combined_maps(
                                                          reverse=False))
             base = f"difference_{label}"
     except ctr.ContouringError as exc:
-        st.info(str(exc))
+        st.info(f"{exc} {ui_tools.doc_link('mapping', 'combined-surveys')}")
         return
     png = fig_to_png(fig)
     ui_tools.show_figure(fig)
@@ -2764,7 +2904,9 @@ def render_legacy_results(
     render_file_warnings(warnings)
 
     if not output_data:
-        st.error("No usable sheets found in this file.")
+        st.error("No usable sheets found in this file. "
+                 + ui_tools.doc_link("troubleshooting", "no-usable-frequencies-or-sheets-found",
+                                     "What to check"))
         if distance_step > 1.0:
             st.info("Try reducing the distance step in the sidebar.")
         return
@@ -2776,6 +2918,7 @@ def render_legacy_results(
         render_contouring(
             output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
         )
+    render_next_steps(next_steps(mode, len(output_data), scoring, contour, has_xy=False), stem)
 
 
 def render_file_warnings(warnings: list[str]) -> None:
@@ -2783,6 +2926,8 @@ def render_file_warnings(warnings: list[str]) -> None:
     if warnings:
         label = f"{ui_tools.plural(len(warnings), 'message')} about this file"
         with st.expander(label, expanded=False, icon=":material/warning:"):
+            st.caption("Every step the app took with this file and anything it skipped. "
+                       + ui_tools.doc_link("troubleshooting", text="Troubleshooting"))
             for w in warnings:
                 st.warning(w)
 
@@ -2810,24 +2955,28 @@ def render_gem_results(
 
     render_file_warnings(warnings)
 
-    # Determine which modes have data
-    available_modes = [m for m in gem_io.GEM_MODES if output_data.get(m)]
-
-    if not available_modes:
-        st.error("No usable frequencies found in this GEM file.")
-        if distance_step > 1.0:
-            st.info("Try reducing the distance step in the sidebar.")
-        return
-
     try:
         table, _ = prepared_table(file_bytes, file_name, prep)
         markers = gem_io.marker_distances(table, table[pipeline.DISTANCE_COL].to_numpy())
     except (ValueError, KeyError):  # preparation problems are already listed in the warnings
         table, markers = None, []
+    summary = ui_tools.data_summary(table) if table is not None else None
+
+    # Determine which modes have data
+    available_modes = [m for m in gem_io.GEM_MODES if output_data.get(m)]
+
+    if not available_modes:
+        st.error("No usable frequencies found in this GEM file. "
+                 + ui_tools.doc_link("troubleshooting", "no-usable-frequencies-or-sheets-found",
+                                     "What to check"))
+        if summary is not None:
+            render_step_hint(summary.spacing, distance_step, stem, failed=True)
+        return
 
     note = "GEM-2 export — every channel in the file is shown below, one tab per mode."
-    if table is not None:
-        ui_tools.render_data_summary(table, note)
+    if summary is not None:
+        ui_tools.render_data_summary(summary, note)
+        render_step_hint(summary.spacing, distance_step, stem)
     else:
         st.caption(note)
     prep = prep or pipeline.PrepSettings()
@@ -2855,6 +3004,11 @@ def render_gem_results(
                     output_data[mode_key], mode_key, file_name,
                     f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
                 )
+            render_next_steps(
+                next_steps(mode_key, len(output_data[mode_key]), scoring, contour,
+                           summary is not None and summary.has_xy),
+                f"{stem}_{mode_key}",
+            )
 
     st.markdown("#### Calibration")
     st.caption("Values found here are entered in the sidebar under Corrections & filters "
@@ -2902,17 +3056,34 @@ class SampleFile:
         return cls(SAMPLE_FILE.name, SAMPLE_FILE.read_bytes())
 
 
+TOUR_STEPS = [                   # (icon, title, where it happens)
+    (":material/upload_file:", "Upload",
+     "Drop GEM-2 exports above, or try the sample survey below."),
+    (":material/fact_check:", "Check the summary",
+     "A card under each file gives its lines, frequencies and the tools it supports."),
+    (":material/leaderboard:", "Rank frequencies",
+     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by signal-to-noise."),
+    (":material/map:", "Map",
+     "Switch on **Area map** or **Pseudo-section** (sidebar → 2D contouring)."),
+    (":material/download:", "Export",
+     "Download profiles, scores, maps and grids under each tab, or every file at the end."),
+]
+
+
 def render_welcome() -> None:
-    """Empty state: what to upload, a sample to try, and where the settings are."""
-    st.info(
-        "**Upload a GEM-2 export to begin** — profiles, frequency ranking and the further "
-        "analysis tools appear below for each file.\n\n"
-        "Settings live in the sidebar: **Profiles** (distance step, interpolation, scoring), "
-        "**GEM files** (data preparation, sensor geometry, corrections) and "
-        "**2D contouring** (area maps, pseudo-sections). Every setting has a **?** tooltip."
+    """Empty state: the steps of a first analysis, a sample to try, and where the settings are."""
+    st.markdown("#### How it works")
+    for column, (k, (icon, title, text)) in zip(st.columns(len(TOUR_STEPS)), enumerate(TOUR_STEPS, 1)):
+        with column:
+            st.markdown(f"{icon} **{k} · {title}**")
+            st.caption(text)
+    st.caption(
+        "Every setting has a **?** tooltip. The sidebar starts with the settings most surveys "
+        "need; **Show advanced settings** at its top adds the rest. "
+        + ui_tools.doc_link("getting-started", "a-first-pass-through-the-app", "Getting started")
     )
     if SAMPLE_FILE.exists() and st.button(
-        "Try the sample survey", key="sample_load",
+        "Try the sample survey", key="sample_load", type="primary", icon=":material/science:",
         help="A synthetic GEM-2 area survey with five frequencies, coordinates and I/Q.",
     ):
         st.session_state[SAMPLE_STATE_KEY] = True
@@ -2998,6 +3169,7 @@ def main():
             render_settings_status(changed)
 
         st.divider()
+        render_settings_file()
         with st.expander("About & methods", expanded=False):
             st.markdown(ABOUT_MD)
             st.markdown(about_references_markdown())
@@ -3016,8 +3188,9 @@ def main():
     elif st.session_state.get(SAMPLE_STATE_KEY):
         uploaded_files = [SampleFile.load()]
         c1, c2 = st.columns([4, 1], vertical_alignment="center")
-        c1.info(f"Showing the synthetic sample survey `{SAMPLE_FILE.name}`. "
-                "Upload your own files above to replace it.")
+        c1.info(f"Showing the synthetic sample survey `{SAMPLE_FILE.name}`. Start with its "
+                "summary card below, then the **Next steps** buttons under each tab. Upload your "
+                "own files above to replace it.")
         if c2.button("Close sample", key="sample_close", width="stretch"):
             st.session_state.pop(SAMPLE_STATE_KEY, None)
             st.rerun()
@@ -3036,13 +3209,12 @@ def main():
 
     # ── Process each file and accumulate results for batch export ──────────
     batch_results: list[dict] = []
+    gem_flags = [is_gem_upload(f.getvalue(), f.name) for f in uploaded_files]
 
-    for uploaded_file in uploaded_files:
+    for uploaded_file, is_gem in zip(uploaded_files, gem_flags):
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
         stem = Path(file_name).stem
-
-        is_gem = is_gem_upload(file_bytes, file_name)
 
         # Collect processed data (cached — no extra computation cost)
         if is_gem:
@@ -3069,70 +3241,88 @@ def main():
                     "scores": leg_scores,
                 })
 
-    # ── Batch download (shown once, above per-file results) ────────────────
-    if batch_results:
-        st.divider()
-        st.subheader("Batch export")
-
-        dl_col1, dl_col2 = st.columns(2)
-        what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
-        files = ui_tools.plural(len(uploaded_files), "file")
-
-        with dl_col1:
-            st.caption(f"{what} for the **selected method** ({interp_kind}) across {files}.")
-            batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
-            ui_tools.download_button(
-                f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
-                key="dl_batch",
-            )
-
-        with dl_col2:
-            st.caption(
-                f"{what} for **all {len(ALL_INTERP_METHODS)} methods** across {files}. "
-                "May take a moment to generate."
-            )
-            if st.button("Generate all-methods export", key="btn_all_methods",
-                         icon=":material/play_arrow:"):
-                with st.spinner(
-                    f"Running {len(ALL_INTERP_METHODS)} interpolation methods across {files}…"
-                ):
-                    all_methods_bytes = build_all_methods_batch_xlsx(
-                        uploaded_files, mode, distance_step, scoring, prep
-                    )
-                ui_tools.download_button(
-                    "All files — all methods (.xlsx)", all_methods_bytes,
-                    "batch_all_methods.xlsx", key="dl_all_methods",
-                )
-
-    # ── Per-file detailed results ───────────────────────────────────────────
-    gem_files: list[tuple[bytes, str]] = []
+    # ── Per-file detailed results: one file at a time ──────────────────────
     taken_keys: set[str] = set()
-    for uploaded_file in uploaded_files:
-        st.divider()
-        st.subheader(uploaded_file.name)
+    file_keys = [
+        unique_file_key(Path(f.name).stem, taken_keys, gem_io.GEM_MODES if is_gem else ())
+        for f, is_gem in zip(uploaded_files, gem_flags)
+    ]
+    shown = pick_file([f.name for f in uploaded_files])
+    uploaded_file, is_gem, file_key = uploaded_files[shown], gem_flags[shown], file_keys[shown]
+    st.divider()
+    st.subheader(uploaded_file.name)
+    if is_gem:
+        render_gem_results(
+            uploaded_file.getvalue(), uploaded_file.name, distance_step, interp_kind, contour,
+            scoring, prep, file_key=file_key,
+        )
+    else:
+        render_legacy_results(
+            uploaded_file.getvalue(), uploaded_file.name, mode, distance_step, interp_kind,
+            contour, scoring, file_key=file_key,
+        )
 
-        file_bytes = uploaded_file.getvalue()
-        file_name = uploaded_file.name
-
-        is_gem = is_gem_upload(file_bytes, file_name)
-
-        stem = Path(file_name).stem
-        if is_gem:
-            gem_files.append((file_bytes, file_name))
-            render_gem_results(
-                file_bytes, file_name, distance_step, interp_kind, contour, scoring, prep,
-                file_key=unique_file_key(stem, taken_keys, gem_io.GEM_MODES),
-            )
-        else:
-            render_legacy_results(
-                file_bytes, file_name, mode, distance_step, interp_kind, contour, scoring,
-                file_key=unique_file_key(stem, taken_keys)
-            )
-
+    gem_files = [(f.getvalue(), f.name) for f, g in zip(uploaded_files, gem_flags) if g]
     if contour.area_map and len(gem_files) >= 2:
         render_combined_maps(gem_files, contour, prep)
-
+    if batch_results:
+        render_batch_export(batch_results, uploaded_files, mode, distance_step, interp_kind,
+                            scoring, prep)
     render_survey_planning(prep.sensor)
+
+
+def pick_file(names: list[str]) -> int:
+    """Index of the file whose results are shown; a picker appears when there are several."""
+    if len(names) == 1:
+        return 0
+    st.divider()
+    choice = st.segmented_control if len(names) <= 4 else st.selectbox
+    kwargs = {"default": 0} if choice is st.segmented_control else {"index": 0}
+    shown = choice(
+        f"Results for one of {len(names)} files", list(range(len(names))),
+        key=f"file_pick_{len(names)}",
+        format_func=lambda i: names[i], **kwargs,
+        help="One file is shown at a time; exports for every file are at the end of the page.",
+    )
+    return 0 if shown is None else int(shown)
+
+
+def render_batch_export(
+    batch_results: list[dict], uploaded_files: list, mode: str, distance_step: float,
+    interp_kind: str, scoring: bool, prep: pipeline.PrepSettings,
+) -> None:
+    """Workbooks with the profiles (and scores) of every uploaded file."""
+    st.divider()
+    st.subheader("Export all files")
+    dl_col1, dl_col2 = st.columns(2)
+    what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
+    files = ui_tools.plural(len(uploaded_files), "file")
+
+    with dl_col1:
+        st.caption(f"{what} for the **selected method** ({interp_kind}) across {files}.")
+        batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
+        ui_tools.download_button(
+            f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
+            key="dl_batch",
+        )
+
+    with dl_col2:
+        st.caption(
+            f"{what} for **all {len(ALL_INTERP_METHODS)} methods** across {files}. "
+            "May take a moment to generate."
+        )
+        if st.button("Generate all-methods export", key="btn_all_methods",
+                     icon=":material/play_arrow:"):
+            with st.spinner(
+                f"Running {len(ALL_INTERP_METHODS)} interpolation methods across {files}…"
+            ):
+                all_methods_bytes = build_all_methods_batch_xlsx(
+                    uploaded_files, mode, distance_step, scoring, prep
+                )
+            ui_tools.download_button(
+                "All files — all methods (.xlsx)", all_methods_bytes,
+                "batch_all_methods.xlsx", key="dl_all_methods",
+            )
 
 
 def render_survey_planning(sensor: emphysics.Sensor) -> None:
