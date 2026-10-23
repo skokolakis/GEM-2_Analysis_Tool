@@ -14,7 +14,7 @@ Under each mode tab, **Downloads**:
 
 ## Batch export
 
-Shown once, above the per-file results, when at least one file was processed.
+Under **Export all files**, near the end of the page, when at least one file was processed.
 
 **Selected method** — one workbook for all uploaded files with the current interpolation method:
 

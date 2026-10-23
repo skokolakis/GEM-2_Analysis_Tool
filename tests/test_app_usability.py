@@ -25,7 +25,8 @@ def test_empty_page_offers_the_sample_and_survey_planning():
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
     assert not at.exception
-    assert any("Upload a GEM-2 export to begin" in i.value for i in at.info)
+    assert "#### How it works" in [m.value for m in at.markdown]
+    assert any("Rank frequencies" in m.value for m in at.markdown)
     assert at.button(key="sample_load")
     assert "Survey planning" in [h.value for h in at.subheader]
 
@@ -115,7 +116,7 @@ def test_sample_survey_shows_the_summary_card():
 def test_summary_line():
     s = ui_tools.data_summary(_table())
     assert ui_tools.summary_line(s) == (
-        "**2 lines** · **20 readings** · **18 m** along the lines · "
+        "**2 lines** · **20 readings** · **18 m** along the lines · readings **1 m** apart · "
         "**2 frequencies** (1525, 5325 Hz)"
     )
 

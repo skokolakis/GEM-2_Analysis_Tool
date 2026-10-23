@@ -26,6 +26,7 @@ import interpret
 import inversion
 import soiltools
 
+DOCS_URL = "https://github.com/skokolakis/GEM-2_Analysis_Tool/blob/main/docs"
 DEFAULT_FREQUENCIES = "475, 1525, 5325, 18325, 63025"
 PERMITTIVITY_FREQUENCY = 40_000.0     # Hz; above this, permittivity can reach the in-phase
 PERMITTIVITY_CAPTION = (
@@ -150,6 +151,20 @@ MIME_TYPES = {
 }
 
 
+def doc_link(page: str, anchor: str = "", text: str = "") -> str:
+    """Markdown link to a documentation page (and section), e.g. doc_link("troubleshooting", "no-area-map")."""
+    url = f"{DOCS_URL}/{page}.md" + (f"#{anchor}" if anchor else "")
+    return f"[{text or 'More in the documentation'}]({url})"
+
+
+NEEDS_ANCHOR = "a-tool-needs-columns-the-file-lacks"     # troubleshooting section
+
+
+def show_needs(message: str) -> None:
+    """Info box for a tool the file cannot use, linked to the troubleshooting section."""
+    st.info(f"{message} {doc_link('troubleshooting', NEEDS_ANCHOR)}")
+
+
 def plural(n: int, word: str, many: str | None = None) -> str:
     """'1 file', '3 files'; *many* for irregular plurals ('frequency' -> 'frequencies')."""
     return f"{n:,} {word if n == 1 else many or word + 's'}"
@@ -201,6 +216,37 @@ class DataSummary:
     has_quadrature: bool
     has_iq: bool                      # I_ and Q_ of at least one frequency
     has_time: bool
+    spacing: float = float("nan")     # m, median distance between neighbouring readings of a line
+
+
+STEP_RANGE = (0.5, 5.0)               # a distance step within these multiples of the spacing suits the data
+NICE_STEPS = (1.0, 2.0, 5.0)          # steps are suggested as 1, 2 or 5 × a power of ten
+
+
+def median_spacing(distance: pd.Series, lines: pd.Series) -> float:
+    """Median gap between neighbouring readings along each line (repeats ignored); NaN if none."""
+    d = pd.DataFrame({"line": lines.to_numpy(), "d": pd.to_numeric(distance, errors="coerce").to_numpy()})
+    d = d.dropna().sort_values(["line", "d"], kind="stable")
+    gaps = d.groupby("line")["d"].diff().to_numpy()
+    gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+    return float(np.median(gaps)) if gaps.size else float("nan")
+
+
+def suggested_step(spacing: float, minimum: float = 0.01) -> float | None:
+    """The 1-2-5 step nearest to the reading spacing (on a log scale); None if unknown."""
+    if not np.isfinite(spacing) or spacing <= 0:
+        return None
+    exponent = np.floor(np.log10(spacing))
+    candidates = [m * 10.0 ** e for e in (exponent - 1, exponent, exponent + 1) for m in NICE_STEPS]
+    best = min(candidates, key=lambda c: abs(np.log(c / spacing)))
+    return float(max(round(best, 10), minimum))
+
+
+def step_mismatch(step: float, spacing: float) -> bool:
+    """True when the distance step is far from the reading spacing (see STEP_RANGE)."""
+    if not np.isfinite(spacing) or spacing <= 0:
+        return False
+    return not STEP_RANGE[0] * spacing <= step <= STEP_RANGE[1] * spacing
 
 
 def data_summary(table: pd.DataFrame) -> DataSummary:
@@ -209,10 +255,11 @@ def data_summary(table: pd.DataFrame) -> DataSummary:
     labels = {lb for m in gem_io.FREQUENCY_MODES for lb in found[m]}
     lines = (gem_io.line_labels(table["Line"]) if "Line" in table.columns
              else pd.Series("0", index=table.index))
-    length = float("nan")
+    length = spacing = float("nan")
     if gem_io.DISTANCE_COL in table.columns:
         d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
         length = float(d.groupby(lines.to_numpy()).agg(lambda v: v.max() - v.min()).sum())
+        spacing = median_spacing(d, lines)
     t = gem_io.time_seconds(table)
     duration = None
     if t is not None and np.isfinite(t).any():
@@ -227,6 +274,7 @@ def data_summary(table: pd.DataFrame) -> DataSummary:
         frequencies=tuple(sorted(labels, key=lambda lb: ctr.parse_frequency(lb) or 0.0)),
         has_xy=has_xy, has_ec=bool(found["EC"]), has_quadrature=bool(found["Q"]),
         has_iq=any(lb in found["I"] for lb in found["Q"]), has_time=duration is not None,
+        spacing=spacing,
     )
 
 
@@ -259,6 +307,8 @@ def summary_line(s: DataSummary) -> str:
     parts = [f"**{plural(s.lines, 'line')}**", f"**{plural(s.readings, 'reading')}**"]
     if np.isfinite(s.line_length):
         parts.append(f"**{s.line_length:,.0f} m** along the lines")
+    if np.isfinite(s.spacing):
+        parts.append(f"readings **{s.spacing:.3g} m** apart")
     if s.duration is not None:
         parts.append(f"**{format_duration(s.duration)}** of recording")
     if s.frequencies:
@@ -267,9 +317,8 @@ def summary_line(s: DataSummary) -> str:
     return " · ".join(parts)
 
 
-def render_data_summary(table: pd.DataFrame, note: str = "") -> None:
+def render_data_summary(s: DataSummary, note: str = "") -> None:
     """Bordered card: size of the survey, its frequencies, and which tools it supports."""
-    s = data_summary(table)
     with st.container(border=True):
         if note:
             st.caption(note)
@@ -280,7 +329,8 @@ def render_data_summary(table: pd.DataFrame, note: str = "") -> None:
         if ready:
             st.caption(":green[:material/check_circle:] **Available:** " + " · ".join(ready))
         if missing:
-            st.caption(":gray[:material/block:] **Not available:** " + " · ".join(missing))
+            st.caption(":gray[:material/block:] **Not available:** " + " · ".join(missing) + ". "
+                       + doc_link("troubleshooting", NEEDS_ANCHOR, "Why?"))
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +517,7 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
         found = gem_io.find_channels(table.columns)
         labels = [lb for lb in found["Q"] if lb in found["I"]]
         if not labels:
-            st.info(NEEDS_IQ)
+            show_needs(NEEDS_IQ)
             return
         height_col = st.text_input("Height column", "Height", key=f"mh_col_{file_key}",
                                    help=SCIENCE_HELP["mh_height"])
@@ -685,7 +735,7 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
         )
         found = gem_io.find_channels(table.columns)
         if not any(lb in found["I"] for lb in found["Q"]):
-            st.info(NEEDS_IQ)
+            show_needs(NEEDS_IQ)
             return
         try:
             x, y, _ = corrections.xy_metres(table)
@@ -803,14 +853,14 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
     with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
         ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
         if not ec_cols:
-            st.info("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
+            show_needs("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
                     "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry (advanced "
                     "settings) to add them.")
             return
         try:
             x, y, origin = corrections.xy_metres(table)
         except ctr.ContouringError:
-            st.info(NEEDS_XY)
+            show_needs(NEEDS_XY)
             return
         chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}",
                                help=SCIENCE_HELP["soil_channels"])

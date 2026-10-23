@@ -19,3 +19,7 @@ secondaryBackgroundColor = "#ffffff"
 
 [client]
 toolbarMode = "minimal"
+
+[global]
+# Buttons that apply a suggestion and "Load settings" set widget values on purpose.
+disableWidgetStateDuplicationWarning = true
