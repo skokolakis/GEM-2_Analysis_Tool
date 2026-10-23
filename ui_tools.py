@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -34,6 +35,11 @@ PERMITTIVITY_CAPTION = (
 HEIGHT_BIN = 0.05                     # m, readings within a bin share one height level
 MULTIHEIGHT_MAX_RMS = 50.0            # ppm, about 10 x the GEM-2 noise; worse fits give no offsets
 LAYER_COLUMNS = ["Thickness (m)", "EC (mS/m)", "MS (10⁻³ SI)"]
+NEEDS_IQ = (
+    "This tool needs in-phase and quadrature columns (I_…Hz and Q_…Hz, in ppm); this file "
+    "has none. Export them from WinGEM / EMExport to use it."
+)
+NEEDS_XY = "This tool needs X/Y or Lat/Lon coordinates; this file has none."
 
 
 SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choices
@@ -130,6 +136,154 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
 
 
 # ---------------------------------------------------------------------------
+# Shared display helpers (one look for every plot, table and download)
+# ---------------------------------------------------------------------------
+
+DOWNLOAD_ICON = ":material/download:"
+MIME_TYPES = {
+    ".csv": "text/csv",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".png": "image/png",
+    ".asc": "text/plain",
+    ".prj": "text/plain",
+    ".tif": "image/tiff",
+}
+
+
+def plural(n: int, word: str, many: str | None = None) -> str:
+    """'1 file', '3 files'; *many* for irregular plurals ('frequency' -> 'frequencies')."""
+    return f"{n:,} {word if n == 1 else many or word + 's'}"
+
+
+def show_figure(fig, stretch: bool = True) -> None:
+    """
+    Shows and closes a matplotlib figure. Wide plots (profiles, maps,
+    sections) fill the page; small diagnostic plots (stretch=False) keep their
+    own size, since stretched to the page width their text grows oversized.
+    """
+    st.pyplot(fig, width="stretch" if stretch else "content")
+    plt.close(fig)
+
+
+def show_table(df, **kwargs) -> None:
+    """A dataframe across the page width, without the index."""
+    st.dataframe(df, width="stretch", hide_index=True, **kwargs)
+
+
+def button_row():
+    """Container that lays buttons side by side at their own width, wrapping on narrow screens."""
+    return st.container(horizontal=True, gap="small")
+
+
+def download_button(label: str, data, file_name: str, key: str, help: str | None = None) -> None:
+    """Download button with the shared icon; the MIME type follows the file extension."""
+    suffix = file_name[file_name.rfind("."):].lower()
+    st.download_button(
+        label, data=data, file_name=file_name, key=key, help=help, icon=DOWNLOAD_ICON,
+        mime=MIME_TYPES.get(suffix, "application/octet-stream"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Data summary (what a file holds and which tools it supports)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DataSummary:
+    lines: int
+    readings: int
+    line_length: float                # m, distance covered summed over the lines (NaN if unknown)
+    duration: float | None            # s, first to last reading; None without a time column
+    frequencies: tuple[str, ...]      # channel labels such as '1525Hz', low to high
+    has_xy: bool                      # X/Y or Lat/Lon coordinates
+    has_ec: bool
+    has_quadrature: bool
+    has_iq: bool                      # I_ and Q_ of at least one frequency
+    has_time: bool
+
+
+def data_summary(table: pd.DataFrame) -> DataSummary:
+    """Size, extent and contents of a prepared GEM table."""
+    found = gem_io.find_channels(table.columns)
+    labels = {lb for m in gem_io.FREQUENCY_MODES for lb in found[m]}
+    lines = (gem_io.line_labels(table["Line"]) if "Line" in table.columns
+             else pd.Series("0", index=table.index))
+    length = float("nan")
+    if gem_io.DISTANCE_COL in table.columns:
+        d = pd.to_numeric(table[gem_io.DISTANCE_COL], errors="coerce")
+        length = float(d.groupby(lines.to_numpy()).agg(lambda v: v.max() - v.min()).sum())
+    t = gem_io.time_seconds(table)
+    duration = None
+    if t is not None and np.isfinite(t).any():
+        duration = float(np.nanmax(t) - np.nanmin(t))
+    try:
+        x, y, _ = corrections.xy_metres(table)
+        has_xy = bool((np.isfinite(x) & np.isfinite(y)).any())
+    except (ctr.ContouringError, KeyError):
+        has_xy = False
+    return DataSummary(
+        lines=int(lines.nunique()), readings=len(table), line_length=length, duration=duration,
+        frequencies=tuple(sorted(labels, key=lambda lb: ctr.parse_frequency(lb) or 0.0)),
+        has_xy=has_xy, has_ec=bool(found["EC"]), has_quadrature=bool(found["Q"]),
+        has_iq=any(lb in found["I"] for lb in found["Q"]), has_time=duration is not None,
+    )
+
+
+def tool_availability(s: DataSummary) -> list[tuple[str, bool, str]]:
+    """(tool, available, what it needs) for the tools that depend on the file's contents."""
+    return [
+        ("Area maps", s.has_xy, "needs X/Y or Lat/Lon coordinates"),
+        ("Pseudo-sections", len(s.frequencies) >= 2, "needs two or more frequencies"),
+        ("Layered-earth inversion", s.has_ec or s.has_quadrature, "needs EC or Q_ channels"),
+        ("Anomaly spectrum", s.has_iq, "needs I_ and Q_ columns"),
+        ("Multi-height calibration", s.has_iq, "needs I_ and Q_ columns"),
+        ("Base-station drift", s.has_time, "needs a Time column"),
+        ("GPS lag estimate", s.has_time and s.has_xy, "needs a Time column and coordinates"),
+        ("Soil tools", s.has_ec and s.has_xy, "need EC channels and coordinates"),
+    ]
+
+
+def format_duration(seconds: float | None) -> str:
+    """'45 s', '12 min', '2 h 05 min'; '—' when unknown."""
+    if seconds is None or not np.isfinite(seconds):
+        return "—"
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    minutes = int(round(seconds / 60))
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def summary_line(s: DataSummary) -> str:
+    """'**31** lines · **24,806** readings · **2,480 m** along the lines · **47 min** · ...'."""
+    parts = [f"**{plural(s.lines, 'line')}**", f"**{plural(s.readings, 'reading')}**"]
+    if np.isfinite(s.line_length):
+        parts.append(f"**{s.line_length:,.0f} m** along the lines")
+    if s.duration is not None:
+        parts.append(f"**{format_duration(s.duration)}** of recording")
+    if s.frequencies:
+        hz = ", ".join(lb.removesuffix("Hz") for lb in s.frequencies)
+        parts.append(f"**{plural(len(s.frequencies), 'frequency', 'frequencies')}** ({hz} Hz)")
+    return " · ".join(parts)
+
+
+def render_data_summary(table: pd.DataFrame, note: str = "") -> None:
+    """Bordered card: size of the survey, its frequencies, and which tools it supports."""
+    s = data_summary(table)
+    with st.container(border=True):
+        if note:
+            st.caption(note)
+        st.markdown(summary_line(s))
+        tools = tool_availability(s)
+        ready = [name for name, ok, _ in tools if ok]
+        missing = [f"{name} ({why})" for name, ok, why in tools if not ok]
+        if ready:
+            st.caption(":green[:material/check_circle:] **Available:** " + " · ".join(ready))
+        if missing:
+            st.caption(":gray[:material/block:] **Not available:** " + " · ".join(missing))
+
+
+# ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
 
@@ -206,7 +360,7 @@ def _default_layers(top_ec: float, bottom_ec: float) -> pd.DataFrame:
 
 def render_forward_model(sensor: emphysics.Sensor) -> None:
     """Survey planning: responses of a background and a target layered model."""
-    with st.expander("Forward model (survey planning)", expanded=False):
+    with st.expander("Forward model (layered-earth response)", expanded=False):
         st.caption(
             "Layered-earth response of the sensor in the sidebar geometry. Rows go from the "
             "top down; the last row is the half-space (its thickness is ignored). A difference "
@@ -240,7 +394,7 @@ def render_forward_model(sensor: emphysics.Sensor) -> None:
         dq = (rt["Q (ppm)"] - rb["Q (ppm)"]).abs()
         di = (rt["I (ppm)"] - rb["I (ppm)"]).abs()
         table["Detectable"] = np.maximum(dq, di) > 3 * noise
-        st.dataframe(table.round(4), use_container_width=True, hide_index=True)
+        show_table(table.round(4))
         fig, ax = plt.subplots(figsize=(7, 3))
         ax.semilogx(freqs, rb["EC apparent (mS/m)"], "o-", label="Background")
         ax.semilogx(freqs, rt["EC apparent (mS/m)"], "s-", label="Target")
@@ -249,8 +403,7 @@ def render_forward_model(sensor: emphysics.Sensor) -> None:
         ax.grid(True)
         ax.legend()
         fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        show_figure(fig, stretch=False)
 
 
 @st.cache_data(show_spinner=False)
@@ -278,10 +431,10 @@ def render_frequency_info(
             freqs.append(f)
             sigmas.append(ec / 1000.0)
         if not freqs:
-            st.info("No frequency labels to analyse.")
+            st.info("No channel here is labelled with a frequency in Hz, so there is nothing to analyse.")
             return
         table, depths, curves = _frequency_info(tuple(freqs), tuple(sigmas), sensor)
-        st.dataframe(table.round(3), use_container_width=True, hide_index=True)
+        show_table(table.round(3))
         st.caption(
             "For a half-space with the median EC of each frequency, sensor at "
             f"{sensor.height:g} m. Induction number ≪ 1: low-induction-number conditions hold "
@@ -299,8 +452,7 @@ def render_frequency_info(
         ax.grid(True)
         ax.legend(fontsize=8)
         fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        show_figure(fig, stretch=False)
 
 
 def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sensor) -> None:
@@ -310,22 +462,25 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
             "Hold the sensor over one spot at several heights and record it as its own line(s) "
             "with a height column. A half-space plus one offset per frequency and component is "
             "fitted (after Minsley et al., 2014). Download the offsets and load them as "
-            "'Calibration offsets' in the sidebar."
+            "'Calibration offsets' in the sidebar (advanced settings)."
         )
         found = gem_io.find_channels(table.columns)
         labels = [lb for lb in found["Q"] if lb in found["I"]]
         if not labels:
-            st.info("Needs I_ and Q_ columns.")
+            st.info(NEEDS_IQ)
             return
         height_col = st.text_input("Height column", "Height", key=f"mh_col_{file_key}",
                                    help=SCIENCE_HELP["mh_height"])
         if height_col not in table.columns:
-            st.info(f"No column named '{height_col}'.")
+            st.info(f"The file has no column named '{height_col}'. Enter the name of the column "
+                    "that holds the sensor height of each reading.")
             return
         lines = st.multiselect(
-            "Calibration line(s)", sorted(gem_io.line_labels(table["Line"]).unique()), key=f"mh_lines_{file_key}"
-        , help=SCIENCE_HELP["mh_lines"])
+            "Calibration line(s)", sorted(gem_io.line_labels(table["Line"]).unique()),
+            key=f"mh_lines_{file_key}", help=SCIENCE_HELP["mh_lines"],
+        )
         if not lines:
+            st.caption("Choose the calibration line(s) to fit the offsets.")
             return
         state_key = f"mh_result_{file_key}"
         if st.button("Fit offsets", key=f"mh_fit_{file_key}"):
@@ -360,10 +515,10 @@ def render_multiheight(table: pd.DataFrame, file_key: str, sensor: emphysics.Sen
             + [gem_io.channel_column("Q", lb) for lb in labels],
             "offset": np.concatenate([fit["bias_i"], fit["bias_q"]]),
         })
-        st.dataframe(offsets.round(3), hide_index=True)
-        st.download_button(
+        show_table(offsets.round(3))
+        download_button(
             "Offsets (.csv)", offsets.to_csv(index=False).encode(),
-            file_name=f"{file_key}_iq_offsets.csv", mime="text/csv", key=f"mh_dl_{file_key}",
+            f"{file_key}_iq_offsets.csv", key=f"mh_dl_{file_key}",
         )
 
 
@@ -464,11 +619,10 @@ def render_inversion(
                 st.info(str(exc))
                 return
             fig = inversion.make_section_figure(result, stations.distance, f"Inverted EC — {file_key}")
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
-            st.download_button(
+            show_figure(fig)
+            download_button(
                 "Model (.csv)", inversion.model_table(result, stations.distance).to_csv(index=False).encode(),
-                file_name=f"{file_key}_inversion.csv", mime="text/csv", key=f"inv_dl_{file_key}",
+                f"{file_key}_inversion.csv", key=f"inv_dl_{file_key}",
             )
         if table is not None and output_data.get("EC"):
             errors_ec = {
@@ -480,9 +634,8 @@ def render_inversion(
             except ValueError as exc:
                 st.info(str(exc))
                 return
-            st.download_button(
-                "EMagPy survey (.csv)", data, file_name=f"{file_key}_emagpy.csv",
-                mime="text/csv", key=f"inv_emagpy_{file_key}",
+            download_button(
+                "EMagPy survey (.csv)", data, f"{file_key}_emagpy.csv", key=f"inv_emagpy_{file_key}",
                 help="Coil columns HCP{separation}f{frequency}h{height} in mS/m with *_err "
                      "columns from the between-pass noise. EMagPy models a plain loop pair: "
                      "the GEM-2 bucking coil is not modelled there.",
@@ -512,15 +665,14 @@ def render_frequency_selection(
                           help=SCIENCE_HELP["sel_corr"])
         corr = interpret.profile_correlation(output_data)
         table = interpret.select_frequencies(scores, corr, count, limit)
-        st.dataframe(table.round(3), hide_index=True, use_container_width=True)
+        show_table(table.round(3))
         fig, ax = plt.subplots(figsize=(4.5, 3.8))
         im = ax.imshow(corr.to_numpy(), vmin=-1, vmax=1, cmap="RdBu_r")
         ax.set_xticks(range(len(corr)), corr.columns, rotation=90, fontsize=7)
         ax.set_yticks(range(len(corr)), corr.index, fontsize=7)
         fig.colorbar(im, ax=ax, label="Correlation of mean profiles")
         fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        show_figure(fig, stretch=False)
 
 
 def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
@@ -533,7 +685,7 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
         )
         found = gem_io.find_channels(table.columns)
         if not any(lb in found["I"] for lb in found["Q"]):
-            st.info("Needs I_ and Q_ columns.")
+            st.info(NEEDS_IQ)
             return
         try:
             x, y, _ = corrections.xy_metres(table)
@@ -564,10 +716,9 @@ def render_anomaly_spectrum(table: pd.DataFrame, file_key: str) -> None:
         except ValueError as exc:
             st.info(str(exc))
             return
-        st.dataframe(spectrum.round(3), hide_index=True)
+        show_table(spectrum.round(3))
         fig = interpret.make_spectrum_figure(spectrum, f"Anomaly at {centre}")
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        show_figure(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -644,11 +795,7 @@ def zone_figure(x: np.ndarray, y: np.ndarray, zone: np.ndarray, n_zones: int):
 
 def show_plan_view(fig) -> None:
     """Shows a plan-view map at its own size: stretched to the page width it looks zoomed in."""
-    try:
-        st.pyplot(fig, width="content")
-    except TypeError:                            # Streamlit before the width argument
-        st.pyplot(fig, use_container_width=False)
-    plt.close(fig)
+    show_figure(fig, stretch=False)
 
 
 def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
@@ -656,16 +803,19 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
     with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
         ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
         if not ec_cols:
-            st.info("Needs EC channels.")
+            st.info("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
+                    "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry (advanced "
+                    "settings) to add them.")
             return
         try:
             x, y, origin = corrections.xy_metres(table)
         except ctr.ContouringError:
-            st.info("Needs X/Y or Lat/Lon coordinates.")
+            st.info(NEEDS_XY)
             return
         chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}",
                                help=SCIENCE_HELP["soil_channels"])
         if not chans:
+            st.caption("Choose at least one EC channel.")
             return
         features = table[chans].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
         t_design, t_cal, t_zones = st.tabs(["Sampling design", "Calibration", "Management zones"])
@@ -684,7 +834,7 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             else:
                 extra = _lonlat_columns(sites["x"].to_numpy(), sites["y"].to_numpy(), origin)
                 sites = sites.assign(**extra)
-                st.dataframe(sites.round(4), hide_index=True, use_container_width=True)
+                show_table(sites.round(4))
                 fig, ax = plan_view(x, y)
                 ax.scatter(x, y, s=2, c="0.7")
                 ax.scatter(sites["x"], sites["y"], c="red", s=25)
@@ -692,9 +842,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                     ax.annotate(str(k), (sx, sy), fontsize=8, xytext=(3, 3), textcoords="offset points")
                 fig.tight_layout()
                 show_plan_view(fig)
-                st.download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
-                                   file_name=f"{file_key}_sampling_sites.csv", mime="text/csv",
-                                   key=f"soil_dl_sites_{file_key}")
+                download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
+                                f"{file_key}_sampling_sites.csv", key=f"soil_dl_sites_{file_key}")
 
         with t_cal:
             st.caption(
@@ -732,7 +881,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                     else:
                         st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} "
                                  f"({'log scale' if log_p else 'property units'}), {model.n} samples.")
-                        st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format))
+                        st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format),
+                                     width="content")
                         if not model.log_channels:
                             st.caption("Some samples have EC ≤ 0, so EC enters linearly, not as ln(EC).")
                         column = f"Predicted {prop}"
@@ -743,13 +893,11 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                         except ctr.ContouringError as exc:
                             st.info(str(exc))
                         else:
-                            st.pyplot(fig, use_container_width=True)
-                            plt.close(fig)
+                            show_figure(fig)
                         out = pd.DataFrame({"x": x, "y": y, **_lonlat_columns(x, y, origin),
                                             column: predicted[column]})
-                        st.download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
-                                           file_name=f"{file_key}_{prop}_predicted.csv",
-                                           mime="text/csv", key=f"soil_dl_pred_{file_key}")
+                        download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
+                                        f"{file_key}_{prop}_predicted.csv", key=f"soil_dl_pred_{file_key}")
 
         with t_zones:
             st.caption(
@@ -760,7 +908,8 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             )
             ok = np.all(np.isfinite(features), axis=1) & np.isfinite(x) & np.isfinite(y)
             if ok.sum() < 10:
-                st.info("Not enough complete readings.")
+                st.info("Fewer than 10 readings have every chosen channel and coordinates: "
+                        "too few to form zones.")
                 return
             data = soiltools.robust_standardise(features[ok])
             m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}",
@@ -768,7 +917,7 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             rng = np.random.default_rng(0)
             subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
             indices = _zone_table(subset, float(m))
-            st.dataframe(indices.round(4), hide_index=True)
+            show_table(indices.round(4))
             best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
             c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}", help=SCIENCE_HELP["soil_zones"])
             u = _zone_fit(data, int(c), float(m))
@@ -778,6 +927,5 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
             show_plan_view(zone_figure(x[ok], y[ok], zone, int(c)))
             out = pd.DataFrame({"x": x[ok], "y": y[ok], **_lonlat_columns(x[ok], y[ok], origin), "zone": zone,
                                 **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
-            st.download_button("Zones (.csv)", out.to_csv(index=False).encode(),
-                               file_name=f"{file_key}_zones.csv", mime="text/csv",
-                               key=f"soil_dl_zones_{file_key}")
+            download_button("Zones (.csv)", out.to_csv(index=False).encode(),
+                            f"{file_key}_zones.csv", key=f"soil_dl_zones_{file_key}")

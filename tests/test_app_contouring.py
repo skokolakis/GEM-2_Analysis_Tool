@@ -151,6 +151,7 @@ def _sidebar_app():
 
 def test_sidebar_offers_method_settings_and_colours():
     at = AppTest.from_function(_sidebar_app, default_timeout=60)
+    at.session_state["advanced"] = True
     at.run()
     at.sidebar.toggle(key="ct_area").set_value(True).run()
     at.sidebar.selectbox(key="ct_method").set_value("idw").run()
@@ -169,6 +170,7 @@ def test_sidebar_offers_method_settings_and_colours():
 
 def test_sidebar_colours_apply_to_the_pseudosection_alone():
     at = AppTest.from_function(_sidebar_app, default_timeout=60)
+    at.session_state["advanced"] = True
     at.run()
     at.sidebar.toggle(key="ct_pseudo").set_value(True).run()
     at.sidebar.selectbox(key="ct_display").set_value("image").run()

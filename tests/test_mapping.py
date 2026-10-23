@@ -89,6 +89,7 @@ def _map_app(two_files: bool = False):
 
 def test_area_map_processing_and_georeferenced_downloads():
     at = AppTest.from_function(_map_app, default_timeout=180)
+    at.session_state["advanced"] = True                  # map processing is an advanced setting
     at.run()
     at.selectbox(key="mp_kind_a_EC").set_value("low-pass")
     at.checkbox(key="mp_dec_a_EC").check()

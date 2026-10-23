@@ -4,6 +4,8 @@
 
 Sidebar → **Corrections & filters**. The steps apply to the EC, MS, I and Q channels of GEM files, before profiles and maps are built, in the order below. Every step that runs is listed with the file's warnings. Implementation: [`corrections.py`](../corrections.py), orchestrated by [`pipeline.py`](../pipeline.py).
 
+Despike, clipping, the running mean, base-station lines and the GPS lag are always shown; the other steps, and the despike window and threshold, appear with **Show advanced settings** — see [Basic and advanced settings](getting-started.md#basic-and-advanced-settings).
+
 | Step | What it does | Needs |
 |---|---|---|
 | Despike | Blanks readings that differ from their running median by more than *threshold* × the robust noise σ (1.4826 · MAD of second differences / √6). Readings within half a window of a line end are not tested | — |
@@ -12,7 +14,7 @@ Sidebar → **Corrections & filters**. The steps apply to the EC, MS, I and Q ch
 | Temperature drift | Linear coefficient per channel from the base-station occupations, subtracted relative to their mean temperature | Temperature column and ≥ 3 base-station lines |
 | Base-station drift | Mean of each base-station occupation, trend in time (piecewise linear or straight line), subtracted relative to the first occupation; base-station lines are then removed (USGS GEM-2 practice) | Time column and ≥ 2 base-station lines |
 | Calibration offsets | Additive I / Q offsets per frequency, loaded from the [multi-height calibration](sensor-physics.md#multi-height-calibration) download | Offsets CSV |
-| GPS lag | Each reading takes the track position *lag* seconds earlier. **Estimate GPS lag** (under each file) picks the lag that minimises differences between neighbouring lines (González Jiménez et al., 2022) | Time column, coordinates |
+| GPS lag | Each reading takes the track position *lag* seconds earlier. **Estimate GPS lag** (under each file, in Calibration) picks the lag that minimises differences between neighbouring lines (González Jiménez et al., 2022) | Time column, coordinates |
 | Background EC | Shifts each EC channel so its median equals a known background value (GEM-2 Manual) | — |
 | Reference calibration | Gain and offset per channel from reference values (e.g. apparent conductivity predicted from ERT, Lavoué et al., 2010; Mester et al., 2011, or TDR, Dragonetti et al., 2018): least-squares line, or matched mean and standard deviation | CSV with the survey's coordinate columns and one column per channel |
 | EC at 25 °C | EC × (0.4470 + 1.4034·e^(−T/26.815)) (Sheets & Hendrickx, 1995; Corwin & Lesch, 2005) | Soil temperature |

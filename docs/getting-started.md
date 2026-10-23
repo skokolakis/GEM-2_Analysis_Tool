@@ -16,7 +16,7 @@ cd GEM-2_Analysis_Tool
 pip install -r requirements.txt
 ```
 
-Dependencies (from [`requirements.txt`](../requirements.txt)): `streamlit` (≥ 1.26), `matplotlib` (≥ 3.5), `numpy`, `scipy` (≥ 1.10), `pandas` (≥ 2.1), `openpyxl`, `pykrige` (≥ 1.7), `pyproj` (≥ 3.3), `Pillow`.
+Dependencies (from [`requirements.txt`](../requirements.txt)): `streamlit` (≥ 1.50), `matplotlib` (≥ 3.5), `numpy`, `scipy` (≥ 1.10), `pandas` (≥ 2.1), `openpyxl`, `pykrige` (≥ 1.7), `pyproj` (≥ 3.3), `Pillow`.
 
 ## Run
 
@@ -30,12 +30,19 @@ The light, publication-style theme comes from [`.streamlit/config.toml`](../.str
 
 ## A first pass through the app
 
-1. **Upload** one or more `.xlsx` or `.csv` files. GEM-2 exports are recognised from their column names; anything else is read as a legacy multi-sheet file — see [Input data](input-data.md).
+1. **Upload** one or more `.xlsx` or `.csv` files — or press **Try the sample survey** to load the [sample data](#sample-data). GEM-2 exports are recognised from their column names; anything else is read as a legacy multi-sheet file, whose mode is set by **Legacy workbook mode** — see [Input data](input-data.md).
 2. **Sidebar → Profiles → Profile interpolation & scoring**: choose the distance step and interpolation method, and switch on **Frequency scoring** if you want frequencies ranked — see [Profiles, scoring & interpolation](profiles-and-scoring.md).
 3. **Sidebar → GEM files**: **GEM data preparation** (Status flags, lines to leave out, how distance along each line is measured), **Sensor geometry** and [**Corrections & filters**](corrections.md). Each sidebar group is named after the tool it sets and starts with a line saying which tools use it.
 4. **Sidebar → 2D contouring**: switch on area maps or pseudo-sections, then set them under **Area map gridding** and **Map colours** — see [2D mapping](mapping.md).
-5. Each file gets one tab per mode found (**EC**, **MS**, **I**, **Q**, **AUX**) with profiles, the graph editor and downloads. Under **Further analysis** are the [sensor physics](sensor-physics.md), [interpretation](interpretation.md) and [soil](soil-tools.md) tools.
-6. The **Forward model** on the main page works without an upload — use it to choose frequencies before a survey.
+5. Each GEM-2 file opens with a **summary card**: number of lines and readings, line length, survey duration, the frequencies found, and which tools the file supports — for example *Area maps* need coordinates and *Base-station drift* needs a Time column.
+6. Each file gets one tab per mode found (**EC**, **MS**, **I**, **Q**, **AUX**) with profiles, the graph editor and downloads. Below the tabs, **Calibration** holds the GPS-lag estimate and the multi-height calibration, whose results go into the sidebar; **Further analysis** holds the [sensor physics](sensor-physics.md), [interpretation](interpretation.md) and [soil](soil-tools.md) tools.
+7. The **Forward model** under **Survey planning**, at the end of the page, works without an upload — use it to choose frequencies before a survey.
+
+### Basic and advanced settings
+
+The sidebar starts in basic mode: the settings most surveys need. **Show advanced settings** at its top adds the expert ones — coil spacings, EC / MS recomputation and magnetic viscosity, despike window and threshold, PCA, drift model, temperature and sensor-height columns, calibration files, background EC, EC at 25 °C, the heading filter, the gridding method's own settings, blanking, projection and EPSG code, colour scale and display, contour lines, and the map filters under each area map. A hidden setting is always at its default, so switching back to basic mode puts any advanced setting you changed back to its default.
+
+Under the toggle, a line names every setting that differs from its default and changes the results (distance step, interpolation, data preparation, sensor geometry, corrections and filters); the same list is shown above the results. **Reset all settings** puts every sidebar setting back to its default and clears loaded calibration files; uploaded data files are kept.
 
 All processing is local and deterministic: no external APIs or databases.
 
