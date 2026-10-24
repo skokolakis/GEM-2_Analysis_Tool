@@ -29,6 +29,8 @@ LAG_MAX_NEIGHBOURS = 1024                                # ... widened up to thi
 LAG_END_SECONDS = 2.0                                    # s, track used to extrapolate line ends
 MIN_OCCUPATIONS = 2                                      # base-station visits for drift
 MIN_TEMPERATURE_OCCUPATIONS = 3                          # ... for a temperature coefficient
+JOINT_TEMPERATURE_OCCUPATIONS = 4                        # ... to fit it together with a time trend
+COLLINEAR_TEMPERATURE = 0.9                              # |r(time, temperature)| above which they mix
 
 
 @dataclass(frozen=True)
@@ -299,8 +301,14 @@ def correct_temperature(
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Removes a linear temperature dependence estimated from base-station
-    occupations: value = c0 + c1 x temperature at a fixed location, so
-    c1 x (T - T_mean) is subtracted from every reading.
+    occupations, so c1 x (T - T_mean) is subtracted from every reading.
+    Temperature and instrument drift both change through the day, so with
+    a time column and JOINT_TEMPERATURE_OCCUPATIONS or more occupations c1
+    is fitted together with a time trend (value = c0 + ct x time + c1 x
+    temperature) and the drift correction removes the time part; otherwise
+    value = c0 + c1 x temperature, which also takes up any drift that
+    follows the temperature. The messages warn when the two cannot be told
+    apart.
     """
     if column not in df.columns:
         raise ValueError(f"Temperature column '{column}' not found.")
@@ -314,15 +322,36 @@ def correct_temperature(
     t_occ = np.array([np.nanmean(temp[i]) for i in occ])
     if np.ptp(t_occ) == 0:
         raise ValueError("Base-station temperatures do not vary; no coefficient can be fitted.")
+    time = gem_io.time_seconds(df)
+    design = np.column_stack([np.ones(len(occ)), t_occ])
+    notes = []
+    if time is not None:
+        when = np.array([np.nanmean(time[i]) for i in occ])
+        r = float(np.corrcoef(when, t_occ)[0, 1]) if np.ptp(when) > 0 else 0.0
+        if abs(r) > COLLINEAR_TEMPERATURE:
+            notes.append(
+                f"Base-station temperature rose or fell with time (r = {r:.2f}), so its effect "
+                "cannot be told apart from instrument drift; the drift correction alone may be "
+                "the safer choice."
+            )
+        if len(occ) >= JOINT_TEMPERATURE_OCCUPATIONS and abs(r) < 1.0 - 1e-9:
+            design = np.column_stack([design, (when - when.mean()) / 3600.0])
+        else:
+            notes.append(
+                f"With {len(occ)} base-station lines the temperature coefficient also takes up "
+                f"the drift that follows the temperature; {JOINT_TEMPERATURE_OCCUPATIONS} or more "
+                "lets it be fitted together with a time trend."
+            )
     out = df.copy()
     coefs = []
     for col in channel_columns(df):
         v = _numeric(df, col)
         v_occ = np.array([np.nanmean(v[i]) for i in occ])
-        c1 = float(np.polyfit(t_occ, v_occ, 1)[0])
+        c1 = float(np.linalg.lstsq(design, v_occ, rcond=None)[0][1])
         out[col] = v - c1 * (temp - t_occ.mean())
         coefs.append(f"{col}: {c1:.4g}/°C")
-    return out, ["Temperature drift removed — " + "; ".join(coefs)]
+    joint = " (fitted together with a time trend)" if design.shape[1] == 3 else ""
+    return out, ["Temperature drift removed" + joint + " — " + "; ".join(coefs)] + notes
 
 
 # ---------------------------------------------------------------------------

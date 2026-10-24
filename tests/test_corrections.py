@@ -136,6 +136,25 @@ def test_temperature_coefficient_from_base_station():
     assert "0.4/°C" in msgs[0]
 
 
+def test_temperature_is_fitted_together_with_time_drift():
+    hours = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    temp = np.array([12.0, 18.0, 14.0, 22.0, 16.0])               # not in step with time
+    rows = [pd.DataFrame({"Line": f"B{k}", "Time[ms]": 1000 * (3600 * h + np.arange(3)),
+                          "Temp": tk, "EC1525Hz[mS/m]": 30 + 2.0 * h + 0.4 * tk})
+            for k, (h, tk) in enumerate(zip(hours, temp))]
+    table = pd.concat(rows, ignore_index=True)
+    out, msgs = C.correct_temperature(table, "Temp", tuple(f"B{k}" for k in range(5)))
+    assert "0.4/°C" in msgs[0] and "time trend" in msgs[0]
+    simple = float(np.polyfit(temp, 30 + 2.0 * hours + 0.4 * temp, 1)[0])
+    assert abs(simple - 0.4) > 0.05                              # the old fit took up the drift
+
+
+def test_temperature_warns_when_it_follows_time():
+    table, _ = _with_base_station(drift_per_hour=0.0, temp=[10.0, 15.0, 20.0])
+    _, msgs = C.correct_temperature(table, "Temp", ("B0", "B1", "B2"))
+    assert any("cannot be told apart" in m for m in msgs)
+
+
 # ── calibration ──────────────────────────────────────────────────────────────
 
 def test_reference_calibration_recovers_gain_and_offset():
