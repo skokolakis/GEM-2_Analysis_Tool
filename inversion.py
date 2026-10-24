@@ -23,12 +23,12 @@ import pipeline
 
 MIN_LOG_SIGMA = -5.0          # 0.01 mS/m
 MAX_LOG_SIGMA = 1.0           # 10 S/m
-JACOBIAN_STEP = 0.01          # log10 units
 MAX_ITERATIONS = 20
 ALPHA_FACTORS = (64.0, 8.0, 1.0, 0.25, 0.0625)   # regularisation weights tried per iteration (x current)
 ALPHA_MIN = 0.01              # regularisation never drops below this
 MIN_IMPROVEMENT = 0.01        # relative misfit decrease below which the search stops
 FORWARD_CHUNK = 400           # models per forward call (memory: ~0.35 MB per model)
+GRADIENT_CHUNK = 50           # models per forward-and-gradient call (memory: ~10 MB per model)
 MAX_STATIONS = 200            # stations the panel inverts at once
 STEP_HALVINGS = 5
 MODEL_TOLERANCE = 1e-3        # log10 units; smaller model updates end the iterations
@@ -95,15 +95,20 @@ def _forward_q(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Se
 
 
 def _jacobian(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Sensor):
-    """Forward response (S, F) and per-station Jacobians (S, F, N) by forward differences."""
+    """
+    Forward response (S, F) and per-station Jacobians d Q / d log10(sigma)
+    (S, F, N), from the analytic gradient of the forward model,
+    GRADIENT_CHUNK stations at a time.
+    """
     s, n = log_sigma.shape
-    perturbed = np.repeat(log_sigma[:, None, :], n + 1, axis=1)          # (S, N+1, N)
-    idx = np.arange(n)
-    perturbed[:, idx + 1, idx] += JACOBIAN_STEP
-    d = _forward_q(frequencies, perturbed.reshape(-1, n), grid, sensor).reshape(s, n + 1, -1)
-    base = d[:, 0, :]                                                     # (S, F)
-    jac = (d[:, 1:, :] - base[:, None, :]) / JACOBIAN_STEP                # (S, N, F)
-    return base, np.transpose(jac, (0, 2, 1))                             # (S, F, N)
+    base = np.empty((s, len(np.atleast_1d(frequencies))))
+    jac = np.empty(base.shape + (n,))
+    for a in range(0, s, GRADIENT_CHUNK):
+        sigma = 10.0 ** log_sigma[a: a + GRADIENT_CHUNK]
+        z, dz = E.forward_ppm_gradient(frequencies, sigma, None, grid.thickness, sensor)
+        base[a: a + len(sigma)] = z.imag
+        jac[a: a + len(sigma)] = dz.imag * (np.log(10.0) * sigma)[:, None, :]
+    return base, jac
 
 
 def _roughness(n_stations: int, n_layers: int, lateral_weight: float) -> sparse.csr_matrix:
@@ -287,11 +292,17 @@ class StationData:
     source: str                  # "Q" or "EC"
 
 
-def _mean_profile_table(output_data: dict[str, pd.DataFrame]) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Mean profiles of all channels on their joint distance grid: (distance, labels, values (D, F))."""
+def _mean_profile_table(
+    output_data: dict[str, pd.DataFrame], columns: list[str] | None = None
+) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """
+    Mean profiles of all channels on their joint distance grid: (distance,
+    labels, values (D, F)), over the trace *columns* (default: all traces).
+    """
     profiles = {}
     for label, df in output_data.items():
-        prof = df.mean(axis=1, skipna=True)
+        traces = df if columns is None else df[[c for c in columns if c in df.columns]]
+        prof = traces.mean(axis=1, skipna=True)
         prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
         profiles[label] = prof
     table = pd.concat(profiles, axis=1).sort_index()
@@ -303,20 +314,26 @@ def station_data(
     scores: dict[str, dict[str, dict]],
     station_step: float,
     sensor: E.Sensor = E.GEM2,
+    columns: list[str] | None = None,
 ) -> StationData:
     """
-    Stations every `station_step` metres along the mean profiles. Uses the
-    quadrature channels when present, otherwise EC converted to quadrature
-    (ec_to_quadrature). The measured noise is the between-pass sigma of each
-    frequency divided by sqrt(number of passes), the noise of the mean
-    profile (NaN for a frequency scored from a single pass; None if no
-    frequency has it).
+    Stations every `station_step` metres along the mean profiles of the
+    trace *columns* (one transect and its repeat passes; default: all
+    traces). Uses the quadrature channels when present, otherwise EC
+    converted to quadrature (ec_to_quadrature). The measured noise is the
+    sigma of each frequency's score (between passes, or within the line for a
+    single pass) divided by sqrt(number of passes averaged), the noise of the
+    mean profile (None if no frequency has it).
     """
     source = "Q" if output_data.get("Q") else "EC"
     channels = output_data.get(source) or {}
     if not channels:
         raise ValueError("Inversion needs Q (quadrature) or EC channels.")
-    distance, labels, values = _mean_profile_table(channels)
+    distance, labels, values = _mean_profile_table(channels, columns)
+    keep = np.isfinite(values).any(axis=1)
+    if not keep.any():
+        raise ValueError("The chosen lines have no readings to invert.")
+    distance, values = distance[keep], values[keep]
     freqs = np.array([float(lb[:-2]) for lb in labels])
     order = np.argsort(freqs)
     freqs, values = freqs[order], values[:, order]
@@ -325,13 +342,12 @@ def station_data(
     keep = np.unique(np.abs(distance[:, None] - targets[None, :]).argmin(axis=0))
     distance, values = distance[keep], values[keep]
 
-    def mean_noise(sc: dict) -> float:
-        """Noise of the mean of n passes: the between-pass sigma / sqrt(n)."""
-        if sc.get("noise_method") != "between-trace":
-            return np.nan
-        return sc.get("mean_std", np.nan) / np.sqrt(max(int(sc.get("n_traces", 1)), 1))
+    def mean_noise(sc: dict, label: str) -> float:
+        """Noise of the mean of n passes: the reading sigma / sqrt(n)."""
+        traces = channels[label].columns if columns is None else [c for c in columns if c in channels[label]]
+        return sc.get("mean_std", np.nan) / np.sqrt(max(len(traces), 1))
 
-    noise = np.array([mean_noise(scores.get(source, {}).get(lb, {})) for lb in labels])
+    noise = np.array([mean_noise(scores.get(source, {}).get(lb, {}), lb) for lb in labels])
     if source == "EC":
         q = ec_to_quadrature(freqs, values, sensor)
         # noise in mS/m -> ppm with the local slope dQ/dEC at the median EC

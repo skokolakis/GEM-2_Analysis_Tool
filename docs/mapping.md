@@ -12,11 +12,12 @@ In basic mode the sidebar offers the gridding method, cell size, line levelling,
 
 ## Pseudo-section (distance × frequency)
 
-Stacks the line-averaged profiles of all frequencies (the mean across survey lines at each distance — meaningful for repeat passes of one transect) into one contour plot: distance on x, frequency on y.
+Stacks the mean profiles of all frequencies (the mean of the repeat passes of one transect at each distance) into one contour plot: distance on x, frequency on y. When the lines of a file lie at different positions (an area survey), a **Transect** choice appears and the section is drawn for that transect only — the mean of lines over different ground is not a profile of any place.
 
 - The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Labels in kHz are converted to Hz.
 - Profiles are aligned on the distance range they all cover — nothing is extrapolated.
 - White lines mark the measured frequencies; colours between them are interpolated.
+- The frequency axis is not a depth axis. On the EC tab the caption gives each frequency's depth of investigation at its median EC: for the GEM-2 at 10 mS/m it only goes from about 3.3 m at 475 Hz to 2.5 m at 63 kHz, because under low induction numbers the coil geometry, not the frequency, sets the depth response.
 
 > **The frequency axis is not a calibrated depth axis.** Under the LIN approximation the depth response of a loop–loop sensor is set by coil geometry, not frequency (McNeill, 1980; Callegary et al., 2007). Analyses of small broadband sensors nevertheless find that the practical depth of investigation grows roughly with the square root of the skin depth, so lower frequencies see somewhat deeper (Huang, 2005). Read the axis as a qualitative trend at most.
 
@@ -29,7 +30,7 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
 3. **Block-median reduction** — one median point per grid cell, so densely sampled lines do not dominate. Default cell size = √(bounding-box area / number of readings), about one node per reading.
 4. **Gridding** — see the [table below](#gridding-methods).
 5. **Blanking** — grid nodes farther than the blanking distance from any block median are left blank. The default keeps the gaps between survey lines filled: the larger of 2 × median point spacing and 1.5 × the 90th-percentile distance from grid nodes inside the survey to the nearest data point.
-6. **Cross-validation** (button **Cross-validate (5-fold)**) — RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Folds are random, so along densely sampled lines the errors are optimistic; use them to rank methods rather than as absolute accuracy.
+6. **Cross-validation** (button **Cross-validate (5-fold)**) — RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Whole transects are held out together (repeat passes of one transect count as one), so each held-out reading is estimated from the neighbouring lines — the gaps between lines are where gridding methods differ. Without line labels, or with fewer than five transects, the folds are random; along densely sampled lines those errors are optimistic and favour exact interpolators. On the sample survey (EC 5325 Hz) random folds rank linear interpolation first (RMSE 2.6 mS/m), while holding out lines ranks kriging first (5.7 mS/m, against 6.6 for linear).
 
 ### Gridding methods
 
@@ -42,14 +43,7 @@ The gridding methods of Golden Software's Surfer:
 | Linear (Delaunay) | Triangulation; blank outside the data hull. |
 | Minimum curvature | The smoothest surface through the data (Briggs, 1974), the usual choice for geophysical maps. Tension 0–0.95 (Smith & Wessel, 1990): 0 is pure minimum curvature, which can overshoot between readings; higher tension pulls the surface tight between them. Solved directly as one sparse least-squares system on the grid (edges free), so it is limited to 300,000 grid nodes. |
 | Inverse distance to a power | Weighted mean of the 64 nearest block medians, weights 1 / (d² + δ²)^(power/2). Power 2 by default; a smoothing distance δ > 0 stops the surface passing exactly through readings and softens the bull's-eyes this method leaves around them. |
-| Radial basis function | Multiquadric (Surfer's default), inverse multiquadric, natural cubic spline (r³) or thin-plate spline, with the 64 nearest points above 2,000 block medians. The multiquadric shape follows Surfer: R² = (diagonal of the data extent)² / (25 n). |
 | Natural neighbour | Sibson weights — the area each reading would give up to a new point — computed in the discrete form of Park et al. (2006) on a raster four times finer than the grid. Smooth, never beyond the data range, and blank-free inside the data. |
-| Nearest neighbour | Value of the closest block median: no smoothing, useful for dense regular grids. |
-| Modified Shepard's method | Inverse-distance blend of local quadratics fitted around every reading (Franke & Nielson, 1980), with 13 points per quadratic and 19 for the weights as in Surfer, so it follows trends that plain inverse distance flattens. |
-| Local polynomial | A polynomial of order 1–3 fitted around each node to its 64 nearest block medians, weights (1 − d / R)^power. |
-| Polynomial regression | One trend surface (order 1–3) for the whole area, to show or remove a regional trend. |
-| Moving average | Mean of the block medians within a search radius (automatic: a circle that holds about 16 readings at the survey's mean density). |
-| Data metrics | A statistic of the block medians within the search radius: number, density, median, minimum, maximum, range or standard deviation. Number and density show the survey coverage. Not cross-validated, since these are summaries rather than estimates. |
 
 Minimum curvature and natural neighbour are computed on the grid itself; cross-validation grids each training fold and reads it at the held-out points.
 
@@ -72,16 +66,13 @@ To reproduce a Surfer image map: Rainbow (Surfer), continuous image, full data r
 
 ### Map processing
 
-Expander **Map processing (filters, footprint deconvolution)** under each map, applied to the gridded values:
+Expander **Map processing (filters)** under each map, applied to the gridded values:
 
 | Option | What it does |
 |---|---|
 | Despike | Replaces cells that differ from their window median by more than *threshold* × 1.4826 × the median absolute difference |
 | Low-pass | Moving average over *window* × *window* cells (blank cells neither spread nor bias it) |
 | High-pass | Removes the regional trend: the value minus its *window* × *window* moving average |
-| Deconvolve the sensor footprint | Lateral Tikhonov deconvolution of the coils' low-induction-number footprint (receiver minus bucking coil, sensor height from *Sensor geometry*; the coil axis defaults to the survey-line direction). Sharpens apparent-conductivity maps. It does not resolve depth: the 3D multichannel deconvolution of Guillemoteau et al. (2017) needs several coil geometries, while a GEM-2 has one geometry at several frequencies, and at low induction number the frequencies share the same footprint |
-
-The footprint kernel is the dot product of the transmitter's and receiver's quasi-static electric fields (Born approximation). The tests check that its depth profile matches McNeill's (1980) HCP depth response.
 
 **Histogram & statistics** — count, mean, standard deviation, minimum, 2nd / 50th / 98th percentile and maximum of the gridded values, with a histogram.
 

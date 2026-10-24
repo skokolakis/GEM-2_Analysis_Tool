@@ -19,6 +19,7 @@ import contouring as ctr
 import corrections
 
 DESIGN_POOL = 20                 # candidates (nearest in feature space) per design target
+COLLINEAR_CHANNELS = 0.95        # |r| between calibration channels above which coefficients are unstable
 INNER_RING, OUTER_RING = 1.0, 1.75   # design radii in standardised principal-component units
 
 
@@ -134,6 +135,9 @@ class PropertyModel:
     n: int
     observed: np.ndarray
     fitted: np.ndarray
+    loo_r2: float = np.nan       # leave-one-out (predicting each sample from the others)
+    loo_rmse: float = np.nan     # on the fitted scale
+    channel_correlation: float = np.nan   # largest |r| between the channels at the samples
 
 
 def _design_matrix(values: np.ndarray, xy: np.ndarray | None, log_channels: bool, trend: bool) -> np.ndarray:
@@ -210,12 +214,22 @@ def fit_property_model(
     coef, *_ = np.linalg.lstsq(a, target, rcond=None)
     fitted = a @ coef
     resid = target - fitted
-    r2 = 1.0 - float(resid @ resid) / float(((target - target.mean()) ** 2).sum())
+    total = float(((target - target.mean()) ** 2).sum())
+    r2 = 1.0 - float(resid @ resid) / total
+    # Leave-one-out residuals of least squares without refitting: e_i / (1 - h_ii), h = hat matrix.
+    leverage = np.einsum("ij,ji->i", a, np.linalg.pinv(a))
+    press = resid / np.maximum(1.0 - leverage, 1e-12)
+    corr = np.nan
+    if len(channels) > 1:
+        c = np.abs(np.corrcoef(a[:, 1: 1 + len(channels)], rowvar=False))
+        corr = float(np.nanmax(c[~np.eye(len(channels), dtype=bool)]))
     names = ["intercept", *[f"ln {c}" if log_channels else c for c in channels]] + (["x", "y"] if trend else [])
     return PropertyModel(
         channels=list(channels), log_property=log_property, log_channels=log_channels, trend=trend,
         coefficients=pd.Series(coef, index=names), r2=r2,
         rmse=float(np.sqrt(np.mean(resid ** 2))), n=int(use.sum()), observed=target, fitted=fitted,
+        loo_r2=1.0 - float(press @ press) / total, loo_rmse=float(np.sqrt(np.mean(press ** 2))),
+        channel_correlation=corr,
     )
 
 

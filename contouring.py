@@ -11,7 +11,6 @@ from __future__ import annotations
 import io
 import math
 import re
-import warnings
 from dataclasses import dataclass, field, replace
 
 import matplotlib
@@ -62,48 +61,17 @@ METHODS = {
     "linear": "Linear (Delaunay)",
     "min_curvature": "Minimum curvature",
     "idw": "Inverse distance to a power",
-    "rbf": "Radial basis function",
     "natural_neighbor": "Natural neighbour",
-    "nearest": "Nearest neighbour",
-    "shepard": "Modified Shepard's method",
-    "local_polynomial": "Local polynomial",
-    "polynomial": "Polynomial regression (trend surface)",
-    "moving_average": "Moving average",
-    "metrics": "Data metrics",
 }
 GRID_METHODS = ("min_curvature", "natural_neighbor")   # solved on the grid nodes themselves
 METHOD_DEFAULTS = {                                      # Surfer's defaults where it has them
     "idw": {"power": 2.0, "delta": 0.0},
     "min_curvature": {"tension": 0.0},
-    "rbf": {"kernel": "multiquadric"},
-    "local_polynomial": {"order": 1, "power": 2.0},
-    "polynomial": {"order": 1},
-    "moving_average": {"radius": 0.0},
-    "metrics": {"statistic": "count", "radius": 0.0},
-}
-RBF_KERNELS = {
-    "multiquadric": "Multiquadric",
-    "inverse_multiquadric": "Inverse multiquadric",
-    "cubic": "Natural cubic spline (r³)",
-    "thin_plate_spline": "Thin-plate spline",
-}
-METRICS = {
-    "count": "Number of readings",
-    "density": "Readings per m²",
-    "median": "Median",
-    "minimum": "Minimum",
-    "maximum": "Maximum",
-    "range": "Range",
-    "std": "Standard deviation",
 }
 VARIOGRAM_MODELS = ["spherical", "exponential", "gaussian"]
 SEARCH_POINTS = 64              # readings used per estimate (Surfer's default maximum)
-METRICS_MAX_POINTS = 256        # readings counted per node by the data metrics
-MOVING_AVERAGE_POINTS = 16      # the automatic search radius holds about this many readings
 MIN_CURVATURE_MAX_NODES = 300_000   # sparse direct solve; larger grids take too long
 MIN_CURVATURE_DATA_WEIGHT = 1e3     # data misfit weight against the curvature energy
-SHEPARD_QUADRATIC_POINTS = 13   # Franke & Nielson (1980) / Renka (1988) defaults, as in Surfer
-SHEPARD_WEIGHT_POINTS = 19
 NATURAL_NEIGHBOUR_MAX_WORK = 2e8    # node visits of the discrete Sibson scatter
 NATURAL_NEIGHBOUR_SUPERSAMPLE = 4   # raster points per cell side for the stolen areas
 
@@ -170,10 +138,8 @@ AUX_LABELS = {
 }
 
 
-def value_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
+def value_label(mode: str, channel: str | None = None) -> str:
     """Axis / colour-bar label with correct GEM units; AUX channels carry their own."""
-    if not is_gem:
-        return f"{mode} (input units)"
     if mode == "AUX":
         return AUX_LABELS.get(channel, str(channel) if channel else "Auxiliary channel")
     return UNIT_LABELS.get(mode, mode)
@@ -374,6 +340,14 @@ def block_median(
     return agg["x"].to_numpy(), agg["y"].to_numpy(), agg["v"].to_numpy()
 
 
+def block_lines(x: np.ndarray, y: np.ndarray, lines: np.ndarray, spec: GridSpec) -> np.ndarray:
+    """Line of each block_median point (its first reading's), in the same order."""
+    ix = np.floor((np.asarray(x) - spec.x0) / spec.cell).astype(np.int64)
+    iy = np.floor((np.asarray(y) - spec.y0) / spec.cell).astype(np.int64)
+    df = pd.DataFrame({"ix": ix, "iy": iy, "line": np.asarray(lines)})
+    return df.groupby(["iy", "ix"], sort=True)["line"].first().to_numpy()
+
+
 # ---------------------------------------------------------------------------
 # Variogram
 # ---------------------------------------------------------------------------
@@ -517,15 +491,13 @@ def predict(
     q = np.column_stack([np.ravel(qx) - cx, np.ravel(qy) - cy])
     opts = method_options(method, options)
 
-    if method in ("spline", "rbf", "linear"):
+    if method in ("spline", "linear"):
         try:
             if method == "linear":
                 return griddata(p, pv, q, method="linear"), None
-            kernel = "thin_plate_spline" if method == "spline" else opts["kernel"]
             neighbours = LOCAL_NEIGHBOURS if len(pv) > GLOBAL_MAX_POINTS else None
-            shape = {"epsilon": _rbf_epsilon(p)} if "multiquadric" in kernel else {}
             rbf = RBFInterpolator(
-                p, pv, kernel=kernel, smoothing=smoothing, neighbors=neighbours, **shape,
+                p, pv, kernel="thin_plate_spline", smoothing=smoothing, neighbors=neighbours,
             )
             return rbf(q), None
         except (np.linalg.LinAlgError, QhullError, ValueError) as exc:
@@ -540,18 +512,6 @@ def predict(
 
     if method == "idw":
         return _idw(p, pv, q, float(opts["power"]), float(opts["delta"])), None
-    if method == "nearest":
-        return pv[cKDTree(p).query(q)[1]], None
-    if method == "shepard":
-        return _shepard(p, pv, q), None
-    if method == "local_polynomial":
-        return _local_polynomial(p, pv, q, int(opts["order"]), float(opts["power"])), None
-    if method == "polynomial":
-        return _polynomial(p, pv, q, int(opts["order"])), None
-    if method == "moving_average":
-        return _search_statistic(p, pv, q, float(opts["radius"]), "mean"), None
-    if method == "metrics":
-        return _search_statistic(p, pv, q, float(opts["radius"]), opts["statistic"]), None
 
     raise ValueError(f"Unknown gridding method: {method!r}")
 
@@ -585,17 +545,6 @@ def predict_grid(
     return z.reshape(shape), (var.reshape(shape) if var is not None else None)
 
 
-def _rbf_epsilon(p: np.ndarray) -> float:
-    """
-    Shape parameter of the multiquadric kernels: 1 / R with Surfer's default
-    R² = (diagonal of the data extent)² / (25 n). The scale-free kernels
-    (thin-plate spline, cubic) take none.
-    """
-    diagonal = float(np.hypot(*np.ptp(p, axis=0)))
-    r = diagonal / (5.0 * math.sqrt(len(p)))
-    return 1.0 / r if r > 0 else 1.0
-
-
 def _neighbours(p: np.ndarray, q: np.ndarray, k: int, radius: float = np.inf):
     """(distance, index) of the k nearest points, always 2-D; inf / len(p) beyond *radius*."""
     k = min(k, len(p))
@@ -618,139 +567,6 @@ def _idw(p: np.ndarray, pv: np.ndarray, q: np.ndarray, power: float, delta: floa
     z = np.sum(w * pv[i], axis=1) / np.sum(w, axis=1)
     z[hit] = pv[i[hit, 0]]
     return z
-
-
-def _poly_design(x: np.ndarray, y: np.ndarray, order: int) -> np.ndarray:
-    """Columns x^a y^b for a + b <= order, constant first; shape x.shape + (n_terms,)."""
-    if order not in (1, 2, 3):
-        raise ContouringError("The polynomial order must be 1, 2 or 3.")
-    terms = [x ** (t - b) * y ** b for t in range(order + 1) for b in range(t + 1)]
-    return np.stack(terms, axis=-1)
-
-
-def _polynomial(p: np.ndarray, pv: np.ndarray, q: np.ndarray, order: int) -> np.ndarray:
-    """Least-squares trend surface of the given order over all the data."""
-    scale = max(float(np.ptp(p, axis=0).max()), 1e-12)
-    a = _poly_design(p[:, 0] / scale, p[:, 1] / scale, order)
-    if len(pv) < a.shape[1]:
-        raise ContouringError(f"A order-{order} trend surface needs at least {a.shape[1]} points.")
-    coef, *_ = np.linalg.lstsq(a, pv, rcond=None)
-    return _poly_design(q[:, 0] / scale, q[:, 1] / scale, order) @ coef
-
-
-def _local_polynomial(
-    p: np.ndarray, pv: np.ndarray, q: np.ndarray, order: int, power: float, chunk: int = 4096
-) -> np.ndarray:
-    """
-    Weighted least-squares polynomial about each node over its SEARCH_POINTS
-    nearest readings, weights (1 - d / R)^power with R the distance to the
-    farthest of them (Surfer's local polynomial). The estimate is the fitted
-    constant term.
-    """
-    n_terms = _poly_design(np.zeros(1), np.zeros(1), order).shape[-1]
-    if len(pv) <= n_terms:
-        raise ContouringError(f"A local order-{order} polynomial needs more than {n_terms} points.")
-    out = np.empty(len(q))
-    for s in range(0, len(q), chunk):
-        qs = q[s:s + chunk]
-        d, i = _neighbours(p, qs, SEARCH_POINTS)
-        r = d[:, -1:] * 1.0001 + 1e-12
-        w = (1.0 - d / r) ** power
-        a = _poly_design((p[i, 0] - qs[:, :1]) / r, (p[i, 1] - qs[:, 1:]) / r, order)
-        aw = a * w[..., None]
-        m = np.einsum("nki,nkj->nij", aw, a)
-        rhs = np.einsum("nki,nk->ni", aw, pv[i])
-        out[s:s + chunk] = np.einsum("nj,nj->n", np.linalg.pinv(m)[:, 0, :], rhs)
-    return out
-
-
-def _shepard(p: np.ndarray, pv: np.ndarray, q: np.ndarray, chunk: int = 8192) -> np.ndarray:
-    """
-    Modified Shepard's method (Franke & Nielson, 1980): a quadratic is fitted
-    about every reading to its SHEPARD_QUADRATIC_POINTS neighbours, and the
-    nodes blend the quadratics with weights ((R - d)+ / (R d))², R being the
-    radius of each reading's SHEPARD_WEIGHT_POINTS neighbours.
-    """
-    n = len(pv)
-    if n < 6:
-        raise ContouringError("Modified Shepard's method needs at least 6 points.")
-    tree = cKDTree(p)
-    nq = min(SHEPARD_QUADRATIC_POINTS, n - 1)
-    dq, iq = tree.query(p, k=nq + 1)
-    dq, iq = dq[:, 1:], iq[:, 1:]                      # drop the reading itself
-    rq = dq[:, -1:] * 1.01 + 1e-12
-    wq = (np.clip(rq - dq, 0, None) / (rq * np.where(dq == 0, 1.0, dq))) ** 2
-    dx, dy = p[iq, 0] - p[:, None, 0], p[iq, 1] - p[:, None, 1]
-    a = np.stack([dx, dy, dx * dx, dx * dy, dy * dy], axis=-1)
-    aw = a * wq[..., None]
-    coef = np.einsum(
-        "nij,nj->ni", np.linalg.pinv(np.einsum("nki,nkj->nij", aw, a)),
-        np.einsum("nki,nk->ni", aw, pv[iq] - pv[:, None]),
-    )
-    nw = min(SHEPARD_WEIGHT_POINTS, n - 1)
-    rw = tree.query(p, k=nw + 1)[0][:, -1]
-
-    out = np.empty(len(q))
-    for s in range(0, len(q), chunk):
-        qs = q[s:s + chunk]
-        d, i = _neighbours(p, qs, 2 * nw)
-        r = rw[i]
-        safe = np.where(d == 0, 1.0, d)
-        w = (np.clip(r - d, 0, None) / (r * safe)) ** 2
-        none = w.sum(axis=1) == 0                     # outside every reading's radius
-        w[none] = 1.0 / safe[none] ** 2
-        ex, ey = qs[:, None, 0] - p[i, 0], qs[:, None, 1] - p[i, 1]
-        c = coef[i]
-        local = (pv[i] + c[..., 0] * ex + c[..., 1] * ey
-                 + c[..., 2] * ex * ex + c[..., 3] * ex * ey + c[..., 4] * ey * ey)
-        z = np.sum(w * local, axis=1) / np.sum(w, axis=1)
-        hit = d[:, 0] == 0
-        z[hit] = pv[i[hit, 0]]
-        out[s:s + chunk] = z
-    return out
-
-
-def auto_search_radius(p: np.ndarray, points: int = MOVING_AVERAGE_POINTS) -> float:
-    """Radius of a circle holding about *points* readings at the survey's mean density."""
-    area = float(np.prod(np.ptp(p, axis=0)))
-    if area <= 0:
-        raise ContouringError("Could not determine a search radius (the data have no area).")
-    return math.sqrt(points * area / (math.pi * len(p)))
-
-
-def _search_statistic(
-    p: np.ndarray, pv: np.ndarray, q: np.ndarray, radius: float, statistic: str
-) -> np.ndarray:
-    """
-    A statistic of the readings within *radius* of each node (0 = automatic,
-    see auto_search_radius): the mean for the moving average, else one of
-    METRICS. Nodes with no reading in range are blank (count and density: 0).
-    """
-    if statistic != "mean" and statistic not in METRICS:
-        raise ValueError(f"Unknown statistic: {statistic!r}")
-    radius = radius if radius > 0 else auto_search_radius(p)
-    k = SEARCH_POINTS if statistic == "mean" else METRICS_MAX_POINTS
-    d, i = _neighbours(p, q, k, radius)
-    inside = np.isfinite(d)
-    count = inside.sum(axis=1).astype(float)
-    if statistic == "count":
-        return count
-    if statistic == "density":
-        return count / (math.pi * radius ** 2)
-    v = np.where(inside, pv[np.where(inside, i, 0)], np.nan)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)   # nodes with no reading in range
-        if statistic == "mean":
-            return np.nanmean(v, axis=1)
-        if statistic == "median":
-            return np.nanmedian(v, axis=1)
-        if statistic == "minimum":
-            return np.nanmin(v, axis=1)
-        if statistic == "maximum":
-            return np.nanmax(v, axis=1)
-        if statistic == "range":
-            return np.nanmax(v, axis=1) - np.nanmin(v, axis=1)
-        return np.nanstd(v, axis=1, ddof=1)
 
 
 def _min_curvature(
@@ -1093,30 +909,12 @@ class AreaMapResult:
     n_raw: int
     epsg: int | None = None             # CRS of x / y when known (UTM or user-given)
     options: dict = field(default_factory=dict)   # the method's settings (method_options)
+    bline: np.ndarray | None = None     # line of each block point (block_lines), None if unknown
 
 
 def method_title(result: AreaMapResult) -> str:
-    """Method name for titles, with the setting that changes what the map shows."""
-    name = METHODS[result.method]
-    if result.method == "rbf":
-        return f"{name} ({RBF_KERNELS[result.options['kernel']].lower()})"
-    if result.method == "metrics":
-        return f"{name}: {METRICS[result.options['statistic']].lower()}"
-    if result.method in ("polynomial", "local_polynomial"):
-        return f"{name}, order {result.options['order']}"
-    return name
-
-
-def result_label(result: AreaMapResult, label: str) -> str:
-    """Colour-bar label: data metrics other than value statistics are not in the data's units."""
-    if result.method != "metrics":
-        return label
-    statistic = result.options["statistic"]
-    if statistic == "count":
-        return "Readings within the search radius"
-    if statistic == "density":
-        return "Readings per m²"
-    return f"{METRICS[statistic]} of {label}"
+    """Method name for titles."""
+    return METHODS[result.method]
 
 
 def survey_xy(
@@ -1221,6 +1019,7 @@ def compute_area_map(
         variogram=variogram, blank_distance=dist, origin=origin,
         levelled=levelled, n_raw=int(keep.sum()), epsg=epsg,
         options=method_options(method, options),
+        bline=None if lines is None else block_lines(x, y, lines, spec),
     )
 
 
@@ -1269,23 +1068,33 @@ def cross_validate(
     seed: int = 0,
     options: dict | None = None,
     spec: GridSpec | None = None,
-) -> dict[str, float]:
+    groups: np.ndarray | None = None,
+) -> dict:
     """
-    k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted points).
+    k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted
+    points) and folds ("groups" or "random").
 
-    For kriging the variogram is held fixed across folds (pass the fit used
-    for the map). GRID_METHODS grid each training fold on *spec* (default:
-    automatic cell size) and are read at the held-out points bilinearly.
+    With *groups* (e.g. the survey line of each point, or its transect) and
+    at least k of them, whole groups are held out together, so each held-out
+    reading is estimated from other lines, as the map estimates the gaps
+    between lines. Random folds leave a neighbour a fraction of a metre away
+    on the same line in the training set, which makes any exact interpolator
+    look good. For kriging the variogram is held fixed across folds (pass
+    the fit used for the map). GRID_METHODS grid each training fold on *spec*
+    (default: automatic cell size) and are read at the held-out points
+    bilinearly.
     """
-    if method == "metrics":
-        raise ContouringError(
-            "Cross-validation compares estimates with held-out readings; data metrics are "
-            "summaries of the readings, not estimates."
-        )
     px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
     if method in GRID_METHODS and spec is None:
         spec = make_grid(px, py, auto_cell_size(px, py))
-    folds = np.random.default_rng(seed).permutation(len(pv)) % k
+    rng = np.random.default_rng(seed)
+    labels = None if groups is None else pd.factorize(pd.Series(np.asarray(groups, dtype=object)))[0]
+    if labels is not None and len(labels) == len(pv) and labels.max() + 1 >= k:
+        folds = (rng.permutation(labels.max() + 1) % k)[labels]
+        kind = "groups"
+    else:
+        folds = rng.permutation(len(pv)) % k
+        kind = "random"
     errors = []
     for f in range(k):
         test = folds == f
@@ -1311,6 +1120,7 @@ def cross_validate(
         "rmse": float(np.sqrt(np.mean(err ** 2))),
         "mae": float(np.mean(np.abs(err))),
         "n": int(err.size),
+        "folds": kind,
     }
 
 

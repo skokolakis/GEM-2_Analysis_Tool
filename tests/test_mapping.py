@@ -92,11 +92,10 @@ def test_area_map_processing_and_georeferenced_downloads():
     at.session_state["advanced"] = True                  # map processing is an advanced setting
     at.run()
     at.selectbox(key="mp_kind_a_EC").set_value("low-pass")
-    at.checkbox(key="mp_dec_a_EC").check()
     at.run()
     assert not at.exception
     captions = " ".join(c.value for c in at.caption)
-    assert "Low-pass" in captions and "Deconvolved" in captions
+    assert "Low-pass" in captions
     labels = [b.label for b in at.get("download_button")]
     assert "GeoTIFF (.tif)" in labels and "Projection (.prj)" in labels
 

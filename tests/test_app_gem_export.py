@@ -54,7 +54,7 @@ def test_is_gem_format_accepts_iq_only_export():
 def test_overview_legend_without_scores_and_markers():
     interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
     fig = R.make_overview_figure(
-        {"f": interp}, {"f": {"score": 3.0}}, "EC", "x", is_gem=True,
+        {"f": interp}, {"f": {"score": 3.0}}, "EC", "x",
         show_scores=False, markers=[0.5],
     )
     labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
@@ -65,7 +65,7 @@ def test_overview_legend_without_scores_and_markers():
 def test_batch_without_scores_has_no_scores_sheet():
     interp = pd.DataFrame({"a": [1.0, 2.0]}, index=[0.0, 1.0])
     entry = {"stem": "f", "mode": "EC", "output_data": {"x": interp},
-             "scores": {"x": {"score": 1.0, "amplitude": 1.0, "mean_std": 1.0,
+             "scores": {"x": {"score": 1.0, "signal_std": 1.0, "mean_std": 1.0,
                               "noise_method": "between-trace", "n_traces": 1}}}
     xlsx = R.build_batch_xlsx([entry], include_scores=False)
     assert pd.ExcelFile(io.BytesIO(xlsx)).sheet_names == ["f_EC"]
@@ -170,7 +170,7 @@ def test_unique_file_keys_avoid_widget_collisions():
     taken = set()
     assert R.unique_file_key("site", taken, ("EC",)) == "site"
     assert R.unique_file_key("site", taken, ("EC",)) == "site_2"
-    assert R.unique_file_key("site_EC", taken) == "site_EC_2"      # a legacy file named like a GEM mode key
+    assert R.unique_file_key("site_EC", taken, ("EC",)) == "site_EC_2"   # named like another file's mode key
     at = AppTest.from_function(_two_uploads_app, default_timeout=180)
     at.run()
     assert not at.exception

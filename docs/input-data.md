@@ -2,7 +2,7 @@
 
 [← Documentation index](README.md)
 
-The app accepts `.csv` and `.xlsx` files. A file is treated as a **GEM-2 export** when its columns match the GEM-2 layout; otherwise it is read as a **legacy multi-sheet** workbook.
+The app accepts `.csv` and `.xlsx` files. A file is read as a **GEM-2 export** when its columns match the GEM-2 layout; any other file is refused with a message.
 
 ## GEM-2 exports (recommended)
 
@@ -43,15 +43,6 @@ Each mode found in the file gets its own tab: **EC**, **MS**, **I**, **Q** and *
 
 - **Event markers** are drawn as dotted vertical lines on every profile.
 - **Sensor geometry** and **Corrections & filters** are described in [Sensor physics](sensor-physics.md) and [Corrections & filters](corrections.md).
-
-## Legacy multi-sheet XLSX
-
-| Element | Requirement |
-|---|---|
-| Sheets | One frequency per sheet (sheet name = frequency label) |
-| Column 0 | Distance along the transect (m, numeric) |
-| Columns 1+ | One column per survey line / pass (numeric) |
-| Mode | Choose **Legacy workbook mode** (EC or MS) in the sidebar — GEM files show every mode automatically |
 
 ## CSV vs XLSX precision
 

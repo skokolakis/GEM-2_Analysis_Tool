@@ -133,12 +133,23 @@ def test_unreachable_target_stops_early_with_regularisation_left():
 
 def test_jacobian_is_computed_in_chunks(monkeypatch):
     sizes = []
-    real = E.forward_ppm_batch
+    real = E.forward_ppm_gradient
 
     def counting(f, sigma, *args, **kwargs):
         sizes.append(len(sigma))
         return real(f, sigma, *args, **kwargs)
 
-    monkeypatch.setattr(E, "forward_ppm_batch", counting)
-    V._jacobian(FREQS, np.full((50, 10), -2.0), V.make_layer_grid(6.0, 10), E.GEM2)
-    assert max(sizes) <= V.FORWARD_CHUNK and sum(sizes) == 50 * 11
+    monkeypatch.setattr(E, "forward_ppm_gradient", counting)
+    V._jacobian(FREQS, np.full((120, 10), -2.0), V.make_layer_grid(6.0, 10), E.GEM2)
+    assert max(sizes) <= V.GRADIENT_CHUNK and sum(sizes) == 120
+
+
+def test_jacobian_matches_finite_differences():
+    grid = V.make_layer_grid(6.0, 8)
+    m = np.log10(np.array([[0.01, 0.02, 0.05, 0.1, 0.05, 0.02, 0.01, 0.03]]))
+    base, jac = V._jacobian(FREQS, m, grid, E.GEM2)
+    for k in range(grid.n_layers):
+        p = m.copy()
+        p[0, k] += 1e-6
+        fd = (V._forward_q(FREQS, p, grid, E.GEM2) - base) / 1e-6
+        np.testing.assert_allclose(jac[0, :, k], fd[0], rtol=1e-4, atol=1e-6 * np.abs(jac).max())

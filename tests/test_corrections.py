@@ -46,10 +46,9 @@ def test_despike_handles_integer_rounded_data():
     assert n == 1 and np.isnan(out[30])
 
 
-def test_clip_and_running_mean():
+def test_clip_to_percentiles():
     v, n = C.clip_to_percentiles(np.arange(100.0), 5, 95)
     assert n == 10 and np.isnan(v[0]) and v[50] == 50
-    np.testing.assert_allclose(C.running_mean(np.array([0, 3, 6.0]), 3), [1.5, 3, 4.5])
 
 
 def test_ec_at_25_is_identity_at_25_and_lowers_warm_soil():
@@ -99,6 +98,18 @@ def test_drift_correction_flattens_and_drops_base_lines():
     assert "3 base-station occupation" in msgs[0]
 
 
+def test_linear_drift_is_relative_to_the_fitted_drift_at_the_first_visit():
+    t = np.array([0.0, 1.0, 2.0, 3.0]) * 3600.0
+    df = pd.DataFrame({
+        "Line": ["B0", "S", "B1", "B2"], "Time[ms]": 1000 * t,
+        "EC1525Hz[mS/m]": [10.0, 50.0, 13.0, 12.0],
+    })
+    out, _ = C.correct_drift(df, ("B0", "B1", "B2"), "linear")
+    slope, intercept = np.polyfit(t[[0, 2, 3]], [10.0, 13.0, 12.0], 1)
+    # the survey reading loses the drift since the first visit, nothing more
+    assert out["EC1525Hz[mS/m]"].iloc[0] == pytest.approx(50.0 - slope * 3600.0)
+
+
 def test_drift_needs_two_occupations_and_time():
     table, _ = _with_base_station()
     with pytest.raises(ValueError, match="at least 2"):
@@ -124,6 +135,25 @@ def test_temperature_coefficient_from_base_station():
     assert "0.4/°C" in msgs[0]
 
 
+def test_temperature_is_fitted_together_with_time_drift():
+    hours = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    temp = np.array([12.0, 18.0, 14.0, 22.0, 16.0])               # not in step with time
+    rows = [pd.DataFrame({"Line": f"B{k}", "Time[ms]": 1000 * (3600 * h + np.arange(3)),
+                          "Temp": tk, "EC1525Hz[mS/m]": 30 + 2.0 * h + 0.4 * tk})
+            for k, (h, tk) in enumerate(zip(hours, temp))]
+    table = pd.concat(rows, ignore_index=True)
+    out, msgs = C.correct_temperature(table, "Temp", tuple(f"B{k}" for k in range(5)))
+    assert "0.4/°C" in msgs[0] and "time trend" in msgs[0]
+    simple = float(np.polyfit(temp, 30 + 2.0 * hours + 0.4 * temp, 1)[0])
+    assert abs(simple - 0.4) > 0.05                              # the old fit took up the drift
+
+
+def test_temperature_warns_when_it_follows_time():
+    table, _ = _with_base_station(drift_per_hour=0.0, temp=[10.0, 15.0, 20.0])
+    _, msgs = C.correct_temperature(table, "Temp", ("B0", "B1", "B2"))
+    assert any("cannot be told apart" in m for m in msgs)
+
+
 # ── calibration ──────────────────────────────────────────────────────────────
 
 def test_reference_calibration_recovers_gain_and_offset():
@@ -145,17 +175,6 @@ def test_reference_calibration_skips_constant_channels():
     assert C.fit_reference_calibration(df, pts, radius=0.3) == []
 
 
-# ── PCA ──────────────────────────────────────────────────────────────────────
-
-def test_pca_denoise_reduces_independent_noise():
-    rng = np.random.default_rng(2)
-    signal = rng.normal(0, 1, (500, 1)) * np.array([[1.0, 0.9, 0.8, 0.7]])
-    noisy = signal + rng.normal(0, 0.1, signal.shape)
-    out, kept = C.pca_denoise(noisy, 1)
-    assert np.std(out - signal) < np.std(noisy - signal)
-    assert kept > 0.95
-
-
 # ── positioning ──────────────────────────────────────────────────────────────
 
 def test_estimate_lag_recovers_injected_lag():
@@ -169,12 +188,6 @@ def test_estimate_lag_recovers_injected_lag():
     lag, cost = C.estimate_lag(df, "EC1525Hz[mS/m]")
     assert lag == pytest.approx(0.5, abs=0.11)
     assert cost.argmin() == np.argmin(np.abs(C.LAG_SEARCH - lag))
-
-
-def test_heading_filter_keeps_one_direction():
-    df = _survey()                                     # even lines north, odd lines south
-    keep = C.heading_mask(df, 0.0, 30.0)
-    assert set(df.loc[keep, "Line"]) == {0, 2, 4}
 
 
 def test_estimate_lag_with_dense_sampling():
@@ -206,13 +219,6 @@ def test_shift_positions_keeps_gps_no_fix_rows_and_extrapolates():
     assert out["Y"].iloc[0] == pytest.approx(-1.0)          # extrapolated, not clamped
 
 
-def test_headings_use_whole_line_direction():
-    rng = np.random.default_rng(3)
-    y = np.concatenate([[0.0, 0.0, 0.0], np.arange(0, 20, 0.1)])  # stands still, then walks north
-    df = pd.DataFrame({"Line": 0, "X": rng.normal(0, 0.3, y.size), "Y": y + rng.normal(0, 0.3, y.size)})
-    assert C.heading_mask(df, 0.0, 30.0).all()
-
-
 def test_estimate_lag_on_one_long_line_fails_fast():
     import time
 
@@ -232,18 +238,16 @@ def test_shift_positions_extrapolates_with_end_velocity():
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
-def test_background_offset_and_soil_temperature_in_pipeline():
+def test_soil_temperature_in_pipeline():
     df = _survey()
-    s = C.CorrectionSettings(ec_background=30.0)
-    out, msgs = C.apply_corrections(df, s)
-    assert np.median(out["EC1525Hz[mS/m]"]) == pytest.approx(30.0)
+    out, msgs = C.apply_corrections(df, C.CorrectionSettings(soil_temperature=10.0))
+    np.testing.assert_allclose(out["EC1525Hz[mS/m]"], C.ec_at_25(df["EC1525Hz[mS/m]"], 10.0))
     assert out["MSusc1525Hz[1/1000]"].equals(df["MSusc1525Hz[1/1000]"])
 
 
 def test_corrections_reported_and_scores_flagged_through_pipeline():
-    prep = pipeline.PrepSettings(corrections=C.CorrectionSettings(smooth_window=5, despike=True))
+    prep = pipeline.PrepSettings(corrections=C.CorrectionSettings(despike=True))
     out, msgs = pipeline.prepare_gem_table(_survey(), prep)
-    assert any("Running mean over 5" in m for m in msgs)
     assert any("Despiking blanked" in m for m in msgs)
     assert prep.corrections.lowers_noise
 

@@ -53,7 +53,7 @@ def select_frequencies(
     Greedy selection: frequencies in descending score order are kept unless
     their mean profile correlates (|r| > max_correlation) with one already
     kept, up to max_count. Blank scores are never selected.
-    Returns one row per frequency: Frequency, Score, Selected, Reason.
+    Returns one row per frequency: Frequency, SNR (dB), Selected, Reason.
     """
     ranked = sorted(
         scores.items(),
@@ -78,7 +78,7 @@ def select_frequencies(
         else:
             chosen.append(name)
             rows.append((name, sc["score"], True, "selected"))
-    return pd.DataFrame(rows, columns=["Frequency", "Score", "Selected", "Reason"])
+    return pd.DataFrame(rows, columns=["Frequency", "SNR (dB)", "Selected", "Reason"])
 
 
 # ---------------------------------------------------------------------------

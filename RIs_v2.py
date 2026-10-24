@@ -17,12 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.interpolate import (
-    Akima1DInterpolator,
-    CubicSpline,
-    PchipInterpolator,
-    make_interp_spline,
-)
+from scipy.interpolate import PchipInterpolator
 
 import contouring as ctr
 import corrections
@@ -55,17 +50,9 @@ PSEUDOSECTION_MODES = tuple(MODES)
 AREA_MAP_MODES = (*MODES, "AUX")
 PREP_APPLIES_TO = "Applied to every GEM file before its profiles, maps and further analysis."
 
-ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
-
-# Methods that fit a smooth trend instead of passing through every sample.
-# They remove short-wavelength variability from each trace, lowering σ and
-# inflating the score, so their scores are not comparable with interpolants.
-TREND_FIT_METHODS = {"polynomial"}
-TREND_FIT_WARNING = (
-    "`polynomial` is a least-squares trend fit (degree ≤ 5), not an interpolant: "
-    "it smooths each trace, which lowers σ and inflates the score. Use it to view "
-    "trends, not to compare scores with the other methods."
-)
+# Readings are usually denser than the profile grid, so the method matters
+# little; both pass through every reading without overshoot.
+INTERP_METHODS = ["linear", "pchip"]
 
 LINE_STYLES = {
     "Solid": "-",
@@ -118,12 +105,12 @@ GEM_MS_PATTERN = gem_io.CHANNEL_PATTERNS["MS"]
 GEM_REQUIRED_COLS = {'Line', 'Y'}
 
 SCORING_HELP = (
-    "Rank frequencies by signal-to-noise score (amplitude / noise σ). Off: "
+    "Rank frequencies by their signal-to-noise ratio (signal power / noise power, in dB). Off: "
     "profiles, maps and exports are produced without scores."
 )
 SMOOTHING_SCORE_WARNING = (
-    "Despiking, smoothing or PCA noise reduction lower the noise σ, so scores "
-    "rise. Compare scores only between runs with the same filters."
+    "Despiking lowers the noise σ, so scores rise. Compare scores only between runs with "
+    "the same filters."
 )
 DISTANCE_HELP = (
     "How the distance of each reading along its line is found. "
@@ -139,8 +126,11 @@ log = logging.getLogger(__name__)
 
 SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choices
     "altitude": (
-        "Column with the sensor height of each reading. Readings are corrected to the "
-        "reference height with a fitted height response."
+        "Column with the sensor height above ground of each reading. With 'Recompute EC / MS "
+        "from I / Q', each reading is converted at its own height (the physics removes the "
+        "height effect). Otherwise readings are corrected to the reference height with a "
+        "fitted height response, which also removes any change of the ground that goes with "
+        "height."
     ),
     "altitude_ref": (
         "Height every reading is corrected to; 0 uses the median height."
@@ -148,10 +138,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "area_map": (
         "Grids the readings over the survey area from their coordinates and draws a contour "
         "map of one channel, on the EC, MS and AUX tabs."
-    ),
-    "background": (
-        "Shifts each EC channel so its median equals this value, e.g. from a reference "
-        "measurement. Removes a constant calibration offset."
     ),
     "bucking": (
         "Distance from the transmitter to the bucking coil, which cancels the primary field "
@@ -162,14 +148,12 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "draw a finer map but cannot add detail between lines that were not measured."
     ),
     "clip": (
-        "Blanks the most extreme values of each channel, e.g. readings near metal."
+        "Blanks the most extreme values of each channel. It always removes the strongest "
+        "readings of the survey, which are often the targets themselves (metal, kilns, clay "
+        "lenses, saline patches): use the despike filter for isolated spikes."
     ),
     "clip_range": (
-        "Values below the lower or above the upper percentile are blanked."
-    ),
-    "coil_axis": (
-        "Direction of the coil axis (the walking direction) on the map; the footprint is "
-        "longer along it."
+        "Values below the lower or above the upper percentile of the whole survey are blanked."
     ),
     "colour_lines": (
         "Draws black contour lines at the colour boundaries on top of the map."
@@ -195,9 +179,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "combined": (
         "Merged: one map from several surveys, each levelled to the others where they "
         "overlap. Difference: the change between two surveys of the same area (B − A)."
-    ),
-    "deconv_reg": (
-        "Damping of the deconvolution: smaller values sharpen more but amplify noise."
     ),
     "despike": (
         "Blanks single readings that jump away from their neighbours (metal, knocks) by more "
@@ -236,24 +217,8 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "the spatial correlation (variogram), with an error map. Linear: flat triangles "
         "between readings. Minimum curvature: the smoothest surface through the data, common "
         "for geophysical maps. Inverse distance: weighted mean, nearer readings count more; "
-        "leaves bull's-eyes around readings. Radial basis function: spline-like surface from "
-        "a chosen kernel. Natural neighbour: weights from the area each reading would give "
-        "up; smooth and never beyond the data range. Nearest neighbour: value of the closest "
-        "reading. Modified Shepard: inverse distance blending local quadratics, so it "
-        "follows trends. Local polynomial: a weighted polynomial fitted around each node. "
-        "Polynomial regression: one trend surface for the whole area (regional trend). "
-        "Moving average: mean of the readings within a search radius. Data metrics: a "
-        "statistic of the readings within a search radius, e.g. their number."
-    ),
-    "heading": (
-        "Keeps only readings walked within a range of headings, e.g. to check for heading "
-        "error on lines walked back and forth."
-    ),
-    "heading_dir": (
-        "Walking direction to keep, clockwise from north (or from the +Y axis)."
-    ),
-    "heading_tol": (
-        "Readings within this many degrees of the heading are kept."
+        "leaves bull's-eyes around readings. Natural neighbour: weights from the area each "
+        "reading would give up; smooth and never beyond the data range."
     ),
     "height": (
         "Height of the coils above the ground. The response weakens with height and comes "
@@ -269,18 +234,14 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "and bull's-eyes soften. 0 passes through the readings."
     ),
     "interpolation": (
-        "How each pass is resampled onto the common grid. Linear and nearest are the most "
-        "conservative; cubic, quadratic, PCHIP and Akima are smooth (PCHIP and Akima do not "
-        "overshoot); polynomial fits a trend and lowers the noise."
+        "How each pass is resampled onto the common grid. Linear joins the readings with "
+        "straight lines; PCHIP is smooth and, like linear, never overshoots the readings."
     ),
     "lag_channel": (
         "Channel compared between neighbouring lines; one with clear anomalies works best."
     ),
     "levels": (
         "Number of colour bands between the lowest and highest mapped value."
-    ),
-    "local_power": (
-        "How fast a reading's weight falls across the search: (1 − d / R)^power."
     ),
     "map_despike": (
         "How far from the local median a cell must be, in robust σ units, to be replaced."
@@ -296,14 +257,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "map_window": (
         "Size of the moving window, in cells per side."
     ),
-    "method_order": (
-        "Order of the polynomial: 1 is a plane, 2 a quadratic surface, 3 a cubic one. Higher "
-        "orders follow more detail but swing more where readings are sparse."
-    ),
-    "metric": (
-        "Statistic of the readings within the search radius of each node. The number and "
-        "density of readings show the survey coverage; the others summarise the values."
-    ),
     "min_curvature_tension": (
         "0 gives the smoothest surface (minimum curvature), which may overshoot between "
         "readings; values towards 1 pull the surface tight between them, like a stretched "
@@ -314,11 +267,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "quadrature grow with frequency, so they are left out). Lower frequencies see deeper "
         "on average, but the frequency axis is not a calibrated depth (McNeill, 1980)."
     ),
-    "rbf_kernel": (
-        "Basis function of the surface. Multiquadric (Surfer's default) gives a smooth "
-        "surface that follows the data closely; inverse multiquadric is flatter away from "
-        "readings; the natural cubic and thin-plate splines bend least."
-    ),
     "ref_method": (
         "Regression: least-squares line through the matched pairs. Moments: gain and offset "
         "that match the mean and spread of the reference values."
@@ -327,17 +275,9 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "Survey readings within this distance of a reference point are matched to it (their "
         "median)."
     ),
-    "search_radius": (
-        "Readings within this distance of a node are used. 0 = automatic: a circle that "
-        "holds about 16 readings at the survey's mean density."
-    ),
     "separation": (
         "Distance from the transmitter to the receiver coil (1.66 m on the GEM-2). Wider "
         "separation sees deeper."
-    ),
-    "smooth": (
-        "Centred moving average along each line. Lowers noise but blurs small anomalies (and "
-        "raises the scores)."
     ),
     "spacing": (
         "Reading number: distance walked between two readings. Markers: distance between two "
@@ -377,7 +317,7 @@ class GraphOptions:
     show_envelope: bool = True
     plot_title: str = ""   # empty → use auto-generated default
     x_label: str = ""      # empty → "Distance (m)"
-    y_label: str = ""      # empty → profile_label(mode, is_gem)
+    y_label: str = ""      # empty → profile_label(mode)
     x_column: str = PROFILE_X   # what is plotted (plot_axis_options)
     y_column: str = PROFILE_Y
 
@@ -500,14 +440,17 @@ instrument drift, operator-induced variability and short-term
 environmental noise; this replicated design is what makes the
 between-pass spread a meaningful noise estimate.
 
-Each frequency receives a **representativeness score**:
+Each frequency receives a **signal-to-noise ratio** (SNR), the ratio
+of signal power to noise power (Sheriff & Geldart, 1995), in decibels
+as is usual for data quality (Bakulin et al., 2022):
 
-$$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
+$$\\mathrm{{SNR_{{dB}}}} = 10\\,\\log_{{10}}\\frac{{P_s}}{{P_n}}, \\qquad P_n = \\sigma_{{\\text{{noise}}}}^2, \\qquad P_s = \\operatorname{{var}}(\\bar p) - \\sigma_{{\\text{{noise}}}}^2 \\left\\langle \\tfrac{{1}}{{k}} \\right\\rangle$$
 
 | Symbol | Meaning |
 |---|---|
-| **A** | Amplitude — max(p̄) − min(p̄) of the mean profile, taken where at least two passes overlap (single-pass files: the whole profile). The total contrast resolved at that frequency. |
-| **σ_noise** | Noise, estimated from the data as below. |
+| **p̄** | Mean profile of the passes, where at least two overlap (single-pass files: the measured readings) |
+| **P_s** | Signal power — the variance of p̄ about its mean, less the noise still in it: averaging k passes leaves σ²/k of noise at each distance (single pass: k = 1). So P_s does not grow with the noise, however many passes there are. |
+| **P_n** | Noise power, σ², with σ estimated from the data as below. |
 
 - **≥ 2 passes (recommended):** at each distance step where at least
   two passes were measured, the sample variance across passes
@@ -516,6 +459,12 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
   sample formula applies (with two passes the population formula would
   understate σ by √½ ≈ 0.71). Each pass is used only inside its own
   measured range — nothing is extrapolated.
+- **Lines at different positions** (an area survey): lines are grouped
+  into transects by their position across the line direction (less
+  than 1 m apart = one transect). σ and A are taken only within each
+  transect walked at least twice — or within each line when every
+  transect was walked once — since lines over different ground differ
+  by the geology, not by noise.
 - **1 pass (fallback):** from the *measured* samples, not the
   interpolated grid. Second differences Δ²y cancel a locally linear
   trend; for white noise var(Δ²y) = 6σ², so
@@ -527,13 +476,12 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
 - **σ < 10⁻⁸ or not estimable:** the score is left blank and ranked
   last, with a warning.
 
-A higher score is a higher signal-to-noise ratio, the standard
-geophysical criterion for data quality (Sheriff & Geldart, 1995;
-Bakulin et al., 2022).
+0 dB means as much signal as noise power; every 10 dB is ten times
+more. When P_s ≤ 0 — no signal rises above the noise — the score is
+left blank and ranked last.
 
-> **Filters change scores.** Despiking, the running mean, PCA and the
-> polynomial trend fit all lower σ and so raise the score. Compare
-> scores only between runs with the same settings.
+> **Filters change scores.** Despiking lowers σ and so raises the
+> score. Compare scores only between runs with the same settings.
 
 **Frequency selection** under the ranking keeps up to three
 high-scoring frequencies whose mean profiles are not strongly
@@ -546,8 +494,8 @@ correlated, since correlated frequencies carry the same information
 
 | Step | What happens |
 |---|---|
-| **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions); anything else is read as a legacy one-sheet-per-frequency workbook. Readings with a non-zero `Status` are dropped (optional). |
-| **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration, EC at 25 °C, PCA, running mean, heading filter. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
+| **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions). Readings with a non-zero `Status` are dropped (optional). |
+| **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, reference calibration, EC at 25 °C. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
 | **3. Locate** | The distance of each reading along its line is found (sidebar **Distance along line**); each channel becomes a distance × line matrix. |
 | **4. Interpolate** | Every pass is resampled onto a common distance grid (**Distance step**) inside its own measured range. At a repeated distance within a pass only the first reading is kept. |
 | **5. Score** (optional) | With **Frequency scoring** on, the mean profile, σ and score of each frequency; frequencies ranked by descending score. |
@@ -564,15 +512,10 @@ correlated, since correlated frequencies carry the same information
 | Method | Min. points | Characteristics |
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
-| **nearest** | 1 | Value of the closest data point. Useful for step-like signals. |
-| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
-| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
-| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Shape-preserving, monotone within each interval — avoids the overshoot of cubic splines. |
-| **akima** | 5 | Akima (1970) local spline. Slopes from neighbouring points only, so robust to isolated outliers. |
-| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Lowers σ and inflates the score — do not compare its scores with the other methods. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
 
-**Generate all-methods export** (under *Export all files*) runs all seven
-in one step for direct comparison.
+GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile
+grid, so the two give nearly the same profiles and scores.
 
 ---
 
@@ -580,11 +523,11 @@ in one step for direct comparison.
 
 | Area | What it does | Key references |
 |---|---|---|
-| **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration (ERT / TDR), EC at 25 °C, PCA noise reduction, running mean, heading filter | Vilhelmsen & Døssing (2022); Minsley et al. (2010); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
+| **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, reference calibration (ERT / TDR), EC at 25 °C | Vilhelmsen & Døssing (2022); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
 | **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
-| **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured between-pass noise; EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
+| **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured noise (between passes, or within the line); EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
 | **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
-| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and Surfer's gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, modified Shepard's method and more — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Franke & Nielson (1980); Renka (1988); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
+| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and six gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, linear and inverse distance — cross-validation, map filters and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011) |
 | **Soil tools** | Response-surface sampling design, soil-property calibration on ln(EC), fuzzy c-means management zones | Lesch (2005); Lesch et al. (1995); Bezdek (1981); Fridgen et al. (2004); Boydell & McBratney (2002) |
 
 Methods in full: [documentation]({DOCS_URL}/README.md).
@@ -599,7 +542,6 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
 | **GEM-2 I / Q** | `I_…Hz` / `Q_…Hz` in ppm, plus `PowerLn`, `QSum`, `TotalEC[mS/m]` when present |
 | **`.gbf`-converted tables** | `Ip_` / `Qd_` columns; lines found from X / Y or time when there is no `Line` column |
-| **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = passes |
 
 ---
 
@@ -613,13 +555,11 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **MS** | Apparent magnetic susceptibility (10⁻³ SI) — from the in-phase |
 | **LIN** | Low-induction-number approximation (B = s/δ ≪ 1), under which EC and MS decouple (McNeill, 1980) |
 | **Skin depth (δ)** | Depth at which the primary field falls to 1/e; decreases with frequency and conductivity |
-| **SNR** | Signal-to-noise ratio |
-| **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
-| **Amplitude (A)** | max − min of the mean profile where at least two passes overlap |
+| **SNR** | Signal-to-noise ratio, 10 log₁₀(P_s / P_n) dB — the score used for frequency ranking |
+| **P_s, P_n** | Signal power (variance of the mean profile less its remaining noise) and noise power (σ²_noise) |
 | **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
-| **Akima spline** | Local spline with slopes from neighbouring points only |
 
 ---
 
@@ -681,7 +621,7 @@ def pivot_gem_frequency(
     )
 
     # Rename columns to "Line_0", "Line_1", "Line_L1", etc.
-    pivoted.columns = [f"Line_{c}" for c in pivoted.columns]
+    pivoted.columns = [gem_io.trace_column(c) for c in pivoted.columns]
 
     # Reset index so column 0 = distance (what process_sheet expects)
     pivoted = pivoted.reset_index()
@@ -794,6 +734,9 @@ def process_gem_file(
     warnings.extend(messages)
 
     gem_data = parse_gem_dataframe(prepared, warnings, distance_col=pipeline.DISTANCE_COL)
+    tracks = trace_tracks(prepared)
+    if tracks is not None:
+        warnings.append(SEPARATE_TRACKS_WARNING.format(n=len(set(tracks.values()))))
 
     output_data: dict[str, dict[str, pd.DataFrame]] = _empty_modes()
     scores: dict[str, dict[str, dict]] = _empty_modes()
@@ -801,7 +744,7 @@ def process_gem_file(
     for mode_key in gem_io.GEM_MODES:
         for freq_label, pivoted_df in gem_data[mode_key].items():
             interp_df, score_dict, error, col_warnings = process_sheet(
-                pivoted_df, distance_step, interp_kind
+                pivoted_df, distance_step, interp_kind, tracks
             )
 
             for w in col_warnings:
@@ -821,6 +764,31 @@ def process_gem_file(
     return output_data, scores, warnings
 
 
+SEPARATE_TRACKS_WARNING = (
+    "The lines lie at {n} different positions across the survey, so they are not all repeat "
+    "passes of one transect. Noise is measured between repeat passes of the same transect "
+    "(within each line where a transect was walked once) and the score is the median over the "
+    "transects. The mean profiles and ±1σ envelopes still average lines over different ground: "
+    "use the area map for the whole survey, and pick one transect for the pseudo-section and "
+    "the inversion."
+)
+
+
+def trace_tracks(table: pd.DataFrame) -> dict[str, int] | None:
+    """
+    Transect of each trace column ({trace column: track}) when the lines of
+    *table* lie at more than one position (gem_io.track_groups); None when
+    they are all repeat passes of one transect or their positions are unknown.
+    """
+    try:
+        groups = gem_io.track_groups(table)
+    except (KeyError, ValueError):
+        return None
+    if not groups or len(set(groups.values())) < 2:
+        return None
+    return {gem_io.trace_column(line): track for line, track in groups.items()}
+
+
 @st.cache_data(show_spinner=False, max_entries=64)    # up to 3 settings variants per file
 def prepared_table(
     file_bytes: bytes, file_name: str, prep: pipeline.PrepSettings | None = None
@@ -836,12 +804,7 @@ def prepared_table(
 # Minimum point requirements per method
 _METHOD_MIN_POINTS = {
     "linear": 2,
-    "nearest": 1,
     "pchip": 2,
-    "quadratic": 3,
-    "polynomial": 3,
-    "akima": 5,
-    "cubic": 4,
 }
 
 
@@ -852,34 +815,8 @@ def _interpolate_with_method(
     if method == "linear":
         return np.interp(target_x, xp, yp)
 
-    if method == "nearest":
-        idx = np.searchsorted(xp, target_x, side="left")
-        idx_left = np.clip(idx - 1, 0, len(xp) - 1)
-        idx_right = np.clip(idx, 0, len(xp) - 1)
-        nearest = np.where(
-            np.abs(target_x - xp[idx_left]) <= np.abs(target_x - xp[idx_right]),
-            idx_left,
-            idx_right,
-        )
-        return yp[nearest]
-
     if method == "pchip":
         return PchipInterpolator(xp, yp)(target_x)
-
-    if method == "quadratic":
-        return make_interp_spline(xp, yp, k=2)(target_x)
-
-    if method == "polynomial":
-        # Least-squares trend fit (exact only for ≤ 6 points). Polynomial.fit
-        # maps x onto [-1, 1], keeping projected coordinates well-conditioned.
-        degree = min(len(xp) - 1, 5)
-        return np.polynomial.Polynomial.fit(xp, yp, degree)(target_x)
-
-    if method == "akima":
-        return Akima1DInterpolator(xp, yp)(target_x)
-
-    if method == "cubic":
-        return CubicSpline(xp, yp)(target_x)
 
     raise ValueError(f"Unknown interpolation method: {method!r}")
 
@@ -892,16 +829,33 @@ def process_sheet(
     df: pd.DataFrame,
     distance_step: float = DEFAULT_DISTANCE_STEP,
     interp_kind: str = DEFAULT_INTERP_KIND,
+    tracks: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame | None, dict | None, str | None, list[str]]:
     """
     Process a single sheet.
+
+    *tracks* maps trace columns to transects (gem_io.track_groups): only
+    traces on one transect are repeat passes, so the between-trace noise and
+    the signal power are taken within each transect walked at least twice,
+    or within each trace when every transect was walked once. None: all
+    traces are repeat passes of one transect.
+
+    The score is the signal-to-noise ratio in dB, 10 log10(P_s / P_n): the
+    noise power P_n = sigma^2, and the signal power P_s is the variance of
+    the mean profile about its mean minus the noise left in it, sigma^2 x
+    mean(1 / k) with k passes at each distance (single pass: the variance of
+    the measured readings minus sigma^2), so P_s is unbiased however many
+    passes were averaged.
 
     Returns
     -------
     interpolated_df : DataFrame indexed by common distance, columns = original trace
                       columns; NaN outside each trace's own measured range
-    score_dict      : {"mean_std": σ_noise, "amplitude": float, "score": float,
-                       "noise_method": NOISE_BETWEEN | NOISE_INTRA, "n_traces": int}
+    score_dict      : {"mean_std": σ_noise, "signal_std": √P_s, "snr": P_s / P_n,
+                       "score": SNR in dB, "noise_method": NOISE_BETWEEN | NOISE_INTRA,
+                       "n_traces": int, "passes": passes per transect behind σ (median)}
+                      score is NaN when the noise is zero or undefined, or
+                      when no signal rises above the noise
                       score is NaN when the noise is zero or undefined
     error           : human-readable reason for failure, or None on success
     col_warnings    : list of per-column warning strings surfaced to the UI
@@ -982,45 +936,83 @@ def process_sheet(
     interpolated_df = pd.DataFrame(interpolated_lines, index=common_dist)
     interpolated_df.index.name = "Distance (m)"
 
-    rep_prof = interpolated_df.mean(axis=1, skipna=True)
     n_traces = interpolated_df.shape[1]
+    groups: dict[int, list[str]] = {}
+    for col in interpolated_df.columns:
+        groups.setdefault(0 if tracks is None else tracks.get(col, -1 - len(groups)), []).append(col)
+    repeats = [cols for cols in groups.values() if len(cols) >= 2]
 
-    if n_traces >= 2:
-        # Between-trace noise, only where ≥ 2 passes were measured. The passes
-        # are a finite sample of the measurement process, hence ddof=1; the
-        # point-wise variances are pooled as sqrt(mean(var)).
-        overlap = interpolated_df.notna().sum(axis=1) >= 2
-        if not overlap.any():
+    if repeats:
+        # Between-trace noise, only where ≥ 2 passes of one transect were
+        # measured. The passes are a finite sample of the measurement process,
+        # hence ddof=1; the point-wise variances are pooled as sqrt(mean(var)).
+        # Lines at different positions differ by the ground, not by noise.
+        variances, profiles, passes = [], [], []
+        for cols in repeats:
+            sub = interpolated_df[cols]
+            count = sub.notna().sum(axis=1)
+            overlap = count >= 2
+            if not overlap.any():
+                continue
+            variances.append(sub[overlap].var(axis=1, skipna=True, ddof=1).to_numpy())
+            # mean profile and the number of passes averaged at each distance
+            profiles.append((sub[overlap].mean(axis=1, skipna=True).to_numpy(), count[overlap].to_numpy()))
+            passes.append(len(cols))
+        if not variances:
             return None, None, "traces do not overlap in distance", col_warnings
-        var_prof = interpolated_df[overlap].var(axis=1, skipna=True, ddof=1)
-        noise = float(np.sqrt(np.nanmean(var_prof)))
-        amp_prof = rep_prof[overlap]
+        noise = float(np.sqrt(np.nanmean(np.concatenate(variances))))
+        signal_power = _signal_power([p for p, _ in profiles], [1.0 / k for _, k in profiles], noise)
         noise_method = NOISE_BETWEEN
     else:
-        noise = _intra_profile_noise(next(iter(raw_samples.values())))
-        amp_prof = rep_prof
+        # Every transect walked once: noise and signal within each trace, on
+        # its measured readings (the noise estimate comes from them too).
+        sigmas = np.array([_intra_profile_noise(raw_samples[c]) for c in interpolated_df.columns])
+        noise = float(np.sqrt(np.nanmean(sigmas ** 2))) if np.isfinite(sigmas).any() else float("nan")
+        traces = [raw_samples[c] for c in interpolated_df.columns]
+        signal_power = _signal_power(traces, [np.ones(len(t)) for t in traces], noise)
+        passes = [1]
         noise_method = NOISE_INTRA
 
-    amplitude = float(np.nanmax(amp_prof) - np.nanmin(amp_prof))
-
-    if np.isfinite(noise) and noise >= SCORE_EPSILON:
-        score = amplitude / noise
+    snr, score = np.nan, np.nan
+    if not (np.isfinite(noise) and noise >= SCORE_EPSILON):
+        # Zero or undefined noise: a ratio would be meaningless.
+        col_warnings.append(f"{noise_method} noise is zero or undefined — score left blank")
+    elif not signal_power > 0:
+        snr = 0.0
+        col_warnings.append("no signal rises above the noise (signal power ≤ 0) — score left blank")
     else:
-        # Zero or undefined noise: a ratio would be meaningless, and falling
-        # back to the amplitude would rank a data-unit value against ratios.
-        score = np.nan
-        col_warnings.append(
-            f"{noise_method} noise is zero or undefined — score left blank"
-        )
+        snr = signal_power / noise ** 2
+        score = 10.0 * np.log10(snr)
 
     score_dict = {
         "mean_std": noise,
-        "amplitude": amplitude,
+        "signal_std": float(np.sqrt(signal_power)) if signal_power > 0 else 0.0,
+        "snr": snr,
         "score": score,
         "noise_method": noise_method,
         "n_traces": n_traces,
+        "passes": int(np.median(passes)),
     }
     return interpolated_df, score_dict, None, col_warnings
+
+
+def _signal_power(profiles: list[np.ndarray], noise_shares: list[np.ndarray], noise: float) -> float:
+    """
+    Signal power pooled over transects: for each profile its variance about
+    its mean (ddof = 1) minus the noise left in it, noise^2 x mean(share),
+    the share being 1 / (passes averaged) at each distance; weighted by the
+    number of distances. NaN when no profile has two values.
+    """
+    total, weight = 0.0, 0
+    for p, share in zip(profiles, noise_shares):
+        p, share = np.asarray(p, dtype=float), np.asarray(share, dtype=float)
+        ok = np.isfinite(p)
+        if ok.sum() < 2:
+            continue
+        power = float(np.var(p[ok], ddof=1)) - (noise ** 2 * float(np.mean(share[ok])) if np.isfinite(noise) else 0.0)
+        total += power * ok.sum()
+        weight += int(ok.sum())
+    return total / weight if weight else float("nan")
 
 
 def _intra_profile_noise(y: np.ndarray) -> float:
@@ -1063,68 +1055,15 @@ def rank_scores(scores: dict[str, dict]) -> list[tuple[str, dict]]:
     )
 
 
-@st.cache_data(show_spinner=False)
-def process_file(
-    excel_bytes: bytes,
-    mode: str,
-    distance_step: float = DEFAULT_DISTANCE_STEP,
-    interp_kind: str = DEFAULT_INTERP_KIND,
-) -> tuple[dict, dict, list[str]]:
-    """
-    Process all sheets in an uploaded Excel file (legacy multi-sheet format).
-
-    Returns
-    -------
-    output_data               : {sheet_name: interpolated_df}
-    representativeness_scores : {sheet_name: score_dict}
-    warnings                  : list of warning strings
-    """
-    output_data: dict[str, pd.DataFrame] = {}
-    scores: dict[str, dict] = {}
-    warnings: list[str] = []
-
-    try:
-        excel = pd.ExcelFile(io.BytesIO(excel_bytes))
-    except Exception as exc:
-        warnings.append(f"Could not open file: {exc}")
-        return output_data, scores, warnings
-
-    for sheet_name in excel.sheet_names:
-        sheet_name = str(sheet_name)  # guard against integer sheet names (e.g. 9000)
-        try:
-            df = pd.read_excel(excel, sheet_name=sheet_name)
-        except Exception as exc:
-            warnings.append(f"Sheet '{sheet_name}': read error — {exc}")
-            continue
-
-        interp_df, score_dict, error, col_warnings = process_sheet(df, distance_step, interp_kind)
-
-        for w in col_warnings:
-            warnings.append(f"Sheet '{sheet_name}': {w}")
-
-        if error:
-            warnings.append(f"Sheet '{sheet_name}': skipped — {error}")
-            continue
-
-        output_data[sheet_name] = interp_df
-        scores[sheet_name] = score_dict
-
-    mixed = noise_method_warning(scores)
-    if mixed:
-        warnings.append(mixed)
-
-    return output_data, scores, warnings
-
-
 # ---------------------------------------------------------------------------
 # Plot helpers (return Figure objects, never touch global pyplot state)
 # ---------------------------------------------------------------------------
 
-def profile_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
-    """Y-axis label for mean profiles: GEM units are known, legacy units are not."""
+def profile_label(mode: str, channel: str | None = None) -> str:
+    """Y-axis label for mean profiles, with the GEM units."""
     if mode == "AUX" and channel is None:
         return "Mean value (units in legend)"
-    return f"Mean {ctr.value_label(mode, is_gem, channel)}"
+    return f"Mean {ctr.value_label(mode, channel)}"
 
 
 def _draw_markers(ax: plt.Axes, markers: list[float] | None) -> None:
@@ -1140,7 +1079,6 @@ def make_overview_figure(
     mode: str,
     file_name: str,
     opts: GraphOptions | None = None,
-    is_gem: bool = False,
     show_scores: bool = True,
     markers: list[float] | None = None,
 ) -> plt.Figure:
@@ -1151,7 +1089,7 @@ def make_overview_figure(
     visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    y_label = profile_label(mode, is_gem)
+    y_label = profile_label(mode)
 
     for sheet_name in visible:
         interp_df = output_data.get(sheet_name)
@@ -1159,9 +1097,9 @@ def make_overview_figure(
             continue
         rep_prof = interp_df.mean(axis=1, skipna=True)
         common_dist = interp_df.index.values
-        name = ctr.value_label(mode, is_gem, sheet_name) if mode == "AUX" else sheet_name
+        name = ctr.value_label(mode, sheet_name) if mode == "AUX" else sheet_name
         if show_scores:
-            name = f"{name} (score={scores[sheet_name]['score']:.2f})"
+            name = f"{name} (SNR {scores[sheet_name]['score']:.1f} dB)"
         if not np.all(np.isnan(rep_prof.values)):
             ax.plot(
                 common_dist,
@@ -1191,7 +1129,7 @@ def plot_axis_options(table: pd.DataFrame | None, mode: str = "") -> tuple[list[
     line (the representative-profile view), the position, time and reading
     columns, then every data channel (for cross-plots). Y: the representative
     profiles, then every data channel, those of *mode* first. Only the
-    profile view without a prepared GEM table (legacy files).
+    profile view without a prepared GEM table.
     """
     xs, ys = [PROFILE_X], [PROFILE_Y]
     if table is None:
@@ -1260,7 +1198,6 @@ def make_sheet_figure(
     interp_df: pd.DataFrame,
     mode: str,
     opts: GraphOptions | None = None,
-    is_gem: bool = False,
     markers: list[float] | None = None,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean +/- 1 sigma envelope."""
@@ -1309,7 +1246,7 @@ def make_sheet_figure(
 
     _draw_markers(ax, markers)
     ax.set_xlabel(opts.x_label or "Distance (m)")
-    ax.set_ylabel(opts.y_label or profile_label(mode, is_gem, sheet_name))
+    ax.set_ylabel(opts.y_label or profile_label(mode, sheet_name))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
     ax.grid(opts.show_grid)
@@ -1390,7 +1327,7 @@ def build_batch_xlsx(
 
     Workbook layout
     ---------------
-    Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise,
+    Sheet "Scores"   : one row per (file, mode, frequency) with SNR (dB) / signal σ / noise σ,
                        noise method and number of traces (only if *include_scores*)
     Per (file, mode) : distance column + one mean-profile column per frequency
     """
@@ -1410,8 +1347,8 @@ def build_batch_xlsx(
                     "File": stem,
                     "Mode": mode,
                     "Frequency / Sheet": freq,
-                    "Score": round(sc["score"], 4),
-                    "Amplitude": round(sc["amplitude"], 6),
+                    "SNR (dB)": round(sc["score"], 4),
+                    "Signal (σ)": round(sc["signal_std"], 6),
                     "Noise (σ)": round(sc["mean_std"], 6),
                     "Noise method": sc["noise_method"],
                     "Traces": sc["n_traces"],
@@ -1447,98 +1384,6 @@ def build_batch_xlsx(
     return buf.getvalue()
 
 
-def build_all_methods_batch_xlsx(
-    uploaded_files: list,
-    mode: str,
-    distance_step: float,
-    include_scores: bool = True,
-    prep: pipeline.PrepSettings | None = None,
-) -> bytes:
-    """
-    Run every interpolation method against every uploaded file and pack all
-    interpolated profiles and scores into a single xlsx.
-
-    Workbook layout
-    ---------------
-    Sheet "Scores"            : File | Mode | Frequency | Method | Exact interpolant | Score
-                                | Amplitude | Noise(σ)
-                                | Noise method | Traces
-    "{stem}_{mode}_{method}"  : Distance (m) + one {freq}_mean column per frequency
-    """
-    buf = io.BytesIO()
-    score_rows: list[dict] = []
-
-    def _unique_sheet(name: str, existing: "KeysView[str]") -> str:
-        """Excel-safe, at most 31 chars, deduplicated."""
-        name = excel_sheet_title(name)
-        candidate = name
-        suffix = 2
-        while candidate in existing:
-            tag = f"_{suffix}"
-            candidate = name[: EXCEL_SHEET_NAME_MAX - len(tag)] + tag
-            suffix += 1
-        return candidate
-
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for uploaded_file in uploaded_files:
-            file_bytes = uploaded_file.getvalue()
-            file_name = uploaded_file.name
-            stem = Path(file_name).stem
-
-            is_gem = is_gem_upload(file_bytes, file_name)
-
-            for method in ALL_INTERP_METHODS:
-                # Retrieve processed data (uses @st.cache_data — free if already computed)
-                if is_gem:
-                    out, sc, _ = process_gem_file(file_bytes, file_name, distance_step, method, prep)
-                    entries = [
-                        (mode_key, out[mode_key], sc[mode_key])
-                        for mode_key in gem_io.GEM_MODES
-                        if out.get(mode_key)
-                    ]
-                else:
-                    out, sc, _ = process_file(file_bytes, mode, distance_step, method)
-                    entries = [(mode, out, sc)] if out else []
-
-                for mode_key, output_data, scores in entries:
-                    # Scores rows
-                    for freq, metrics in (scores.items() if include_scores else ()):
-                        score_rows.append({
-                            "File": stem,
-                            "Mode": mode_key,
-                            "Frequency / Sheet": freq,
-                            "Method": method,
-                            "Exact interpolant": method not in TREND_FIT_METHODS,
-                            "Score": round(metrics["score"], 4),
-                            "Amplitude": round(metrics["amplitude"], 6),
-                            "Noise (σ)": round(metrics["mean_std"], 6),
-                            "Noise method": metrics["noise_method"],
-                            "Traces": metrics["n_traces"],
-                        })
-
-                    # Data sheet: Distance + one mean column per frequency
-                    if not output_data:
-                        continue
-                    raw = f"{stem[:10]}_{mode_key}_{method}"
-                    sheet_name = _unique_sheet(raw, writer.sheets.keys())
-                    mean_profiles_table(output_data, label_len=18).to_excel(
-                        writer, sheet_name=sheet_name, index=False
-                    )
-
-        # Scores summary — written last (openpyxl appends; reorder below)
-        if score_rows:
-            pd.DataFrame(score_rows).to_excel(writer, sheet_name="Scores", index=False)
-
-    # Move "Scores" sheet to the first position
-    wb = __import__("openpyxl").load_workbook(io.BytesIO(buf.getvalue()))
-    if "Scores" in wb.sheetnames:
-        wb.move_sheet("Scores", offset=-len(wb.sheetnames) + 1)
-    out_buf = io.BytesIO()
-    wb.save(out_buf)
-    out_buf.seek(0)
-    return out_buf.getvalue()
-
-
 def fig_to_png(fig: plt.Figure) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=300)
@@ -1550,12 +1395,10 @@ def fig_to_png(fig: plt.Figure) -> bytes:
 # Graph editor UI helper
 # ---------------------------------------------------------------------------
 
-def item_noun(mode: str, is_gem: bool) -> tuple[str, str]:
-    """(singular, plural) for the items of a mode: AUX channels, legacy sheets, or frequencies."""
+def item_noun(mode: str) -> tuple[str, str]:
+    """(singular, plural) for the items of a mode: AUX channels or frequencies."""
     if mode == "AUX":
         return "channel", "channels"
-    if not is_gem:
-        return "sheet", "sheets"
     return "frequency", "frequencies"
 
 
@@ -1564,7 +1407,6 @@ def render_graph_editor(
     file_key: str,
     table: pd.DataFrame | None = None,
     mode: str = "",
-    is_gem: bool = True,
 ) -> GraphOptions:
     """
     Render the graph editor expander and return the current GraphOptions.
@@ -1616,7 +1458,7 @@ def render_graph_editor(
         col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
-            st.markdown(f"**Visible {item_noun(mode, is_gem)[1]}**")
+            st.markdown(f"**Visible {item_noun(mode)[1]}**")
             selected = st.multiselect(
                 "Visible items",
                 options=all_sheet_names,
@@ -1718,7 +1560,7 @@ def render_graph_editor(
 
 
 # ---------------------------------------------------------------------------
-# Reusable rendering section (shared by legacy and GEM paths)
+# Rendering of one mode
 # ---------------------------------------------------------------------------
 
 def _render_mode_section(
@@ -1727,7 +1569,6 @@ def _render_mode_section(
     mode: str,
     file_name: str,
     file_key: str,
-    is_gem: bool = False,
     scoring: bool = True,
     markers: list[float] | None = None,
     sensor: emphysics.Sensor | None = None,
@@ -1743,12 +1584,11 @@ def _render_mode_section(
     mode        : "EC" or "MS"
     file_name   : original uploaded filename (for plot titles)
     file_key    : unique string for Streamlit widget key namespacing
-    is_gem      : True for GEM files (known units); False for legacy files
     scoring     : show the frequency ranking and scores (never for AUX channels)
     markers     : event-marker distances drawn on the profiles
     table       : prepared GEM table, for plots of chosen columns (graph editor)
     """
-    noun, nouns = item_noun(mode, is_gem)
+    noun, nouns = item_noun(mode)
     if not output_data:
         st.error(f"No usable {nouns} found.")
         return
@@ -1760,15 +1600,15 @@ def _render_mode_section(
         if len(output_data) > 1:
             ui_tools.render_frequency_selection(output_data, scores, file_key)
     else:
-        _render_channel_list(output_data, scores, mode, is_gem)
-    if is_gem and mode == "EC":
+        _render_channel_list(output_data, scores, mode)
+    if mode == "EC":
         ui_tools.render_frequency_info(output_data, sensor or emphysics.GEM2, file_key)
     freqs = [ctr.parse_frequency(name) or 0.0 for name in output_data]
-    if is_gem and mode in ("MS", "I") and max(freqs) >= ui_tools.PERMITTIVITY_FREQUENCY:
+    if mode in ("MS", "I") and max(freqs) >= ui_tools.PERMITTIVITY_FREQUENCY:
         st.caption(ui_tools.PERMITTIVITY_CAPTION)
 
     # ── Graph editor ─────────────────────────────────────────────────────
-    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode, is_gem=is_gem)
+    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode)
     readings = opts.readings and table is not None
 
     def overview() -> plt.Figure:
@@ -1776,7 +1616,7 @@ def _render_mode_section(
             return make_readings_figure(
                 table, opts, f"{opts.y_column} against {opts.x_column} — {file_name}"
             )
-        return make_overview_figure(output_data, scores, mode, file_name, opts, is_gem, show_scores, markers)
+        return make_overview_figure(output_data, scores, mode, file_name, opts, show_scores, markers)
 
     # ── Overview plot ────────────────────────────────────────────────────
     title = f"{opts.y_column} against {opts.x_column}" if readings else "Representative profiles"
@@ -1796,13 +1636,13 @@ def _render_mode_section(
             sc = scores[sheet_name]
             if show_scores:
                 st.markdown(
-                    f"**{sheet_name}** — score {sc['score']:.2f} · "
-                    f"A = {sc['amplitude']:.4g} · σ = {sc['mean_std']:.4g} "
+                    f"**{sheet_name}** — SNR {sc['score']:.1f} dB · "
+                    f"signal σ = {sc['signal_std']:.4g} · noise σ = {sc['mean_std']:.4g} "
                     f"({sc['noise_method']}, {ui_tools.plural(sc['n_traces'], 'trace')})"
                 )
             else:
                 st.markdown(f"**{sheet_name}** — {ui_tools.plural(sc['n_traces'], 'trace')}")
-            ui_tools.show_figure(make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem, markers))
+            ui_tools.show_figure(make_sheet_figure(sheet_name, interp_df, mode, opts, markers))
 
     # ── Downloads ────────────────────────────────────────────────────────
     st.markdown("#### Downloads")
@@ -1826,14 +1666,14 @@ def _render_mode_section(
 
 
 def _render_channel_list(
-    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str, is_gem: bool
+    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str
 ) -> None:
     """Channels of one mode without scores: passes and covered distance."""
     st.markdown("#### Channels")
     rows = [
         {
             "Channel": name,
-            "Units": ctr.value_label(mode, is_gem, name),
+            "Units": ctr.value_label(mode, name),
             "Traces": scores[name]["n_traces"],
             "From (m)": round(float(df.index.min()), 3),
             "To (m)": round(float(df.index.max()), 3),
@@ -1855,8 +1695,8 @@ def _render_ranking(scores: dict[str, dict]) -> None:
             {
                 "Rank": i,
                 "Frequency / Sheet": name,
-                "Score": round(m["score"], 2),
-                "Amplitude": round(m["amplitude"], 6),
+                "SNR (dB)": round(m["score"], 2),
+                "Signal (σ)": round(m["signal_std"], 6),
                 "Noise (σ)": round(m["mean_std"], 6),
                 "Noise method": m["noise_method"],
                 "Traces": m["n_traces"],
@@ -1869,28 +1709,26 @@ def _render_ranking(scores: dict[str, dict]) -> None:
     with col_table:
         st.markdown("#### Frequency ranking")
         styled = rank_df.style.format(
-            {"Score": "{:.2f}", "Amplitude": "{:.4g}", "Noise (σ)": "{:.4g}"}, na_rep="—"
+            {"SNR (dB)": "{:.2f}", "Signal (σ)": "{:.4g}", "Noise (σ)": "{:.4g}"}, na_rep="—"
         )
-        if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
-            styled = styled.background_gradient(subset=["Score"], cmap="Blues")
+        if rank_df["SNR (dB)"].notna().any():  # all-blank scores have nothing to colour
+            styled = styled.background_gradient(subset=["SNR (dB)"], cmap="Blues")
         ui_tools.show_table(styled)
     with col_best:
         best_name, best_metrics = ranking[0]
         st.metric("Best frequency", best_name)
         st.metric(
-            "Score (A / σ)",
-            f"{best_metrics['score']:.2f}",
+            "SNR",
+            f"{best_metrics['score']:.1f} dB",
             help=(
-                "Score = amplitude / noise (σ). "
-                "Multi-trace: σ = pooled sample std across passes (ddof=1), "
-                "where ≥ 2 passes overlap. "
-                "Single-trace: σ from second differences of the measured "
-                "samples (robust MAD). "
-                "If σ is zero or undefined, the score is left blank. "
-                "Higher score = cleaner, larger signal."
+                "SNR = 10 log10(P_signal / P_noise). P_noise = σ²: the pooled sample variance "
+                "across passes (ddof=1) where ≥ 2 passes overlap, or from second differences of "
+                "the measured samples (robust MAD) for a single pass. P_signal = variance of the "
+                "mean profile minus the noise left in it (σ² / passes averaged). Blank when σ is "
+                "zero or undefined, or when no signal rises above the noise."
             ),
         )
-        st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
+        st.metric("Signal (σ)", f"{best_metrics['signal_std']:.4g}")
         st.metric("Noise (σ)", f"{best_metrics['mean_std']:.4g}")
 
 
@@ -1946,7 +1784,7 @@ def compute_area_map_cached(
 
 ADVANCED_KEY = "advanced"
 ADVANCED_HELP = (
-    "Shows every setting. Basic mode keeps the expert ones (coil geometry, PCA, calibration "
+    "Shows every setting. Basic mode keeps the expert ones (coil geometry, calibration "
     "files, variogram, projection, colour scaling, map filters …) at their defaults, so a hidden "
     "setting never changes the results."
 )
@@ -2108,7 +1946,17 @@ def parse_settings(data: bytes) -> dict:
         raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.") from exc
     if not isinstance(settings, dict):
         raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.")
-    return {k: tuple(v) if isinstance(v, list) else v for k, v in settings.items() if is_saved_setting(k)}
+    choices = setting_choices()
+    return {k: tuple(v) if isinstance(v, list) else v for k, v in settings.items()
+            if is_saved_setting(k) and (k not in choices or v in choices[k])}
+
+
+def setting_choices() -> dict[str, tuple]:
+    """Options of the sidebar choices: a saved value no longer offered keeps the default."""
+    return {
+        "prof_interp": tuple(INTERP_METHODS),
+        "ct_method": tuple(ctr.METHODS),
+    }
 
 
 def apply_settings(state, settings: dict) -> None:
@@ -2193,7 +2041,7 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float]
     """Coil geometry and height for the physics tools; EC/MS recomputation; viscosity pair."""
     with st.expander("Sensor geometry", expanded=False):
         st.caption("Used by: forward model, frequency information, multi-height calibration, "
-                   "layered-earth inversion, footprint deconvolution and the EC / MS "
+                   "layered-earth inversion and the EC / MS "
                    "recomputation below.")
         height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key=wkey("sen_h"),
                                  help=SCIENCE_HELP["height"])
@@ -2247,11 +2095,10 @@ def _parse_labels(text: str) -> tuple[str, ...]:
 def render_corrections_sidebar() -> corrections.CorrectionSettings:
     """Corrections & filters applied to GEM tables before profiles and maps."""
     adv = show_advanced()
-    window, threshold, pca = 5, 4.0, 0
+    window, threshold = 5, 4.0
     drift_model, temp_col, alt_col, alt_ref = "piecewise", "", "", None
     offsets_file = ref_file = None
-    background, soil_t, ref_radius, ref_method = 0.0, 0.0, 2.0, "regression"
-    bearing_center, bearing_tol = None, 30.0
+    soil_t, ref_radius, ref_method = 0.0, 2.0, "regression"
     with st.expander("Corrections & filters", expanded=False):
         st.caption(PREP_APPLIES_TO + " Multi-height calibration uses the readings as recorded.")
         st.markdown("**Filters**")
@@ -2267,12 +2114,6 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
             lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key=wkey("cor_crange"),
                                help=SCIENCE_HELP["clip_range"])
             clip_range = (float(lo), float(hi))
-        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key=wkey("cor_smooth"),
-                           help=SCIENCE_HELP["smooth"])
-        if adv:
-            pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key=wkey("cor_pca"),
-                                  help="Minsley et al. (2010): channels of a mode are strongly "
-                                       "correlated, trailing components are mostly noise.")
 
         st.markdown("**Drift and environment**")
         drift_text = st.text_input("Base-station lines (comma-separated Line labels)",
@@ -2298,10 +2139,9 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
             offsets_file = st.file_uploader(
                 "Calibration offsets (.csv)", type=["csv"], key=wkey("cor_offsets"),
                 help="Columns 'column' and 'offset'; each offset is subtracted from that column. "
-                     "Produced by 'Multi-height calibration' under a file.",
+                     "Produced by 'Multi-height calibration' under a file. I / Q offsets reach "
+                     "EC / MS only with 'Recompute EC / MS from I / Q' (Sensor geometry).",
             )
-            background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
-                                         key=wkey("cor_bg"), help=SCIENCE_HELP["background"])
             ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key=wkey("cor_ref"),
                                         help="Same coordinate columns as the survey (X/Y or "
                                              "Lat/Lon) plus one column per channel to calibrate, "
@@ -2318,11 +2158,6 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
         lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key=wkey("cor_lag"),
                               help="Positive: readings were logged after the position. Use "
                                    "'Estimate GPS lag' under a file to find it.")
-        if adv and st.checkbox("Keep one walking direction", key=wkey("cor_head"), help=SCIENCE_HELP["heading"]):
-            bearing_center = float(st.number_input("Heading (° from north)", 0.0, 359.0, 0.0,
-                                                    key=wkey("cor_hdir"), help=SCIENCE_HELP["heading_dir"]))
-            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key=wkey("cor_htol"),
-                                                help=SCIENCE_HELP["heading_tol"]))
         if not adv:
             st.caption(ADVANCED_HINT)
 
@@ -2333,13 +2168,10 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
         temperature_column=temp_col,
         drift_lines=_parse_labels(drift_text), drift_model=drift_model,
         iq_offsets=offsets_file.getvalue() if offsets_file is not None else None,
-        ec_background=float(background) or None,
         reference=ref_file.getvalue() if ref_file is not None else None,
         reference_radius=float(ref_radius), reference_method=ref_method,
         soil_temperature=float(soil_t) or None,
-        pca_components=int(pca), smooth_window=int(smooth),
         lag_seconds=float(lag),
-        bearing_center=bearing_center, bearing_tolerance=bearing_tol,
     )
 
 
@@ -2349,7 +2181,7 @@ def render_lag_estimate(
     """Expander that estimates the GPS time lag from crossings of neighbouring lines."""
     with st.expander("Estimate GPS lag", expanded=False):
         no_lag = replace(prep, recompute_from_iq=False,
-                         corrections=replace(prep.corrections, lag_seconds=0.0, bearing_center=None))
+                         corrections=replace(prep.corrections, lag_seconds=0.0))
         try:
             table, _ = prepared_table(file_bytes, file_name, no_lag)
         except ValueError as exc:
@@ -2425,11 +2257,6 @@ def _render_gridding_controls() -> dict:
             "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_smooth"),
             help="0 = exact interpolation; larger values trade fit for smoothness.",
         )
-    if adv and method == "rbf":
-        smoothing = st.number_input(
-            "Smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_rbf_smooth"),
-            help="0 = exact interpolation; larger values trade fit for smoothness.",
-        )
     if adv and method == "kriging":
         variogram_model = st.selectbox(
             "Variogram model", ctr.VARIOGRAM_MODELS, key=wkey("ct_vario"), help=SCIENCE_HELP["variogram"],
@@ -2482,16 +2309,11 @@ def _render_gridding_controls() -> dict:
 
 def render_method_options(method: str) -> tuple:
     """
-    Sidebar inputs for the settings of *method*; returns (name, value) pairs.
-    In basic mode only the data-metrics statistic is offered (it picks what is
-    mapped); the other settings keep contouring.METHOD_DEFAULTS.
+    Sidebar inputs for the settings of *method* (advanced settings); returns
+    (name, value) pairs. In basic mode the settings keep contouring.METHOD_DEFAULTS.
     """
     defaults = ctr.METHOD_DEFAULTS.get(method, {})
     opts = {}
-    if method == "metrics":
-        opts["statistic"] = st.selectbox("Statistic", list(ctr.METRICS),
-                                         format_func=ctr.METRICS.get, key=wkey("ct_metric"),
-                                         help=SCIENCE_HELP["metric"])
     if not show_advanced():
         return tuple(opts.items())
     if method == "idw":
@@ -2503,21 +2325,6 @@ def render_method_options(method: str) -> tuple:
     elif method == "min_curvature":
         opts["tension"] = st.slider("Tension", 0.0, 0.95, defaults["tension"], step=0.05,
                                     key=wkey("ct_tension"), help=SCIENCE_HELP["min_curvature_tension"])
-    elif method == "rbf":
-        opts["kernel"] = st.selectbox("Basis function", list(ctr.RBF_KERNELS),
-                                      format_func=ctr.RBF_KERNELS.get, key=wkey("ct_rbf_kernel"),
-                                      help=SCIENCE_HELP["rbf_kernel"])
-    elif method in ("local_polynomial", "polynomial"):
-        opts["order"] = st.selectbox("Polynomial order", [1, 2, 3], key=wkey(f"ct_{method}_order"),
-                                     help=SCIENCE_HELP["method_order"])
-        if method == "local_polynomial":
-            opts["power"] = st.number_input("Weighting power", 0.0, 10.0, defaults["power"],
-                                            step=0.5, key=wkey("ct_local_power"),
-                                            help=SCIENCE_HELP["local_power"])
-    if method in ("moving_average", "metrics"):
-        opts["radius"] = st.number_input("Search radius (m, 0 = auto)", 0.0, value=0.0,
-                                         step=0.5, format="%.2f", key=wkey("ct_radius"),
-                                         help=SCIENCE_HELP["search_radius"])
     return tuple(opts.items())
 
 
@@ -2562,14 +2369,20 @@ def _render_pseudosection(
     file_name: str,
     file_key: str,
     contour: ContourSettings,
-    is_gem: bool,
+    table: pd.DataFrame | None = None,
+    sensor: emphysics.Sensor | None = None,
 ) -> None:
     st.markdown("#### Pseudo-section")
-    profiles = {name: df.mean(axis=1, skipna=True) for name, df in output_data.items()}
+    traces = sorted({c for df in output_data.values() for c in df.columns})
+    columns = ui_tools.transect_columns(traces, table, f"ps_track_{file_key}")
+    profiles = {
+        name: (df if columns is None else df[[c for c in columns if c in df.columns]]).mean(axis=1, skipna=True)
+        for name, df in output_data.items()
+    }
     try:
         ps = ctr.build_pseudosection(profiles)
         fig = ctr.make_pseudosection_figure(
-            ps, ctr.value_label(mode, is_gem),
+            ps, ctr.value_label(mode),
             f"Pseudo-section [{mode}] — {file_name}", contour.n_levels, contour.colours,
         )
     except ctr.ContouringError as exc:
@@ -2581,6 +2394,10 @@ def _render_pseudosection(
     png = fig_to_png(fig)
     ui_tools.show_figure(fig)
     st.caption(PSEUDOSECTION_CAPTION)
+    if mode == "EC":
+        depths = ui_tools.depth_caption(profiles, sensor or emphysics.GEM2)
+        if depths:
+            st.caption(depths)
     ui_tools.download_button(
         "Pseudo-section (.png)", png, f"{Path(file_name).stem}_{mode}_pseudosection.png",
         key=f"dl_ps_{file_key}",
@@ -2594,35 +2411,21 @@ def _render_area_map(
     file_key: str,
     contour: ContourSettings,
     file_bytes: bytes,
-    is_gem: bool,
     prep: pipeline.PrepSettings | None = None,
 ) -> None:
     st.markdown("#### Area map")
-    if not is_gem:
-        st.info(
-            "Area maps need a GEM file with X/Y or Lat/Lon coordinates; "
-            "the legacy multi-sheet format has none."
-        )
-        return
 
     freq = st.selectbox("Channel", list(output_data.keys()), key=f"ct_freq_{file_key}",
                         help="Channel to grid and map. Gridding settings are in the sidebar "
                              "under 2D contouring.")
-    label = ctr.value_label(mode, is_gem, freq)
+    label = ctr.value_label(mode, freq)
     try:
         with st.spinner("Gridding…"):
             result = compute_area_map_cached(
                 file_bytes, file_name, gem_value_column(mode, freq), prep,
                 **grid_params(contour),
             )
-        try:
-            axis = gridtools.line_axis_angle(prepared_table(file_bytes, file_name, prep)[0])
-        except ValueError:
-            axis = 0.0
-        result, processing = _map_processing(
-            result, file_key, (prep or pipeline.PrepSettings()).sensor, axis
-        )
-        label = ctr.result_label(result, label)
+        result, processing = _map_processing(result, file_key)
         fig = ctr.make_area_map_figure(
             result, label, f"{freq} [{mode}] — {ctr.method_title(result)}",
             contour.n_levels, show_points=contour.show_points, style=contour.colours,
@@ -2663,14 +2466,17 @@ def _render_area_map(
                     result.bx, result.by, result.bv, result.method,
                     contour.smoothing, result.variogram,
                     options=result.options, spec=result.spec,
+                    groups=cv_groups(result, file_bytes, file_name, prep),
                 )
             except ctr.ContouringError as exc:
                 st.error(str(exc))
             else:
+                folds = ("whole transects held out, so each is estimated from its neighbours"
+                         if cv["folds"] == "groups" else
+                         "random folds, optimistic for densely sampled lines")
                 st.write(
                     f"RMSE **{cv['rmse']:.4g}**, MAE **{cv['mae']:.4g}** "
-                    f"({label}, {cv['n']:,} held-out points; random folds, "
-                    "optimistic for densely sampled lines)"
+                    f"({label}, {cv['n']:,} held-out points; {folds})"
                 )
 
     _render_map_statistics(result, label, file_key)
@@ -2678,13 +2484,28 @@ def _render_area_map(
     _render_map_downloads(result, png, f"{stem}_{mode}_{freq}_{result.method}", file_key)
 
 
-def _map_processing(
-    result: ctr.AreaMapResult, key: str, sensor: emphysics.Sensor, axis_angle: float
-) -> tuple[ctr.AreaMapResult, list[str]]:
-    """Optional footprint deconvolution and grid filter, chosen in an expander (advanced settings)."""
+def cv_groups(
+    result: ctr.AreaMapResult, file_bytes: bytes, file_name: str, prep: pipeline.PrepSettings | None
+) -> np.ndarray | None:
+    """
+    Transect of each block point for cross-validation: its line, with repeat
+    passes of one transect (gem_io.track_groups) merged so a held-out line
+    is not estimated from its own repeat pass. None when lines are unknown.
+    """
+    if result.bline is None:
+        return None
+    try:
+        tracks = gem_io.track_groups(prepared_table(file_bytes, file_name, prep)[0]) or {}
+    except (ValueError, KeyError):
+        tracks = {}
+    return np.array([tracks.get(line, f"line {line}") for line in result.bline], dtype=object)
+
+
+def _map_processing(result: ctr.AreaMapResult, key: str) -> tuple[ctr.AreaMapResult, list[str]]:
+    """Optional grid filter, chosen in an expander (advanced settings)."""
     if not show_advanced():
         return result, []
-    with st.expander("Map processing (filters, footprint deconvolution)", expanded=False):
+    with st.expander("Map processing (filters)", expanded=False):
         kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}",
                             help=SCIENCE_HELP["map_filter"])
         size = st.slider("Window (cells)", 3, 51, 15 if kind == "high-pass" else 3, step=2,
@@ -2693,26 +2514,9 @@ def _map_processing(
         if kind == "despike":
             threshold = st.number_input("Despike threshold (× robust σ)", 1.0, 20.0, 4.0,
                                         key=f"mp_thr_{key}", help=SCIENCE_HELP["map_despike"])
-        deconv = st.checkbox(
-            "Deconvolve the sensor footprint", key=f"mp_dec_{key}",
-            help="Lateral Tikhonov deconvolution of the low-induction-number footprint of the "
-                 "coils (Rx minus bucking coil, sensor height from the sidebar). Sharpens "
-                 "apparent-conductivity maps; it does not resolve depth (cf. Guillemoteau et "
-                 "al., 2017, for multi-coil sensors).",
-        )
-        reg, angle = 1e-2, axis_angle
-        if deconv:
-            reg = st.select_slider("Regularisation", [1e-4, 1e-3, 1e-2, 1e-1, 1.0], value=1e-2,
-                                   key=f"mp_reg_{key}", help=SCIENCE_HELP["deconv_reg"])
-            angle = st.number_input("Coil axis (° from map x axis)", 0.0, 180.0,
-                                    float(round(axis_angle, 1)), key=f"mp_ang_{key}",
-                                    help=SCIENCE_HELP["coil_axis"])
-    if kind == "none" and not deconv:
+    if kind == "none":
         return result, []
-    z, msgs = gridtools.process_map(
-        result.z, result.spec.cell, kind, int(size), float(threshold), deconv, float(reg),
-        float(angle), sensor,
-    )
+    z, msgs = gridtools.process_map(result.z, kind, int(size), float(threshold))
     return replace(result, z=z), msgs
 
 
@@ -2762,16 +2566,20 @@ def render_contouring(
     file_key: str,
     contour: ContourSettings,
     file_bytes: bytes,
-    is_gem: bool,
     prep: pipeline.PrepSettings | None = None,
 ) -> None:
     """Render the enabled 2D contouring sections for one file and mode."""
     if not output_data:
         return
     if contour.pseudosection and mode in PSEUDOSECTION_MODES:
-        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
+        try:
+            table, _ = prepared_table(file_bytes, file_name, prep)
+        except ValueError:   # preparation problems are already listed in the warnings
+            table = None
+        _render_pseudosection(output_data, mode, file_name, file_key, contour, table,
+                              (prep or pipeline.PrepSettings()).sensor)
     if contour.area_map and mode in AREA_MAP_MODES:
-        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
+        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, prep)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -2813,7 +2621,7 @@ def render_combined_maps(
         return
     col = st.selectbox("Channel", sorted(channels), key="cm_col")
     mode, label = channels[col]
-    unit = ctr.value_label(mode, True, label)
+    unit = ctr.value_label(mode, label)
     names = [n for _, n in gem_files]
     kind = st.radio("Map", ["Merged (edge-matched)", "Difference (B − A)"], horizontal=True,
                     key="cm_kind", help=SCIENCE_HELP["combined"])
@@ -2833,7 +2641,7 @@ def render_combined_maps(
                                                      **grid_params(contour))
             st.dataframe(pd.DataFrame({"Survey": chosen, "Offset added": offsets}).round(4),
                          hide_index=True, width="content")
-            fig = ctr.make_area_map_figure(result, ctr.result_label(result, unit),
+            fig = ctr.make_area_map_figure(result, unit,
                                            f"{col} — merged", contour.n_levels,
                                            show_points=contour.show_points,
                                            style=contour.colours)
@@ -2879,46 +2687,6 @@ def unique_file_key(stem: str, taken: set[str], suffixes: tuple[str, ...] = ()) 
     taken.add(key)
     taken.update(f"{key}_{s}" for s in suffixes)
     return key
-
-
-def render_legacy_results(
-    file_bytes: bytes,
-    file_name: str,
-    mode: str,
-    distance_step: float,
-    interp_kind: str,
-    contour: ContourSettings | None = None,
-    scoring: bool = True,
-    file_key: str | None = None,
-) -> None:
-    """Process and render a legacy multi-sheet Excel file."""
-    stem = file_key or Path(file_name).stem
-
-    with st.spinner("Processing…"):
-        output_data, scores, warnings = process_file(
-            file_bytes, mode,
-            distance_step=distance_step,
-            interp_kind=interp_kind,
-        )
-
-    render_file_warnings(warnings)
-
-    if not output_data:
-        st.error("No usable sheets found in this file. "
-                 + ui_tools.doc_link("troubleshooting", "no-usable-frequencies-or-sheets-found",
-                                     "What to check"))
-        if distance_step > 1.0:
-            st.info("Try reducing the distance step in the sidebar.")
-        return
-
-    st.caption(f"Legacy workbook — {ui_tools.plural(len(output_data), 'sheet')} read as "
-               f"{MODES[mode]} ({mode}); change this under Legacy workbook mode in the sidebar.")
-    _render_mode_section(output_data, scores, mode, file_name, file_key=stem, scoring=scoring)
-    if contour is not None:
-        render_contouring(
-            output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
-        )
-    render_next_steps(next_steps(mode, len(output_data), scoring, contour, has_xy=False), stem)
 
 
 def render_file_warnings(warnings: list[str]) -> None:
@@ -2981,7 +2749,7 @@ def render_gem_results(
         st.caption(note)
     prep = prep or pipeline.PrepSettings()
     tabs = st.tabs([
-        f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m, True))})"
+        f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m))})"
         for m in available_modes
     ])
 
@@ -2993,7 +2761,6 @@ def render_gem_results(
                 mode_key,
                 file_name,
                 file_key=f"{stem}_{mode_key}",
-                is_gem=True,
                 scoring=scoring,
                 markers=markers,
                 sensor=prep.sensor,
@@ -3002,7 +2769,7 @@ def render_gem_results(
             if contour is not None:
                 render_contouring(
                     output_data[mode_key], mode_key, file_name,
-                    f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
+                    f"{stem}_{mode_key}", contour, file_bytes, prep=prep,
                 )
             render_next_steps(
                 next_steps(mode_key, len(output_data[mode_key]), scoring, contour,
@@ -3031,7 +2798,17 @@ def render_gem_results(
     ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
     if table is not None:
         ui_tools.render_anomaly_spectrum(table, stem)
-        ui_tools.render_soil_tools(table, stem)
+    soil_page_link()
+
+
+def soil_page_link() -> None:
+    """Link to the soil-tools page (a caption where the app runs without its pages, e.g. in tests)."""
+    if st.session_state.get(PAGES_KEY):
+        st.page_link(SOIL_PAGE, label="Soil tools: sampling design, soil-property calibration, "
+                     "management zones", icon=":material/grass:")
+    else:
+        st.caption("Soil tools (sampling design, calibration, management zones) are on their own "
+                   "page, in the navigation at the top of the sidebar.")
 
 
 # ---------------------------------------------------------------------------
@@ -3040,6 +2817,11 @@ def render_gem_results(
 
 SAMPLE_FILE = Path(__file__).resolve().parent / "sample_data" / "synthetic_gem2_area_map.csv"
 SAMPLE_STATE_KEY = "use_sample"
+SOIL_PAGE = "pages/soil_tools.py"
+UPLOADER_KEY = "uploader"
+UPLOADS_KEY = "kept_uploads"       # the uploaded files, kept while another page is shown
+SURVEYS_KEY = "surveys"            # {name: (bytes, name, prep)} of the GEM files on the analysis page
+PAGES_KEY = "pages"                # set when the app runs with its page navigation
 
 
 @dataclass(frozen=True)
@@ -3056,13 +2838,33 @@ class SampleFile:
         return cls(SAMPLE_FILE.name, SAMPLE_FILE.read_bytes())
 
 
+def keep_uploads() -> None:
+    """
+    Uploader callback: a copy of the uploaded files that outlives the page.
+    Streamlit drops the uploader's files when another page is shown, and an
+    uploader's value cannot be set back, so the analysis page reads this copy.
+    """
+    files = st.session_state.get(UPLOADER_KEY) or []
+    st.session_state[UPLOADS_KEY] = [SampleFile(f.name, f.getvalue()) for f in files]
+
+
+def keep_settings(state) -> None:
+    """
+    Keeps the sidebar settings while another page is shown: Streamlit drops
+    the state of widgets a page does not draw, unless it was set in code.
+    """
+    for key in list(state.keys()):
+        if is_saved_setting(str(key).partition("~")[0]):
+            state[key] = state[key]
+
+
 TOUR_STEPS = [                   # (icon, title, where it happens)
     (":material/upload_file:", "Upload",
      "Drop GEM-2 exports above, or try the sample survey below."),
     (":material/fact_check:", "Check the summary",
      "A card under each file gives its lines, frequencies and the tools it supports."),
     (":material/leaderboard:", "Rank frequencies",
-     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by signal-to-noise."),
+     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by signal-to-noise ratio."),
     (":material/map:", "Map",
      "Switch on **Area map** or **Pseudo-section** (sidebar → 2D contouring)."),
     (":material/download:", "Export",
@@ -3103,12 +2905,6 @@ def is_gem_upload(file_bytes: bytes, file_name: str) -> bool:
 
 
 def main():
-    st.set_page_config(
-        page_title="GEM-2 Analysis Tool",
-        page_icon=None,
-        layout="wide",
-    )
-
     st.title("GEM-2 Analysis Tool")
     st.caption(
         "Multi-frequency EMI survey analysis for the GEM-2 — profiles, frequency ranking, "
@@ -3126,14 +2922,6 @@ def main():
                        "ranking, pseudo-sections, inversion and batch export.")
             scoring = st.toggle("Frequency scoring", value=False, key=wkey("scoring"), help=SCORING_HELP)
 
-            mode = st.radio(
-                "Legacy workbook mode",
-                list(MODES.keys()),
-                horizontal=True, key=wkey("prof_mode"),
-                help="What the sheets of a legacy one-sheet-per-frequency workbook hold. GEM-2 "
-                     "exports are read from their column names and show every mode.",
-            )
-
             distance_step = st.number_input(
                 "Distance step (m)",
                 min_value=0.01,
@@ -3145,13 +2933,10 @@ def main():
 
             interp_kind = st.selectbox(
                 "Interpolation method",
-                ALL_INTERP_METHODS,
+                INTERP_METHODS,
                 index=0, key=wkey("prof_interp"),
-                format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
                 help=SCIENCE_HELP["interpolation"],
             )
-            if scoring and interp_kind in TREND_FIT_METHODS:
-                st.warning(TREND_FIT_WARNING)
 
             if distance_step > 10.0:
                 st.warning(
@@ -3175,14 +2960,20 @@ def main():
             st.markdown(about_references_markdown())
 
     # ── File uploader ───────────────────────────────────────────────────────
-    uploaded_files = st.file_uploader(
+    st.file_uploader(
         "Upload one or more data files (.xlsx or .csv)",
         type=["xlsx", "csv"],
-        accept_multiple_files=True,
-        help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX), .gbf-converted tables, "
-             "or legacy workbooks with one sheet per frequency.",
+        accept_multiple_files=True, key=UPLOADER_KEY, on_change=keep_uploads,
+        help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX) or .gbf-converted tables.",
     )
-    uploaded_files = list(uploaded_files or [])
+    uploaded_files = list(st.session_state.get(UPLOADS_KEY) or [])
+    if uploaded_files and not st.session_state.get(UPLOADER_KEY):
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        c1.caption("Showing the files uploaded before: "
+                   + ", ".join(f.name for f in uploaded_files) + ". Upload others above to replace them.")
+        if c2.button("Clear files", key="uploads_clear", width="stretch"):
+            st.session_state.pop(UPLOADS_KEY, None)
+            st.rerun()
     if uploaded_files:
         st.session_state.pop(SAMPLE_STATE_KEY, None)    # real data replaces the sample
     elif st.session_state.get(SAMPLE_STATE_KEY):
@@ -3195,6 +2986,7 @@ def main():
             st.session_state.pop(SAMPLE_STATE_KEY, None)
             st.rerun()
 
+    st.session_state[SURVEYS_KEY] = {}
     if not uploaded_files:
         render_welcome()
         render_survey_planning(prep.sensor)
@@ -3207,67 +2999,56 @@ def main():
             icon=":material/tune:",
         )
 
+    # ── Only GEM-2 exports are read ────────────────────────────────────────
+    others = [f.name for f in uploaded_files if not is_gem_upload(f.getvalue(), f.name)]
+    if others:
+        st.error(
+            f"Not a GEM-2 export: {', '.join(others)}. The app reads WinGEM / EMExport tables "
+            "and .gbf-converted tables, recognised by their column names. "
+            + ui_tools.doc_link("input-data", "", "Input data")
+        )
+        uploaded_files = [f for f in uploaded_files if f.name not in others]
+        if not uploaded_files:
+            render_survey_planning(prep.sensor)
+            return
+    st.session_state[SURVEYS_KEY] = {f.name: (f.getvalue(), f.name, prep) for f in uploaded_files}
+
     # ── Process each file and accumulate results for batch export ──────────
     batch_results: list[dict] = []
-    gem_flags = [is_gem_upload(f.getvalue(), f.name) for f in uploaded_files]
-
-    for uploaded_file, is_gem in zip(uploaded_files, gem_flags):
+    for uploaded_file in uploaded_files:
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
         stem = Path(file_name).stem
-
         # Collect processed data (cached — no extra computation cost)
-        if is_gem:
-            gem_output, gem_scores, _ = process_gem_file(
-                file_bytes, file_name, distance_step, interp_kind, prep
-            )
-            for mode_key in gem_io.GEM_MODES:
-                if gem_output.get(mode_key):
-                    batch_results.append({
-                        "stem": stem,
-                        "mode": mode_key,
-                        "output_data": gem_output[mode_key],
-                        "scores": gem_scores[mode_key],
-                    })
-        else:
-            leg_output, leg_scores, _ = process_file(
-                file_bytes, mode, distance_step, interp_kind
-            )
-            if leg_output:
+        gem_output, gem_scores, _ = process_gem_file(
+            file_bytes, file_name, distance_step, interp_kind, prep
+        )
+        for mode_key in gem_io.GEM_MODES:
+            if gem_output.get(mode_key):
                 batch_results.append({
                     "stem": stem,
-                    "mode": mode,
-                    "output_data": leg_output,
-                    "scores": leg_scores,
+                    "mode": mode_key,
+                    "output_data": gem_output[mode_key],
+                    "scores": gem_scores[mode_key],
                 })
 
     # ── Per-file detailed results: one file at a time ──────────────────────
     taken_keys: set[str] = set()
-    file_keys = [
-        unique_file_key(Path(f.name).stem, taken_keys, gem_io.GEM_MODES if is_gem else ())
-        for f, is_gem in zip(uploaded_files, gem_flags)
-    ]
+    file_keys = [unique_file_key(Path(f.name).stem, taken_keys, gem_io.GEM_MODES) for f in uploaded_files]
     shown = pick_file([f.name for f in uploaded_files])
-    uploaded_file, is_gem, file_key = uploaded_files[shown], gem_flags[shown], file_keys[shown]
+    uploaded_file, file_key = uploaded_files[shown], file_keys[shown]
     st.divider()
     st.subheader(uploaded_file.name)
-    if is_gem:
-        render_gem_results(
-            uploaded_file.getvalue(), uploaded_file.name, distance_step, interp_kind, contour,
-            scoring, prep, file_key=file_key,
-        )
-    else:
-        render_legacy_results(
-            uploaded_file.getvalue(), uploaded_file.name, mode, distance_step, interp_kind,
-            contour, scoring, file_key=file_key,
-        )
+    render_gem_results(
+        uploaded_file.getvalue(), uploaded_file.name, distance_step, interp_kind, contour,
+        scoring, prep, file_key=file_key,
+    )
 
-    gem_files = [(f.getvalue(), f.name) for f, g in zip(uploaded_files, gem_flags) if g]
+    gem_files = [(f.getvalue(), f.name) for f in uploaded_files]
     if contour.area_map and len(gem_files) >= 2:
         render_combined_maps(gem_files, contour, prep)
     if batch_results:
-        render_batch_export(batch_results, uploaded_files, mode, distance_step, interp_kind,
-                            scoring, prep)
+        render_batch_export(batch_results, uploaded_files, interp_kind, scoring)
     render_survey_planning(prep.sensor)
 
 
@@ -3288,41 +3069,19 @@ def pick_file(names: list[str]) -> int:
 
 
 def render_batch_export(
-    batch_results: list[dict], uploaded_files: list, mode: str, distance_step: float,
-    interp_kind: str, scoring: bool, prep: pipeline.PrepSettings,
+    batch_results: list[dict], uploaded_files: list, interp_kind: str, scoring: bool,
 ) -> None:
-    """Workbooks with the profiles (and scores) of every uploaded file."""
+    """Workbook with the profiles (and scores) of every uploaded file."""
     st.divider()
     st.subheader("Export all files")
-    dl_col1, dl_col2 = st.columns(2)
     what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
     files = ui_tools.plural(len(uploaded_files), "file")
-
-    with dl_col1:
-        st.caption(f"{what} for the **selected method** ({interp_kind}) across {files}.")
-        batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
-        ui_tools.download_button(
-            f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
-            key="dl_batch",
-        )
-
-    with dl_col2:
-        st.caption(
-            f"{what} for **all {len(ALL_INTERP_METHODS)} methods** across {files}. "
-            "May take a moment to generate."
-        )
-        if st.button("Generate all-methods export", key="btn_all_methods",
-                     icon=":material/play_arrow:"):
-            with st.spinner(
-                f"Running {len(ALL_INTERP_METHODS)} interpolation methods across {files}…"
-            ):
-                all_methods_bytes = build_all_methods_batch_xlsx(
-                    uploaded_files, mode, distance_step, scoring, prep
-                )
-            ui_tools.download_button(
-                "All files — all methods (.xlsx)", all_methods_bytes,
-                "batch_all_methods.xlsx", key="dl_all_methods",
-            )
+    st.caption(f"{what} ({interp_kind}) across {files}.")
+    batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
+    ui_tools.download_button(
+        f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
+        key="dl_batch",
+    )
 
 
 def render_survey_planning(sensor: emphysics.Sensor) -> None:
@@ -3332,5 +3091,16 @@ def render_survey_planning(sensor: emphysics.Sensor) -> None:
     ui_tools.render_forward_model(sensor)
 
 
+def run_app() -> None:
+    """Entry point: the survey-analysis page and the soil-tools page."""
+    st.set_page_config(page_title="GEM-2 Analysis Tool", page_icon=None, layout="wide")
+    keep_settings(st.session_state)
+    st.session_state[PAGES_KEY] = True
+    st.navigation([
+        st.Page(main, title="Survey analysis", icon=":material/insights:", default=True),
+        st.Page(SOIL_PAGE, title="Soil tools", icon=":material/grass:"),
+    ]).run()
+
+
 if __name__ == "__main__":
-    main()
+    run_app()

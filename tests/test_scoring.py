@@ -52,24 +52,101 @@ def test_process_sheet_keeps_first_reading_at_repeated_distance():
 
 
 # ---------------------------------------------------------------------------
+# Lines at different positions are not repeat passes (#15)
+# ---------------------------------------------------------------------------
+
+def test_parallel_lines_are_scored_within_each_line():
+    rng = np.random.default_rng(0)
+    d = np.arange(0.0, 40.0, 0.1)
+    # three transects over different ground (offsets of 50), noise 1
+    df = pd.DataFrame({"d": d, **{f"Line_{k}": 50.0 * k + np.sin(d / 5) * 10 + rng.normal(0, 1, d.size)
+                                  for k in range(3)}})
+    tracks = {f"Line_{k}": k for k in range(3)}
+    _, sc, error, _ = R.process_sheet(df, 0.5, "linear", tracks)
+    assert error is None and sc["noise_method"] == R.NOISE_INTRA and sc["passes"] == 1
+    assert 0.8 < sc["mean_std"] < 1.2                          # not the 50-unit spread between lines
+    _, lumped, *_ = R.process_sheet(df, 0.5, "linear")
+    assert lumped["mean_std"] > 40                             # all lines taken as repeat passes
+
+
+def test_repeat_passes_are_pooled_within_their_transect():
+    rng = np.random.default_rng(1)
+    d = np.arange(0.0, 40.0, 0.5)
+    ground = {0: 0.0, 1: 100.0}
+    cols = {f"Line_{k}": ground[k // 2] + np.sin(d / 5) * 10 + rng.normal(0, 1, d.size) for k in range(4)}
+    df = pd.DataFrame({"d": d, **cols})
+    _, sc, *_ = R.process_sheet(df, 0.5, "linear", {f"Line_{k}": k // 2 for k in range(4)})
+    assert sc["noise_method"] == R.NOISE_BETWEEN and sc["passes"] == 2
+    assert 0.7 < sc["mean_std"] < 1.4
+    assert 6 < sc["signal_std"] < 8.5                          # 10 sin within a transect (≈ 7.1), not the 100 step
+
+
+@pytest.mark.parametrize("passes", [2, 5])
+def test_snr_is_signal_power_over_noise_power_whatever_the_passes(passes):
+    d = np.arange(0.0, 200.0, 0.5)
+    signal = 3.0 * np.sin(d / 7.0)                              # power 4.5
+    est = []
+    for seed in range(40):
+        rng = np.random.default_rng(seed)
+        df = pd.DataFrame({"d": d, **{f"p{k}": signal + rng.normal(0, 1.0, d.size) for k in range(passes)}})
+        _, sc, *_ = R.process_sheet(df, 0.5, "linear")
+        est.append(sc["snr"])
+        assert sc["score"] == pytest.approx(10 * np.log10(sc["snr"]))
+    # var(mean profile) holds 1/passes of the noise; it is subtracted, so the SNR is unbiased
+    assert np.mean(est) == pytest.approx(4.5, rel=0.05)
+
+
+def test_snr_of_a_single_pass():
+    d = np.arange(0.0, 200.0, 0.5)
+    est = [R.process_sheet(pd.DataFrame({"d": d, "a": 3.0 * np.sin(d / 7.0)
+                                         + np.random.default_rng(s).normal(0, 1.0, d.size)}),
+                           0.5, "linear")[1]["snr"] for s in range(40)]
+    assert np.mean(est) == pytest.approx(4.5, rel=0.1)
+
+
+def test_pure_noise_has_no_signal_and_a_blank_score():
+    rng = np.random.default_rng(3)
+    d = np.arange(0.0, 100.0, 0.5)
+    blank = 0
+    for _ in range(20):
+        df = pd.DataFrame({"d": d, "a": rng.normal(0, 1, d.size), "b": rng.normal(0, 1, d.size)})
+        _, sc, _, warnings = R.process_sheet(df, 0.5, "linear")
+        assert sc["snr"] < 0.15 or np.isnan(sc["score"])          # no signal beyond chance
+        if np.isnan(sc["score"]):
+            blank += 1
+            assert any("no signal rises above the noise" in w for w in warnings)
+    assert blank > 0
+
+
+def test_area_survey_file_warns_about_separate_lines():
+    rows = []
+    for k in range(4):
+        y = np.arange(0.0, 20.0, 0.5)
+        rows.append(pd.DataFrame({"Line": k, "X": 3.0 * k, "Y": y, "EC1525Hz[mS/m]": 10.0 * k + y}))
+    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+    _, scores, warnings = R.process_gem_file(data, "area.csv", 0.5, "linear")
+    assert any("4 different positions" in w for w in warnings)
+    assert scores["EC"]["1525Hz"]["noise_method"] == R.NOISE_INTRA
+
+
+# ---------------------------------------------------------------------------
 # Units (#8)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "mode, is_gem, expected",
+    "mode, expected",
     [
-        ("EC", True, "Mean EC (mS/m)"),
-        ("MS", True, "Mean MS (10⁻³ SI)"),
-        ("EC", False, "Mean EC (input units)"),
+        ("EC", "Mean EC (mS/m)"),
+        ("MS", "Mean MS (10⁻³ SI)"),
     ],
 )
-def test_plot_axes_carry_correct_units(mode, is_gem, expected):
+def test_plot_axes_carry_correct_units(mode, expected):
     interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
     scores = {"f": {"score": 1.0}}
-    fig = R.make_overview_figure({"f": interp}, scores, mode, "x", is_gem=is_gem)
+    fig = R.make_overview_figure({"f": interp}, scores, mode, "x")
     assert fig.axes[0].get_ylabel() == expected
     plt.close(fig)
-    fig = R.make_sheet_figure("f", interp, mode, is_gem=is_gem)
+    fig = R.make_sheet_figure("f", interp, mode)
     assert fig.axes[0].get_ylabel() == expected
     plt.close(fig)
 
@@ -111,7 +188,7 @@ def test_batch_export_handles_grids_of_different_length():
 # ---------------------------------------------------------------------------
 
 X = np.arange(0, 100.5, 0.5)
-STEP = 20 + 10 * np.tanh((X - 50) / 5)      # true amplitude ≈ 20
+STEP = 20 + 10 * np.tanh((X - 50) / 5)      # true signal σ ≈ 9.5
 
 
 def _trace(rng, lo=0.0, hi=100.0, noise=0.5):
@@ -121,7 +198,7 @@ def _trace(rng, lo=0.0, hi=100.0, noise=0.5):
     return s
 
 
-@pytest.mark.parametrize("method", [m for m in R.ALL_INTERP_METHODS if m != "polynomial"])
+@pytest.mark.parametrize("method", R.INTERP_METHODS)
 def test_traces_are_not_extrapolated(method):
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"d": X, "L1": _trace(rng, 0, 100), "L2": _trace(rng, 3, 97),
@@ -130,7 +207,7 @@ def test_traces_are_not_extrapolated(method):
     assert error is None
     assert interp.loc[interp.index < 3, "L2"].isna().all()
     assert interp.loc[interp.index > 95, "L3"].isna().all()
-    assert sc["amplitude"] < 22                      # was up to 294 for cubic
+    assert sc["signal_std"] < 11                     # extrapolated ends would inflate it
     assert 0.4 < sc["mean_std"] < 0.6
 
 
@@ -170,24 +247,21 @@ def test_single_and_multi_trace_scores_agree_and_are_labelled():
         b["L2"] = np.nan
         sa = R.process_sheet(a, 0.5, "linear")[1]
         sb = R.process_sheet(b, 0.5, "linear")[1]
-        ratios.append(sb["score"] / sa["score"])
+        ratios.append(sb["snr"] / sa["snr"])
     assert (sa["noise_method"], sa["n_traces"]) == (R.NOISE_BETWEEN, 3)
     assert (sb["noise_method"], sb["n_traces"]) == (R.NOISE_INTRA, 1)
     # Same signal and noise: the estimators agree on average (was 38 vs 64)
     assert np.mean(ratios) == pytest.approx(1.0, abs=0.1)
 
 
-def test_mixed_noise_methods_warn_in_legacy_file():
+def test_mixed_noise_methods_warn():
     rng = np.random.default_rng(0)
     multi = pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)})
     single = pd.DataFrame({"d": X, "a": _trace(rng)})
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        multi.to_excel(w, sheet_name="1000", index=False)
-        single.to_excel(w, sheet_name="5000", index=False)
-    _, scores, warnings = R.process_file.__wrapped__(buf.getvalue(), "EC", 0.5, "linear")
-    assert scores["5000"]["noise_method"] == R.NOISE_INTRA
-    assert any("Only one usable pass for 5000" in w for w in warnings)
+    scores = {"1000Hz": R.process_sheet(multi, 0.5, "linear")[1],
+              "5000Hz": R.process_sheet(single, 0.5, "linear")[1]}
+    assert scores["5000Hz"]["noise_method"] == R.NOISE_INTRA
+    assert "Only one usable pass for 5000Hz" in R.noise_method_warning(scores)
 
 
 def test_zero_noise_gives_blank_score_ranked_last():
@@ -202,41 +276,3 @@ def test_zero_noise_gives_blank_score_ranked_last():
 def test_non_overlapping_traces_are_reported():
     df = pd.DataFrame({"d": X, "a": np.where(X < 40, 1.0, np.nan), "b": np.where(X > 60, 2.0, np.nan)})
     assert R.process_sheet(df, 0.5, "linear")[2] == "traces do not overlap in distance"
-
-
-# ---------------------------------------------------------------------------
-# Polynomial trend fit (#6)
-# ---------------------------------------------------------------------------
-
-def test_polynomial_is_well_conditioned_on_projected_coordinates():
-    rng = np.random.default_rng(0)
-    northing = 4.5e6 + X
-    df = pd.DataFrame({"d": northing, "a": _trace(rng), "b": _trace(rng)})
-    with np.errstate(all="raise"):
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")      # RankWarning used to be emitted here
-            utm = R.process_sheet(df, 0.5, "polynomial")[1]
-    local = R.process_sheet(df.assign(d=X), 0.5, "polynomial")[1]
-    assert utm["score"] == pytest.approx(local["score"], rel=1e-6)
-
-
-def test_all_methods_export_flags_polynomial_as_trend_fit():
-    class Upload:
-        name = "legacy.xlsx"
-
-        def __init__(self, data):
-            self._data = data
-
-        def getvalue(self):
-            return self._data
-
-    rng = np.random.default_rng(0)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)}).to_excel(
-            w, sheet_name="1000", index=False)
-    xlsx = R.build_all_methods_batch_xlsx([Upload(buf.getvalue())], "EC", 0.5)
-    scores = pd.read_excel(io.BytesIO(xlsx), sheet_name="Scores").set_index("Method")
-    assert not scores.loc["polynomial", "Exact interpolant"]
-    assert scores.drop(index="polynomial")["Exact interpolant"].all()

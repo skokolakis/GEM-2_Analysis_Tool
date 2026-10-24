@@ -44,7 +44,7 @@ def test_every_citation_is_in_the_bibliography(name):
 
 def test_about_cites_the_main_methods():
     cited = {author for author, _ in _citations(R.ABOUT_MD)}
-    assert {"Won", "McNeill", "Callegary", "Huang", "Sheriff", "Akima"} <= cited
+    assert {"Won", "McNeill", "Callegary", "Huang", "Sheriff", "Fritsch"} <= cited
 
 
 def test_about_references_come_from_the_docs():

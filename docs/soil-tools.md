@@ -2,7 +2,7 @@
 
 [← Documentation index](README.md)
 
-*Where:* under each GEM file with coordinates, **Soil tools (sampling design, calibration, management zones)**. It works on the EC channels you choose. Implementation: [`soiltools.py`](../soiltools.py).
+*Where:* the **Soil tools** page, in the navigation at the top of the sidebar (or the link under **Further analysis** of a file). It uses the GEM files loaded on the **Survey analysis** page, with the corrections and settings chosen there — or the sample survey — and works on the EC channels you choose. Your files and sidebar settings are kept while you switch pages. Implementation: [`soiltools.py`](../soiltools.py).
 
 ## Sampling design
 

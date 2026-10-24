@@ -57,6 +57,30 @@ def test_property_model_recovers_log_linear_relation():
     np.testing.assert_allclose(pred, np.exp(0.5 + 0.8 * np.log(df["EC1525Hz[mS/m]"])), rtol=1e-6)
 
 
+def test_property_model_reports_leave_one_out_and_collinearity():
+    df = _field()
+    sites = df.iloc[::37].copy()
+    rng = np.random.default_rng(3)
+    sites["Clay"] = 5 + 0.5 * sites["EC1525Hz[mS/m]"] + rng.normal(0, 1, len(sites))
+    one = S.fit_property_model(df, sites[["X", "Y", "Clay"]], "Clay", ["EC1525Hz[mS/m]"], 0.5,
+                               log_property=False)
+    assert np.isnan(one.channel_correlation) and one.loo_r2 < one.r2
+    # leave-one-out by refitting without each sample in turn
+    a = np.column_stack([np.ones(one.n), np.log(sites["EC1525Hz[mS/m]"].to_numpy())])
+    t = sites["Clay"].to_numpy()
+    press = [t[i] - a[i] @ np.linalg.lstsq(np.delete(a, i, 0), np.delete(t, i), rcond=None)[0]
+             for i in range(one.n)]
+    assert one.loo_rmse == pytest.approx(np.sqrt(np.mean(np.square(press))), rel=1e-9)
+    both = S.fit_property_model(df, sites[["X", "Y", "Clay"]], "Clay",
+                                ["EC1525Hz[mS/m]", "EC9825Hz[mS/m]"], 0.5, log_property=False)
+    logs = np.log(sites[["EC1525Hz[mS/m]", "EC9825Hz[mS/m]"]].to_numpy())
+    assert both.channel_correlation == pytest.approx(abs(np.corrcoef(logs.T)[0, 1]))
+    df["EC1525Hz[mS/m]x"] = 1.1 * df["EC1525Hz[mS/m]"] + rng.normal(0, 0.01, len(df))
+    twins = S.fit_property_model(df, sites[["X", "Y", "Clay"]], "Clay",
+                                 ["EC1525Hz[mS/m]", "EC1525Hz[mS/m]x"], 0.5, log_property=False)
+    assert twins.channel_correlation > S.COLLINEAR_CHANNELS
+
+
 def test_property_model_with_trend_and_too_few_samples():
     df = _field()
     sites = df.iloc[::37].copy()

@@ -27,10 +27,10 @@ def _export(lines=2, n=11, mark=None, status=None):
 
 
 def test_value_labels_for_new_modes():
-    assert ctr.value_label("I", True) == "In-phase (ppm)"
-    assert ctr.value_label("Q", True) == "Quadrature (ppm)"
-    assert ctr.value_label("AUX", True, "PowerLn") == "Power-line noise (mG)"
-    assert ctr.value_label("EC", True) == "EC (mS/m)"
+    assert ctr.value_label("I") == "In-phase (ppm)"
+    assert ctr.value_label("Q") == "Quadrature (ppm)"
+    assert ctr.value_label("AUX", "PowerLn") == "Power-line noise (mG)"
+    assert ctr.value_label("EC") == "EC (mS/m)"
 
 
 def test_find_channels_recognises_every_mode():
@@ -104,6 +104,20 @@ def test_projection_follows_line_direction_on_wide_grids():
     rows = [pd.DataFrame({"Line": k, "X": float(k), "Y": np.linspace(0, 20, 41)}) for k in range(50)]
     d = G.along_track_distance(pd.concat(rows, ignore_index=True), "projection", coord_mode="metres")
     np.testing.assert_allclose(d.reshape(50, 41), np.tile(np.linspace(0, 20, 41), (50, 1)), atol=1e-9)
+
+
+def test_track_groups_tell_repeat_passes_from_parallel_lines():
+    y = np.linspace(0, 20, 41)
+    passes = [pd.DataFrame({"Line": k, "X": 0.1 * k, "Y": y if k % 2 else y[::-1]}) for k in range(3)]
+    grid = [pd.DataFrame({"Line": 10 + k, "X": 5.0 + 2.0 * k, "Y": y}) for k in range(4)]
+    tracks = G.track_groups(pd.concat(passes + grid, ignore_index=True), "metres")
+    assert tracks[0] == tracks[1] == tracks[2]                 # one transect walked three times
+    assert len({tracks[k] for k in range(10, 14)} | {tracks[0]}) == 5
+
+
+def test_track_groups_without_coordinates_or_one_line():
+    assert G.track_groups(pd.DataFrame({"Line": [0, 0, 1, 1], "Y": [0, 1, 0, 1]})) is None
+    assert G.track_groups(pd.DataFrame({"Line": 0, "X": [0.0, 1.0], "Y": [0.0, 0.0]}), "metres") is None
 
 
 def test_path_distance_restarts_on_each_line():

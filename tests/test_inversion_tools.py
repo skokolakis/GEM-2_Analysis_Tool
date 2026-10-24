@@ -30,7 +30,7 @@ def test_station_data_from_quadrature():
     np.testing.assert_allclose(s.frequencies, FREQS)            # sorted
     np.testing.assert_allclose(s.distance, [0, 2, 4, 6, 8, 10])
     np.testing.assert_allclose(s.quadrature[0], q)
-    np.testing.assert_allclose(s.noise, 2.0)
+    np.testing.assert_allclose(s.noise, 2.0 / np.sqrt(2))       # mean of 2 passes
 
 
 def test_station_data_from_ec_converts_values_and_noise():
@@ -40,13 +40,26 @@ def test_station_data_from_ec_converts_values_and_noise():
     assert s.source == "EC"
     np.testing.assert_allclose(s.quadrature[0], E.forward_ppm(FREQS, [0.02]).imag, rtol=1e-9)
     slope = (E.forward_ppm(FREQS, [0.0202]).imag - E.forward_ppm(FREQS, [0.02]).imag) / 0.2
-    np.testing.assert_allclose(s.noise, 0.5 * slope, rtol=1e-6)        # ppm per mS/m
+    np.testing.assert_allclose(s.noise, 0.5 / np.sqrt(2) * slope, rtol=1e-6)   # ppm per mS/m, 2 passes
 
 
-def test_single_pass_noise_is_not_used():
+def test_single_pass_noise_is_the_within_line_sigma():
     out = {"Q": _profiles({"1525Hz": np.ones(21)}, passes=1)}
     scores = {"Q": {"1525Hz": {"mean_std": 2.0, "noise_method": "intra-profile"}}}
-    assert V.station_data(out, scores, 1.0).noise is None
+    np.testing.assert_allclose(V.station_data(out, scores, 1.0).noise, 2.0)
+
+
+def test_station_data_of_one_transect():
+    # lines 0 and 1 are passes of one transect, line 2 is another transect (#15)
+    distance = np.arange(0, 10.5, 0.5)
+    df = pd.DataFrame({"Line_0": np.full(21, 100.0), "Line_1": np.full(21, 102.0),
+                       "Line_2": np.full(21, 500.0)}, index=distance)
+    out = {"Q": {"1525Hz": df}}
+    scores = {"Q": {"1525Hz": {"mean_std": 2.0, "noise_method": "between-trace"}}}
+    s = V.station_data(out, scores, 1.0, columns=["Line_0", "Line_1"])
+    np.testing.assert_allclose(s.quadrature[:, 0], 101.0)
+    np.testing.assert_allclose(s.noise, 2.0 / np.sqrt(2))
+    np.testing.assert_allclose(V.station_data(out, scores, 1.0, columns=["Line_2"]).quadrature, 500.0)
 
 
 def test_model_table_and_section_figure():

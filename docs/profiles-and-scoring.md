@@ -21,27 +21,31 @@ Each trace is used only inside its own measured distance range — grid points o
 | Setting | Effect |
 |---|---|
 | **Frequency scoring** | Off by default. With it off the app shows each mode's channels, profiles, maps and exports without scores. AUX channels are never scored. |
-| **Legacy workbook mode** | EC or MS — applies to legacy files only; GEM files show every mode. |
 | **Distance step (m)** | Spacing of the common interpolation grid (default 0.5 m). |
-| **Interpolation method** | One of the seven methods below. |
+| **Interpolation method** | Linear or PCHIP, below. |
 
 ## Scoring
 
-$$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
+Each frequency is scored by its **signal-to-noise ratio** — the ratio of signal power to noise power (Sheriff & Geldart, 1995), in decibels as is usual for data-quality assessment (Bakulin et al., 2022):
 
-- **A (amplitude)** = max − min of the representative (mean) profile, taken where at least two passes overlap (single-pass files: the whole profile). It is the total geophysical contrast resolved at that frequency.
-- **σ_noise** depends on the number of passes:
+$$\mathrm{SNR_{dB}} = 10\,\log_{10}\frac{P_s}{P_n}, \qquad P_n = \sigma_{\text{noise}}^2, \qquad P_s = \operatorname{var}(\bar p) - \sigma_{\text{noise}}^2\left\langle \tfrac{1}{k} \right\rangle$$
+
+- **p̄** is the representative (mean) profile, where at least two passes overlap (single-pass files: the measured readings), and **k** the number of passes averaged at each distance.
+- **P_s (signal power)** is the variance of p̄ about its mean less the noise still in it. Averaging k passes leaves σ²/k of noise at each distance, so var(p̄) = P_s + σ²⟨1/k⟩ on average; subtracting that term makes P_s unbiased, so a noisier frequency does not gain signal from its own noise (a single pass: k = 1, P_s = var(y) − σ²). The signal is the variation of the profile about its mean — the contrasts the frequency resolves; a constant level carries no information about the ground.
+- **P_n (noise power)** is σ²_noise, with σ estimated as follows:
   - **Multi-trace (≥ 2 passes)** — sample standard deviation across passes (ddof = 1) at each distance step where ≥ 2 passes were measured, pooled as √(mean variance). It captures instrument noise, positioning uncertainty and short-term drift.
   - **Single-trace fallback** — estimated from the *measured* samples (not the interpolated grid) by second differences, which cancel a locally linear trend: for white noise var(Δ²y) = 6σ², so σ ≈ 1.4826 · MAD(Δ²y) / √6. The median absolute deviation ignores the few large differences at sharp boundaries, and the estimate does not depend on the distance step or interpolation method.
+  - **Lines at different positions** — the passes are grouped into transects by their position across the line direction (lines less than 1 m apart are one transect). The between-pass σ is pooled only over transects walked at least twice, and P_s over their mean profiles (weighted by length). When every transect was walked once (an area survey), σ is the single-trace estimate pooled over the lines as √(mean σ²) and P_s is pooled over the lines. Lines over different ground differ by the geology, not by noise, so they are never compared with each other. Files without coordinates are taken as repeat passes of one transect.
   - **Zero or undefined noise** (σ < 10⁻⁸ or not estimable) — the score is left blank and ranked last, with a warning.
+- **No signal above the noise** (P_s ≤ 0) — the score is left blank and ranked last, with a warning.
 
-**Higher score = cleaner, larger-contrast signal** → better for detailed profiling. This is the signal-to-noise ratio, the standard geophysical criterion for data quality (Sheriff & Geldart, 1995; Bakulin et al., 2022).
+**Higher SNR = more of the measured variation is ground, less is noise** → better for detailed profiling. 0 dB means equal signal and noise power; every 10 dB is a tenfold ratio. The ranking and exports show the SNR in dB with the signal σ (√P_s) and the noise σ in the data's units.
 
 The ranking table and exports show the **noise method** and number of **traces** behind each score. When some frequencies in a file fall back to the single-trace estimate, a warning says their scores are not strictly comparable with the others.
 
 > **Why sample std (ddof = 1)?** The passes are a finite sample of the measurement process whose noise is being estimated, so the sample formula applies. With two passes the population formula (ddof = 0) would understate σ by a factor of √½ ≈ 0.71.
 
-> **Filters change scores.** Despiking, the running mean, PCA and the polynomial trend fit all lower σ and so raise the score. Compare scores only between runs with the same settings.
+> **Filters change scores.** Despiking lowers σ and so raises the score. Compare scores only between runs with the same settings.
 
 To go from scores to a short list of non-redundant frequencies, see [Frequency selection](interpretation.md#frequency-selection).
 
@@ -58,14 +62,9 @@ The **skin depth** δ = √(2 / ωμσ) is the depth at which the primary field 
 | Method | Min. points | Characteristics |
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
-| **nearest** | 1 | Assigns each grid point the value of the closest data point. Useful for step-like signals. |
-| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
-| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
-| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
-| **akima** | 5 | Akima (1970) local spline. Derives slopes from neighbouring points only, so it is robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. Shown as "polynomial (trend fit)" in the sidebar. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
 
-Columns with fewer than the minimum number of points are skipped with a warning. **Generate all-methods export** (under **Export all files**) runs all seven methods in one go for direct comparison ([Outputs](outputs.md#batch-export)).
+Columns with fewer than two points are skipped with a warning. GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile grid, so the two methods give nearly the same profiles and scores. Splines that overshoot (cubic, quadratic), the nearest-neighbour step and the polynomial trend fit, which smoothed each trace and inflated its score, were removed.
 
 ## Viewing the results
 
@@ -74,7 +73,7 @@ Each mode tab shows:
 - **Channels** — the frequencies / channels found, or the **Frequency ranking** table when scoring is on.
 - **Representative profiles** (collapsed; click to open) — every frequency's mean profile on one axes (scores in the legend when scoring is on), with event markers as dotted lines.
 - **Graph editor** — choose the **X axis** (distance along line, X, Y, Lat/Lon, time, reading number, or a channel for cross-plots) and the **Y axis** (the representative profiles, or any channel of the file — readings are then plotted one colour per line); toggle frequencies; set axis limits, line width and style, labels and title; show or hide individual traces and the ±1σ envelope.
-- **Per-frequency detail plots** (per-channel on the AUX tab, per-sheet for legacy files) — individual traces (thin, semi-transparent), the mean profile (bold) and the ±1σ envelope.
+- **Per-frequency detail plots** (per-channel on the AUX tab) — individual traces (thin, semi-transparent), the mean profile (bold) and the ±1σ envelope.
 - **Downloads** — see [Outputs](outputs.md).
 
 Full citations: [References](references.md).

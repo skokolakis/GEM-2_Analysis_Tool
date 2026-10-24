@@ -8,7 +8,7 @@ plain-language messages that the app shows as warnings.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -20,6 +20,13 @@ import interpret
 
 DISTANCE_COL = gem_io.DISTANCE_COL   # column added by prepare_gem_table
 READING_ORDER_METHODS = ("sample", "markers")   # distances that count every logged reading
+HEIGHT_STEP = 0.02                                # m; readings within a step share one conversion
+OFFSETS_NOT_IN_EC = (
+    "The calibration offsets were subtracted from the I / Q channels only: the EC and MS "
+    "columns of this file are still as exported, so EC / MS profiles, scores and maps are not "
+    "calibrated. Turn on 'Recompute EC / MS from I / Q' (Sensor geometry, advanced settings) "
+    "to calibrate them."
+)
 
 
 @dataclass(frozen=True)
@@ -36,28 +43,52 @@ class PrepSettings:
     viscosity_pair: tuple[float, float] | None = None   # Hz; adds magnetic-viscosity AUX channels
 
 
-def recompute_ec_ms(df: pd.DataFrame, sensor: emphysics.Sensor) -> tuple[pd.DataFrame, list[str]]:
+def _halfspace(f: float, i: np.ndarray, q: np.ndarray, sensor: emphysics.Sensor,
+               heights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """halfspace_from_ppm_batch with the sensor height of each reading (HEIGHT_STEP bins) when given."""
+    if heights is None:
+        return emphysics.halfspace_from_ppm_batch(f, i, q, sensor)
+    sigma, kappa = np.full(i.shape, np.nan), np.full(i.shape, np.nan)
+    level = np.round(heights / HEIGHT_STEP)
+    for lv in np.unique(level[np.isfinite(level) & (level >= 0)]):
+        rows = level == lv
+        sensor_h = replace(sensor, height=float(lv * HEIGHT_STEP))
+        sigma[rows], kappa[rows] = emphysics.halfspace_from_ppm_batch(f, i[rows], q[rows], sensor_h)
+    return sigma, kappa
+
+
+def recompute_ec_ms(
+    df: pd.DataFrame, sensor: emphysics.Sensor, height_column: str = ""
+) -> tuple[pd.DataFrame, list[str]]:
     """
     Writes EC{f}Hz[mS/m] and MSusc{f}Hz[1/1000] for every frequency with both
     I_{f}Hz and Q_{f}Hz columns: the homogeneous half-space that reproduces
     each reading (Huang & Won, 2000), for the given coil geometry and height.
-    Where the file already has EC / MS, the messages compare them with the
-    recomputed values: a median ratio far from 1, or MS running the opposite
-    way, points to a different geometry, height or I/Q sign convention.
+    With a height column, each reading is converted at its own sensor height
+    (to HEIGHT_STEP), which removes the height effect from EC / MS by the
+    physics rather than by a fitted curve; readings without a height are
+    left blank. Where the file already has EC / MS, the messages compare them
+    with the recomputed values: a median ratio far from 1, or MS running the
+    opposite way, points to a different geometry, height or I/Q sign convention.
     """
     out = df.copy()
     found = gem_io.find_channels(df.columns)
+    heights = None
+    if height_column:
+        if height_column not in df.columns:
+            raise ValueError(f"Altitude column '{height_column}' not found.")
+        heights = pd.to_numeric(df[height_column], errors="coerce").to_numpy(dtype=float)
     done, blank, ratios, flipped = [], 0, [], []
     for label, q_col in found["Q"].items():
         i_col = found["I"].get(label)
         if i_col is None:
             continue
         f = float(label[:-2])
-        sigma, kappa = emphysics.halfspace_from_ppm_batch(
+        sigma, kappa = _halfspace(
             f,
             pd.to_numeric(df[i_col], errors="coerce").to_numpy(dtype=float),
             pd.to_numeric(df[q_col], errors="coerce").to_numpy(dtype=float),
-            sensor,
+            sensor, heights,
         )
         ec_col, ms_col = gem_io.channel_column("EC", label), gem_io.channel_column("MS", label)
         ec, ms = sigma * 1000.0, kappa * 1000.0
@@ -79,8 +110,13 @@ def recompute_ec_ms(df: pd.DataFrame, sensor: emphysics.Sensor) -> tuple[pd.Data
     if not done:
         return out, ["Recompute from I/Q: no frequency has both I_ and Q_ columns."]
     sep = f"{sensor.separation:g} m" + (f", bucking {sensor.bucking:g} m" if sensor.bucking else "")
-    msgs = [f"EC and MS recomputed from I/Q for {', '.join(done)} (coils {sep}, height {sensor.height:g} m)."]
-    if not emphysics.susceptibility_resolved(sensor):
+    where = (f"each reading at its own height from '{height_column}'" if heights is not None
+             else f"height {sensor.height:g} m")
+    msgs = [f"EC and MS recomputed from I/Q for {', '.join(done)} (coils {sep}, {where})."]
+    if heights is not None:
+        msgs.append("The height effect is removed by the conversion itself, so the fitted "
+                    "sensor-height correction is not applied.")
+    elif not emphysics.susceptibility_resolved(sensor):
         msgs.append(
             f"At {sensor.height:g} m the in-phase of this coil geometry barely depends on "
             "susceptibility, so EC comes from the quadrature alone and MS is left blank."
@@ -134,11 +170,14 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
         messages.append(f"Left out {int(drop.sum())} reading(s) of line(s) {', '.join(prep.exclude_lines)}.")
 
     if prep.recompute_from_iq:
-        # I/Q corrections, then EC / MS from I / Q, then the corrections of EC / MS
-        if prep.corrections.active:
-            df, steps = corrections.apply_corrections(df, prep.corrections, stage="readings")
+        # I/Q corrections, then EC / MS from I / Q (at each reading's height when there is a
+        # height column, instead of the fitted height correction), then the corrections of EC / MS
+        height_column = prep.corrections.altitude_column
+        readings = replace(prep.corrections, altitude_column="")
+        if readings.active:
+            df, steps = corrections.apply_corrections(df, readings, stage="readings")
             messages.extend(steps)
-        df, steps = recompute_ec_ms(df, prep.sensor)
+        df, steps = recompute_ec_ms(df, prep.sensor, height_column)
         messages.extend(steps)
         if prep.corrections.active:
             df, steps = corrections.apply_corrections(df, prep.corrections, stage="derived")
@@ -146,6 +185,8 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
     elif prep.corrections.active:
         df, steps = corrections.apply_corrections(df, prep.corrections)
         messages.extend(steps)
+        if prep.corrections.iq_offsets and corrections.channel_columns(df, ("EC", "MS")):
+            messages.append(OFFSETS_NOT_IN_EC)
 
     if prep.viscosity_pair:
         try:

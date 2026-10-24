@@ -1,9 +1,8 @@
 """
 Corrections and filters applied to a GEM table before profiles and maps:
-despiking, clipping, smoothing, sensor-height (altitude) correction,
-base-station drift and temperature drift, background offset, calibration
-against reference data, EC at 25 °C, PCA noise reduction, GPS time-lag
-correction and heading filter.
+despiking, clipping, sensor-height (altitude) correction, base-station
+drift and temperature drift, calibration against reference data, EC at
+25 °C and GPS time-lag correction.
 
 Pure functions only (no Streamlit). apply_corrections() runs the enabled
 steps in a fixed order and reports each one in plain language.
@@ -29,6 +28,8 @@ LAG_MAX_NEIGHBOURS = 1024                                # ... widened up to thi
 LAG_END_SECONDS = 2.0                                    # s, track used to extrapolate line ends
 MIN_OCCUPATIONS = 2                                      # base-station visits for drift
 MIN_TEMPERATURE_OCCUPATIONS = 3                          # ... for a temperature coefficient
+JOINT_TEMPERATURE_OCCUPATIONS = 4                        # ... to fit it together with a time trend
+COLLINEAR_TEMPERATURE = 0.9                              # |r(time, temperature)| above which they mix
 
 
 @dataclass(frozen=True)
@@ -44,16 +45,11 @@ class CorrectionSettings:
     drift_lines: tuple[str, ...] = ()        # Line labels of base-station occupations
     drift_model: str = "piecewise"           # "piecewise" | "linear"
     iq_offsets: bytes | None = None          # CSV column,offset (e.g. multi-height calibration)
-    ec_background: float | None = None       # mS/m; shift EC channels so their median matches
     reference: bytes | None = None           # CSV of reference values (calibration)
     reference_radius: float = 2.0            # m, matching distance for reference points
     reference_method: str = "regression"     # "regression" | "moments"
     soil_temperature: float | None = None    # °C; converts EC to EC at 25 °C
-    pca_components: int = 0                  # 0 = off
-    smooth_window: int = 0                   # readings; 0 = off
     lag_seconds: float = 0.0                 # GPS lag; positive = data recorded late
-    bearing_center: float | None = None      # degrees from north; None = off
-    bearing_tolerance: float = 30.0          # degrees either side
 
     @property
     def active(self) -> bool:
@@ -62,7 +58,7 @@ class CorrectionSettings:
     @property
     def lowers_noise(self) -> bool:
         """True if a step smooths the data (lowers σ and inflates scores)."""
-        return self.despike or self.smooth_window > 1 or self.pca_components > 0
+        return self.despike
 
     def describe(self) -> list[str]:
         """Short names of the enabled steps, in the order they run, e.g. ['despike', 'GPS lag +0.4 s']."""
@@ -81,18 +77,10 @@ class CorrectionSettings:
             on.append("calibration offsets")
         if self.lag_seconds:
             on.append(f"GPS lag {self.lag_seconds:+g} s")
-        if self.ec_background:
-            on.append(f"background EC {self.ec_background:g} mS/m")
         if self.reference is not None:
             on.append("reference calibration")
         if self.soil_temperature:
             on.append(f"EC at 25 °C (soil at {self.soil_temperature:g} °C)")
-        if self.pca_components:
-            on.append(f"PCA ({self.pca_components} components)")
-        if self.smooth_window > 1:
-            on.append(f"running mean ({self.smooth_window} readings)")
-        if self.bearing_center is not None:
-            on.append(f"heading {self.bearing_center:g}° ± {self.bearing_tolerance:g}°")
         return on
 
 
@@ -164,13 +152,6 @@ def despike_series(v: np.ndarray, window: int = 5, threshold: float = 4.0) -> tu
     out = s.to_numpy().copy()
     out[spikes] = np.nan
     return out, int(spikes.sum())
-
-
-def running_mean(v: np.ndarray, window: int) -> np.ndarray:
-    """Centred moving average over `window` readings (shorter at the ends)."""
-    return pd.Series(np.asarray(v, dtype=float)).rolling(
-        window, center=True, min_periods=1
-    ).mean().to_numpy()
 
 
 def clip_to_percentiles(v: np.ndarray, low: float, high: float) -> tuple[np.ndarray, int]:
@@ -265,7 +246,8 @@ def correct_drift(
     """
     Removes instrument drift measured by repeated base-station occupations
     (USGS GEM-2 practice: mean of each occupation, trend in time, subtract),
-    relative to the first occupation, then drops the base-station lines.
+    relative to the drift at the first occupation, then drops the
+    base-station lines.
     """
     t = _require_time(df, "Drift correction")
     occ = base_station_occupations(df, lines)
@@ -282,7 +264,8 @@ def correct_drift(
         v = _numeric(df, col)
         v_occ = np.array([np.nanmean(v[i]) for i in occ])
         curve = drift_curve(t_occ, v_occ, t, model)
-        out[col] = v - (curve - v_occ[first])
+        # the fitted drift at the first occupation (a straight line need not pass through it)
+        out[col] = v - (curve - drift_curve(t_occ, v_occ, t_occ[first: first + 1], model)[0])
         drifts.append(f"{col}: {np.ptp(v_occ):.4g}")
     base = np.concatenate(occ)
     out = out.drop(index=out.index[base]).reset_index(drop=True)
@@ -297,8 +280,14 @@ def correct_temperature(
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Removes a linear temperature dependence estimated from base-station
-    occupations: value = c0 + c1 x temperature at a fixed location, so
-    c1 x (T - T_mean) is subtracted from every reading.
+    occupations, so c1 x (T - T_mean) is subtracted from every reading.
+    Temperature and instrument drift both change through the day, so with
+    a time column and JOINT_TEMPERATURE_OCCUPATIONS or more occupations c1
+    is fitted together with a time trend (value = c0 + ct x time + c1 x
+    temperature) and the drift correction removes the time part; otherwise
+    value = c0 + c1 x temperature, which also takes up any drift that
+    follows the temperature. The messages warn when the two cannot be told
+    apart.
     """
     if column not in df.columns:
         raise ValueError(f"Temperature column '{column}' not found.")
@@ -312,15 +301,36 @@ def correct_temperature(
     t_occ = np.array([np.nanmean(temp[i]) for i in occ])
     if np.ptp(t_occ) == 0:
         raise ValueError("Base-station temperatures do not vary; no coefficient can be fitted.")
+    time = gem_io.time_seconds(df)
+    design = np.column_stack([np.ones(len(occ)), t_occ])
+    notes = []
+    if time is not None:
+        when = np.array([np.nanmean(time[i]) for i in occ])
+        r = float(np.corrcoef(when, t_occ)[0, 1]) if np.ptp(when) > 0 else 0.0
+        if abs(r) > COLLINEAR_TEMPERATURE:
+            notes.append(
+                f"Base-station temperature rose or fell with time (r = {r:.2f}), so its effect "
+                "cannot be told apart from instrument drift; the drift correction alone may be "
+                "the safer choice."
+            )
+        if len(occ) >= JOINT_TEMPERATURE_OCCUPATIONS and abs(r) < 1.0 - 1e-9:
+            design = np.column_stack([design, (when - when.mean()) / 3600.0])
+        else:
+            notes.append(
+                f"With {len(occ)} base-station lines the temperature coefficient also takes up "
+                f"the drift that follows the temperature; {JOINT_TEMPERATURE_OCCUPATIONS} or more "
+                "lets it be fitted together with a time trend."
+            )
     out = df.copy()
     coefs = []
     for col in channel_columns(df):
         v = _numeric(df, col)
         v_occ = np.array([np.nanmean(v[i]) for i in occ])
-        c1 = float(np.polyfit(t_occ, v_occ, 1)[0])
+        c1 = float(np.linalg.lstsq(design, v_occ, rcond=None)[0][1])
         out[col] = v - c1 * (temp - t_occ.mean())
         coefs.append(f"{col}: {c1:.4g}/°C")
-    return out, ["Temperature drift removed — " + "; ".join(coefs)]
+    joint = " (fitted together with a time trend)" if design.shape[1] == 3 else ""
+    return out, ["Temperature drift removed" + joint + " — " + "; ".join(coefs)] + notes
 
 
 # ---------------------------------------------------------------------------
@@ -384,33 +394,6 @@ def fit_reference_calibration(
         r2 = 1.0 - float(np.sum(resid ** 2) / np.sum((r - r.mean()) ** 2))
         fits.append({"column": col, "gain": gain, "offset": offset, "r2": r2, "n": int(pair.sum())})
     return fits
-
-
-# ---------------------------------------------------------------------------
-# PCA noise reduction
-# ---------------------------------------------------------------------------
-
-
-def pca_denoise(values: np.ndarray, n_components: int) -> tuple[np.ndarray, float]:
-    """
-    Keeps the first n principal components of standardised channels
-    (Minsley et al., 2010: FDEM channels are strongly correlated, so the
-    trailing components are mostly noise). Rows with any NaN are returned
-    unchanged. Returns (values, fraction of variance kept).
-    """
-    v = np.asarray(values, dtype=float)
-    out = v.copy()
-    rows = np.all(np.isfinite(v), axis=1)
-    if rows.sum() < 3 or n_components >= v.shape[1]:
-        return out, 1.0
-    a = v[rows]
-    mean, std = a.mean(axis=0), a.std(axis=0, ddof=1)
-    std[std == 0] = 1.0
-    z = (a - mean) / std
-    u, s, vt = np.linalg.svd(z, full_matrices=False)
-    k = max(1, int(n_components))
-    out[rows] = (u[:, :k] * s[:k]) @ vt[:k] * std + mean
-    return out, float(np.sum(s[:k] ** 2) / np.sum(s ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -555,34 +538,6 @@ def estimate_lag(
     return float(lags[int(np.argmin(cost))]), cost
 
 
-def headings(df: pd.DataFrame) -> np.ndarray:
-    """
-    Walking direction of each line, from its first to its last reading, in
-    degrees clockwise from north (or from the +Y axis), given to all of its
-    readings. A per-line direction is not upset by GPS jitter or by readings
-    logged while standing still; a line walked out and back has no single
-    direction, so give each direction its own Line.
-    """
-    x, y, _ = xy_metres(df)
-    out = np.full(len(df), np.nan)
-    for idx in _by_line(df):
-        ok = idx[np.isfinite(x[idx]) & np.isfinite(y[idx])]
-        if len(ok) < 2:
-            continue
-        dx, dy = x[ok[-1]] - x[ok[0]], y[ok[-1]] - y[ok[0]]
-        if dx == 0 and dy == 0:
-            continue
-        out[idx] = math.degrees(math.atan2(dx, dy)) % 360.0
-    return out
-
-
-def heading_mask(df: pd.DataFrame, center: float, tolerance: float) -> np.ndarray:
-    """True for readings whose heading is within `tolerance` degrees of `center`."""
-    h = headings(df)
-    diff = np.abs((h - center + 180.0) % 360.0 - 180.0)
-    return np.isfinite(h) & (diff <= tolerance)
-
-
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -606,10 +561,10 @@ def apply_corrections(
     """
     Runs the enabled corrections in this order: despike, clip, sensor height,
     temperature, drift, I/Q offsets (stage "readings": they act on the
-    instrument readings), then GPS lag, background offset, reference
-    calibration, EC at 25 °C, PCA, smoothing, heading filter (stage
-    "derived": they act on EC / MS as interpreted and on positions; the lag
-    comes first so reference points are matched at corrected positions). "all" runs both. When EC / MS are
+    instrument readings), then GPS lag, reference calibration and EC at
+    25 °C (stage "derived": they act on EC / MS as interpreted and on
+    positions; the lag comes first so reference points are matched at
+    corrected positions). "all" runs both. When EC / MS are
     recomputed from I / Q, the pipeline recomputes between the two stages so
     the EC corrections are not overwritten.
     Returns (table, messages).
@@ -645,7 +600,10 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
         for col in cols:
             out[col], n = clip_to_percentiles(_numeric(out, col), lo, hi)
             total += n
-        msgs.append(f"Clipping to the {lo:g}–{hi:g} percentile range blanked {total} value(s).")
+        msgs.append(
+            f"Clipping to the {lo:g}–{hi:g} percentile range blanked {total} value(s): the "
+            "strongest readings of each channel, which may be real anomalies rather than errors."
+        )
 
     if s.altitude_column:
         if s.altitude_column not in out.columns:
@@ -658,7 +616,10 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
             models.append(model)
         msgs.append(
             f"Sensor-height correction to {ref:.3g} m from '{s.altitude_column}' "
-            f"({models.count('exponential')} exponential, {models.count('linear')} linear fits)."
+            f"({models.count('exponential')} exponential, {models.count('linear')} linear fits). "
+            "The fit takes any change of the ground that goes with height (crops, hedges, "
+            "slopes) as a height effect; with I / Q, 'Recompute EC / MS from I / Q' converts "
+            "each reading at its own height instead."
         )
 
     if s.temperature_column:
@@ -684,21 +645,10 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
 
 
 def _correct_derived(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) -> pd.DataFrame:
-    """GPS lag, background offset, calibration, EC at 25 °C, PCA, smoothing and heading (see apply_corrections)."""
-    cols = channel_columns(out)
-
+    """GPS lag, reference calibration and EC at 25 °C (see apply_corrections)."""
     if s.lag_seconds:
         out = shift_positions(out, _require_time(out, "GPS lag correction"), s.lag_seconds)
         msgs.append(f"Positions shifted for a GPS lag of {s.lag_seconds:+.2f} s.")
-
-    if s.ec_background is not None:
-        shifts = []
-        for col in channel_columns(out, ("EC",)):
-            v = _numeric(out, col)
-            shift = s.ec_background - float(np.nanmedian(v))
-            out[col] = v + shift
-            shifts.append(f"{col}: {shift:+.4g}")
-        msgs.append("Shifted EC channels to the known background — " + "; ".join(shifts))
 
     if s.reference:
         ref = pd.read_csv(io.BytesIO(s.reference))
@@ -716,36 +666,5 @@ def _correct_derived(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str]) 
         for col in channel_columns(out, ("EC",)):
             out[col] = ec_at_25(_numeric(out, col), s.soil_temperature)
         msgs.append(f"EC converted to 25 °C from a soil temperature of {s.soil_temperature:g} °C.")
-
-    if s.pca_components > 0:
-        for mode in gem_io.FREQUENCY_MODES:
-            mcols = channel_columns(out, (mode,))
-            if len(mcols) <= s.pca_components:
-                if mcols:
-                    msgs.append(
-                        f"PCA noise reduction on {mode} skipped: {len(mcols)} channel(s) for "
-                        f"{s.pca_components} component(s)."
-                    )
-                continue
-            values, kept = pca_denoise(out[mcols].apply(pd.to_numeric, errors="coerce").to_numpy(),
-                                       s.pca_components)
-            out[mcols] = values
-            msgs.append(
-                f"PCA noise reduction on {mode}: kept {s.pca_components} of {len(mcols)} "
-                f"components ({100 * kept:.1f} % of the variance)."
-            )
-
-    if s.smooth_window > 1:
-        for col in cols:
-            out[col], _ = _per_line(out, col, lambda v: (running_mean(v, s.smooth_window), 0))
-        msgs.append(f"Running mean over {s.smooth_window} readings.")
-
-    if s.bearing_center is not None:
-        keep = heading_mask(out, s.bearing_center, s.bearing_tolerance)
-        msgs.append(
-            f"Heading filter kept {int(keep.sum())} of {len(out)} reading(s) "
-            f"({s.bearing_center:g}° ± {s.bearing_tolerance:g}°)."
-        )
-        out = out.loc[keep].reset_index(drop=True)
 
     return out

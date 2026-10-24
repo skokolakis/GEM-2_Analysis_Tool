@@ -26,14 +26,14 @@ Then upload a GEM-2 export (`.csv` / `.xlsx`) — or the [synthetic sample surve
 
 | | | Read more |
 |---|---|---|
-| **Read** | WinGEM / EMExport tables and `.gbf`-converted exports with every GEM-2 channel (EC, MS, I, Q, power-line noise, QSum, total EC), or legacy multi-sheet workbooks. Status flags, event markers and five ways to measure distance along a line | [Input data](docs/input-data.md) |
-| **Correct** | Despike, clip, sensor-height, temperature and base-station drift, I/Q calibration offsets, GPS lag, background EC, reference calibration (ERT / TDR), EC at 25 °C, PCA noise reduction, running mean, heading filter | [Corrections & filters](docs/corrections.md) |
-| **Profile & rank** | Representative (mean) profiles on a common distance grid with seven interpolation methods, and an optional signal-to-noise score — amplitude ÷ between-pass noise — to rank frequencies | [Profiles, scoring & interpolation](docs/profiles-and-scoring.md) |
+| **Read** | WinGEM / EMExport tables and `.gbf`-converted exports with every GEM-2 channel (EC, MS, I, Q, power-line noise, QSum, total EC). Status flags, event markers and five ways to measure distance along a line | [Input data](docs/input-data.md) |
+| **Correct** | Despike, clip, sensor-height, temperature and base-station drift, I/Q calibration offsets, GPS lag, reference calibration (ERT / TDR), EC at 25 °C | [Corrections & filters](docs/corrections.md) |
+| **Profile & rank** | Representative (mean) profiles on a common distance grid (linear or PCHIP), and an optional signal-to-noise ratio — signal power ÷ noise power, in dB — to rank frequencies | [Profiles, scoring & interpolation](docs/profiles-and-scoring.md) |
 | **Model** | Layered-earth forward model with the bucking coil, EC / MS recomputed from I / Q, skin depth and depth of investigation, multi-height calibration, smooth 1D / laterally constrained inversion with EMagPy export | [Sensor physics & inversion](docs/sensor-physics.md) |
 | **Interpret** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectra with Argand diagrams, power-line noise maps | [Interpretation aids](docs/interpretation.md) |
-| **Map** | Distance × frequency pseudo-sections; plan-view area maps with Surfer's gridding methods (kriging, minimum curvature, natural neighbour, RBF, …), cross-validation, Surfer-style colours, map filters, footprint deconvolution, merged and time-lapse surveys, GeoTIFF / ASCII-grid export | [2D mapping](docs/mapping.md) |
+| **Map** | Distance × frequency pseudo-sections; plan-view area maps with six gridding methods (kriging, minimum curvature, thin-plate spline, natural neighbour, linear, inverse distance), cross-validation, Surfer-style colours, map filters, merged and time-lapse surveys, GeoTIFF / ASCII-grid export | [2D mapping](docs/mapping.md) |
 | **Soil** | Response-surface sampling design, soil-property calibration against EC, fuzzy c-means management zones | [Soil tools](docs/soil-tools.md) |
-| **Export** | Interpolated profiles, scores, plots, batch workbooks for one or all interpolation methods, grids, inversion models | [Outputs](docs/outputs.md) |
+| **Export** | Interpolated profiles, scores, plots, batch workbooks for all files, grids, inversion models | [Outputs](docs/outputs.md) |
 
 Every scientific choice is explained in the app (sidebar help and **About & methods**) and in the pages above, with citations collected in [References](docs/references.md).
 
@@ -54,7 +54,8 @@ Start with the **[documentation index](docs/README.md)**, or jump to:
 ## Repository layout
 
 ```
-RIs_v2.py          Streamlit app (entry point)
+RIs_v2.py          Streamlit app (entry point, survey-analysis page)
+pages/             soil-tools page
 gem_io.py          GEM-2 export reading, lines, distance
 pipeline.py        preparation of the raw table
 corrections.py     corrections & filters

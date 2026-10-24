@@ -131,20 +131,26 @@ def test_file_picker_shows_one_file_at_a_time():
 # ── Settings files ───────────────────────────────────────────────────────────
 
 def test_settings_round_trip():
-    state = {"cor_smooth": 5, "ct_area": True, "ct_percentiles": (2.0, 98.0), "advanced": True,
+    state = {"cor_lag": 0.5, "ct_area": True, "ct_percentiles": (2.0, 98.0), "advanced": True,
              "ct_freq_site_EC": "1525Hz", "cor_offsets": None, "sample_load": False}
     saved = R.current_settings(state)
-    assert saved == {"advanced": True, "cor_smooth": 5, "ct_area": True, "ct_percentiles": [2.0, 98.0]}
+    assert saved == {"advanced": True, "cor_lag": 0.5, "ct_area": True, "ct_percentiles": [2.0, 98.0]}
     loaded = R.parse_settings(R.settings_json(saved))
     assert loaded["ct_percentiles"] == (2.0, 98.0)
     target = {}
     R.apply_settings(target, loaded)
-    assert target[R.RESET_KEY] == 1 and target["cor_smooth~1"] == 5 and target["advanced"] is True
+    assert target[R.RESET_KEY] == 1 and target["cor_lag~1"] == 0.5 and target["advanced"] is True
 
 
 def test_settings_after_a_reset_use_the_current_widgets():
-    state = {R.RESET_KEY: 2, "cor_smooth~1": 3, "cor_smooth~2": 7}
-    assert R.current_settings(state) == {"cor_smooth": 7}
+    state = {R.RESET_KEY: 2, "cor_lag~1": 0.3, "cor_lag~2": 0.7}
+    assert R.current_settings(state) == {"cor_lag": 0.7}
+
+
+def test_saved_choices_no_longer_offered_keep_the_default():
+    saved = {"prof_interp": "akima", "ct_method": "kriging", "prof_step": 0.5}
+    loaded = R.parse_settings(R.settings_json(saved))
+    assert loaded == {"ct_method": "kriging", "prof_step": 0.5}
 
 
 def test_foreign_files_are_refused():
