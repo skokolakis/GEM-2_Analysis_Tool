@@ -81,6 +81,18 @@ def test_repeat_passes_are_pooled_within_their_transect():
     assert 15 < sc["amplitude"] < 30                           # range within a transect, not 100 + 20
 
 
+def test_amplitude_ignores_a_spike_but_keeps_a_real_anomaly():
+    d = np.arange(0.0, 40.0, 0.5)
+    anomaly = 20.0 * np.exp(-((d - 20.0) / 1.5) ** 2)          # as wide as the sensor footprint
+    clean = pd.DataFrame({"d": d, "a": anomaly, "b": anomaly + 0.1})
+    _, sc, *_ = R.process_sheet(clean, 0.5, "linear")
+    assert sc["amplitude"] == pytest.approx(20.0, rel=0.15)     # the median trims the very top
+    spiked = clean.copy()
+    spiked.loc[10, ["a", "b"]] += 100.0                          # one reading, both passes
+    _, sp, *_ = R.process_sheet(spiked, 0.5, "linear")
+    assert sp["amplitude"] == pytest.approx(sc["amplitude"], rel=0.02)
+
+
 def test_area_survey_file_warns_about_separate_lines():
     rows = []
     for k in range(4):

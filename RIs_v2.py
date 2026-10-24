@@ -38,6 +38,7 @@ import ui_tools
 DEFAULT_DISTANCE_STEP = 0.5
 DEFAULT_INTERP_KIND = "linear"
 SCORE_EPSILON = 1e-8
+AMPLITUDE_WINDOW_M = 1.0   # running median before the range: narrower than the GEM-2 footprint
 
 # Noise estimators recorded in each score_dict ("noise_method")
 NOISE_BETWEEN = "between-trace"   # ≥ 2 overlapping passes
@@ -118,7 +119,7 @@ GEM_MS_PATTERN = gem_io.CHANNEL_PATTERNS["MS"]
 GEM_REQUIRED_COLS = {'Line', 'Y'}
 
 SCORING_HELP = (
-    "Rank frequencies by signal-to-noise score (amplitude / noise σ). Off: "
+    "Rank frequencies by contrast-to-noise score (amplitude / noise σ). Off: "
     "profiles, maps and exports are produced without scores."
 )
 SMOOTHING_SCORE_WARNING = (
@@ -511,7 +512,7 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
 
 | Symbol | Meaning |
 |---|---|
-| **A** | Amplitude — max(p̄) − min(p̄) of the mean profile, taken where at least two passes overlap (single-pass files: the whole profile). The total contrast resolved at that frequency. |
+| **A** | Amplitude — max − min of the mean profile after a 1 m running median, taken where at least two passes overlap (single-pass files: the whole profile). The total contrast resolved at that frequency; the running median keeps a single spike or noise extreme from setting it; real anomalies, wider than the sensor, lose only the very top of their peak, alike at every frequency. |
 | **σ_noise** | Noise, estimated from the data as below. |
 
 - **≥ 2 passes (recommended):** at each distance step where at least
@@ -538,9 +539,11 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
 - **σ < 10⁻⁸ or not estimable:** the score is left blank and ranked
   last, with a warning.
 
-A higher score is a higher signal-to-noise ratio, the standard
-geophysical criterion for data quality (Sheriff & Geldart, 1995;
-Bakulin et al., 2022).
+The score is a **contrast-to-noise ratio**: the range of the signal
+over the noise σ. It is related to, but not the same as, the
+signal-to-noise ratio of seismic practice (RMS signal over RMS noise;
+Sheriff & Geldart, 1995; Bakulin et al., 2022): it rewards the largest
+contrast a frequency resolves.
 
 > **Filters change scores.** Despiking, the running mean, PCA and the
 > polynomial trend fit all lower σ and so raise the score. Compare
@@ -624,9 +627,8 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **MS** | Apparent magnetic susceptibility (10⁻³ SI) — from the in-phase |
 | **LIN** | Low-induction-number approximation (B = s/δ ≪ 1), under which EC and MS decouple (McNeill, 1980) |
 | **Skin depth (δ)** | Depth at which the primary field falls to 1/e; decreases with frequency and conductivity |
-| **SNR** | Signal-to-noise ratio |
-| **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
-| **Amplitude (A)** | max − min of the mean profile where at least two passes overlap |
+| **Score** | A / σ_noise — a contrast-to-noise ratio, used for frequency ranking |
+| **Amplitude (A)** | max − min of the mean profile (1 m running median) where at least two passes overlap |
 | **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
@@ -1047,8 +1049,7 @@ def process_sheet(
             if not overlap.any():
                 continue
             variances.append(sub[overlap].var(axis=1, skipna=True, ddof=1).to_numpy())
-            mean = sub[overlap].mean(axis=1, skipna=True)
-            ranges.append(float(np.nanmax(mean) - np.nanmin(mean)))
+            ranges.append(profile_range(sub[overlap].mean(axis=1, skipna=True), distance_step))
             passes.append(len(cols))
         if not variances:
             return None, None, "traces do not overlap in distance", col_warnings
@@ -1058,8 +1059,7 @@ def process_sheet(
         # Every transect walked once: noise and contrast within each trace.
         sigmas = np.array([_intra_profile_noise(raw_samples[c]) for c in interpolated_df.columns])
         noise = float(np.sqrt(np.nanmean(sigmas ** 2))) if np.isfinite(sigmas).any() else float("nan")
-        ranges = [float(np.nanmax(interpolated_df[c]) - np.nanmin(interpolated_df[c]))
-                  for c in interpolated_df.columns]
+        ranges = [profile_range(interpolated_df[c], distance_step) for c in interpolated_df.columns]
         passes = [1]
         noise_method = NOISE_INTRA
 
@@ -1084,6 +1084,19 @@ def process_sheet(
         "passes": int(np.median(passes)),
     }
     return interpolated_df, score_dict, None, col_warnings
+
+
+def profile_range(profile: pd.Series, distance_step: float) -> float:
+    """
+    Contrast of a profile: max − min after a running median over
+    AMPLITUDE_WINDOW_M (at least 3 grid points). A single spike or a noise
+    extreme no longer sets the range, while any real anomaly is wider than
+    the sensor's footprint (coils 1.66 m apart) and survives; only the very
+    top of a peak is trimmed, alike at every frequency.
+    """
+    window = max(3, int(round(AMPLITUDE_WINDOW_M / distance_step)) | 1)
+    smooth = pd.Series(np.asarray(profile, dtype=float)).rolling(window, center=True, min_periods=1).median()
+    return float(np.nanmax(smooth) - np.nanmin(smooth))
 
 
 def _intra_profile_noise(y: np.ndarray) -> float:
@@ -3164,7 +3177,7 @@ TOUR_STEPS = [                   # (icon, title, where it happens)
     (":material/fact_check:", "Check the summary",
      "A card under each file gives its lines, frequencies and the tools it supports."),
     (":material/leaderboard:", "Rank frequencies",
-     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by signal-to-noise."),
+     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by contrast-to-noise."),
     (":material/map:", "Map",
      "Switch on **Area map** or **Pseudo-section** (sidebar → 2D contouring)."),
     (":material/download:", "Export",

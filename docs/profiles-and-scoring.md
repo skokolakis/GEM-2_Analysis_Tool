@@ -29,14 +29,14 @@ Each trace is used only inside its own measured distance range — grid points o
 
 $$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
 
-- **A (amplitude)** = max − min of the representative (mean) profile, taken where at least two passes overlap (single-pass files: the whole profile). It is the total geophysical contrast resolved at that frequency.
+- **A (amplitude)** = max − min of the representative (mean) profile after a running median over 1 m (at least 3 grid points), taken where at least two passes overlap (single-pass files: the whole profile). It is the total geophysical contrast resolved at that frequency. The plain max − min is an extreme-value statistic — one spike sets it, and noise pushes it up most at the noisiest frequencies, partly cancelling the penalty in σ. Real anomalies are wider than the GEM-2's footprint (coils 1.66 m apart), so the 1 m median keeps them; it trims the very top of a peak by about the change over one grid step (≈ 10 % for an anomaly 3 m wide at a 0.5 m step), the same at every frequency, so the ranking is unchanged.
 - **σ_noise** depends on the number of passes:
   - **Multi-trace (≥ 2 passes)** — sample standard deviation across passes (ddof = 1) at each distance step where ≥ 2 passes were measured, pooled as √(mean variance). It captures instrument noise, positioning uncertainty and short-term drift.
   - **Single-trace fallback** — estimated from the *measured* samples (not the interpolated grid) by second differences, which cancel a locally linear trend: for white noise var(Δ²y) = 6σ², so σ ≈ 1.4826 · MAD(Δ²y) / √6. The median absolute deviation ignores the few large differences at sharp boundaries, and the estimate does not depend on the distance step or interpolation method.
   - **Lines at different positions** — the passes are grouped into transects by their position across the line direction (lines less than 1 m apart are one transect). The between-pass σ is pooled only over transects walked at least twice, and A is the median range of their mean profiles. When every transect was walked once (an area survey), σ is the single-trace estimate pooled over the lines as √(mean σ²) and A is the median range of the lines. Lines over different ground differ by the geology, not by noise, so they are never compared with each other. Files without coordinates are taken as repeat passes of one transect.
   - **Zero or undefined noise** (σ < 10⁻⁸ or not estimable) — the score is left blank and ranked last, with a warning.
 
-**Higher score = cleaner, larger-contrast signal** → better for detailed profiling. This is the signal-to-noise ratio, the standard geophysical criterion for data quality (Sheriff & Geldart, 1995; Bakulin et al., 2022).
+**Higher score = cleaner, larger-contrast signal** → better for detailed profiling. The score is a **contrast-to-noise ratio** (range of the signal over the noise σ), related to but not the same as the RMS signal-to-noise ratio used in seismic data quality (Sheriff & Geldart, 1995; Bakulin et al., 2022).
 
 The ranking table and exports show the **noise method** and number of **traces** behind each score. When some frequencies in a file fall back to the single-trace estimate, a warning says their scores are not strictly comparable with the others.
 
