@@ -66,16 +66,13 @@ To reproduce a Surfer image map: Rainbow (Surfer), continuous image, full data r
 
 ### Map processing
 
-Expander **Map processing (filters, footprint deconvolution)** under each map, applied to the gridded values:
+Expander **Map processing (filters)** under each map, applied to the gridded values:
 
 | Option | What it does |
 |---|---|
 | Despike | Replaces cells that differ from their window median by more than *threshold* × 1.4826 × the median absolute difference |
 | Low-pass | Moving average over *window* × *window* cells (blank cells neither spread nor bias it) |
 | High-pass | Removes the regional trend: the value minus its *window* × *window* moving average |
-| Deconvolve the sensor footprint | Lateral Tikhonov deconvolution of the coils' low-induction-number footprint (receiver minus bucking coil, sensor height from *Sensor geometry*; the coil axis defaults to the survey-line direction). Sharpens apparent-conductivity maps. It does not resolve depth: the 3D multichannel deconvolution of Guillemoteau et al. (2017) needs several coil geometries, while a GEM-2 has one geometry at several frequencies, and at low induction number the frequencies share the same footprint |
-
-The footprint kernel is the dot product of the transmitter's and receiver's quasi-static electric fields (Born approximation). The tests check that its depth profile matches McNeill's (1980) HCP depth response.
 
 **Histogram & statistics** — count, mean, standard deviation, minimum, 2nd / 50th / 98th percentile and maximum of the gridded values, with a histogram.
 

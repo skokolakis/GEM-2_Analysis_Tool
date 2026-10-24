@@ -16,7 +16,7 @@ The Streamlit entry point is [`RIs_v2.py`](../RIs_v2.py) (the file name predates
 | [`interpret.py`](../interpret.py) | Redundancy-aware frequency selection, magnetic viscosity, anomaly spectra |
 | [`soiltools.py`](../soiltools.py) | Sampling design, soil-property calibration, fuzzy c-means management zones |
 | [`contouring.py`](../contouring.py) | Area maps (all gridding methods, cross-validation, colour styles), pseudo-sections, unit labels |
-| [`gridtools.py`](../gridtools.py) | Grid filters, statistics, survey merging, footprint deconvolution, UTM, GeoTIFF, `.prj` |
+| [`gridtools.py`](../gridtools.py) | Grid filters, statistics, survey merging, UTM, GeoTIFF, `.prj` |
 | [`ui_tools.py`](../ui_tools.py) | Streamlit panels for the physics, inversion, interpretation and soil tools |
 | [`RIs_v2.py`](../RIs_v2.py) | The app: sidebar, file handling, profiles, scoring, plots, exports, map rendering |
 
@@ -65,7 +65,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-[`tests/`](../tests/) has one file per module (`test_gem_io.py`, `test_corrections.py`, `test_emphysics.py`, …) and `test_app_*.py` files that drive the app headlessly with `streamlit.testing.v1.AppTest`. The physics tests check the forward model against a brute-force integral, the LIN limit and the static susceptible half-space, and the footprint kernel against McNeill's HCP depth response.
+[`tests/`](../tests/) has one file per module (`test_gem_io.py`, `test_corrections.py`, `test_emphysics.py`, …) and `test_app_*.py` files that drive the app headlessly with `streamlit.testing.v1.AppTest`. The physics tests check the forward model against a brute-force integral, the LIN limit and the static susceptible half-space, and the analytic gradient against finite differences.
 
 ## Sample data
 

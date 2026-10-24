@@ -160,10 +160,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "clip_range": (
         "Values below the lower or above the upper percentile of the whole survey are blanked."
     ),
-    "coil_axis": (
-        "Direction of the coil axis (the walking direction) on the map; the footprint is "
-        "longer along it."
-    ),
     "colour_lines": (
         "Draws black contour lines at the colour boundaries on top of the map."
     ),
@@ -188,9 +184,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "combined": (
         "Merged: one map from several surveys, each levelled to the others where they "
         "overlap. Difference: the change between two surveys of the same area (B − A)."
-    ),
-    "deconv_reg": (
-        "Damping of the deconvolution: smaller values sharpen more but amplify noise."
     ),
     "despike": (
         "Blanks single readings that jump away from their neighbours (metal, knocks) by more "
@@ -553,7 +546,7 @@ grid, so the two give nearly the same profiles and scores.
 | **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
 | **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured noise (between passes, or within the line); EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
 | **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
-| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and six gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, linear and inverse distance — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
+| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and six gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, linear and inverse distance — cross-validation, map filters and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011) |
 | **Soil tools** | Response-surface sampling design, soil-property calibration on ln(EC), fuzzy c-means management zones | Lesch (2005); Lesch et al. (1995); Bezdek (1981); Fridgen et al. (2004); Boydell & McBratney (2002) |
 
 Methods in full: [documentation]({DOCS_URL}/README.md).
@@ -2110,7 +2103,7 @@ def render_sensor_sidebar() -> tuple[emphysics.Sensor, bool, tuple[float, float]
     """Coil geometry and height for the physics tools; EC/MS recomputation; viscosity pair."""
     with st.expander("Sensor geometry", expanded=False):
         st.caption("Used by: forward model, frequency information, multi-height calibration, "
-                   "layered-earth inversion, footprint deconvolution and the EC / MS "
+                   "layered-earth inversion and the EC / MS "
                    "recomputation below.")
         height = st.number_input("Sensor height (m)", 0.0, 50.0, 1.0, step=0.05, key=wkey("sen_h"),
                                  help=SCIENCE_HELP["height"])
@@ -2519,13 +2512,7 @@ def _render_area_map(
                 file_bytes, file_name, gem_value_column(mode, freq), prep,
                 **grid_params(contour),
             )
-        try:
-            axis = gridtools.line_axis_angle(prepared_table(file_bytes, file_name, prep)[0])
-        except ValueError:
-            axis = 0.0
-        result, processing = _map_processing(
-            result, file_key, (prep or pipeline.PrepSettings()).sensor, axis
-        )
+        result, processing = _map_processing(result, file_key)
         fig = ctr.make_area_map_figure(
             result, label, f"{freq} [{mode}] — {ctr.method_title(result)}",
             contour.n_levels, show_points=contour.show_points, style=contour.colours,
@@ -2601,13 +2588,11 @@ def cv_groups(
     return np.array([tracks.get(line, f"line {line}") for line in result.bline], dtype=object)
 
 
-def _map_processing(
-    result: ctr.AreaMapResult, key: str, sensor: emphysics.Sensor, axis_angle: float
-) -> tuple[ctr.AreaMapResult, list[str]]:
-    """Optional footprint deconvolution and grid filter, chosen in an expander (advanced settings)."""
+def _map_processing(result: ctr.AreaMapResult, key: str) -> tuple[ctr.AreaMapResult, list[str]]:
+    """Optional grid filter, chosen in an expander (advanced settings)."""
     if not show_advanced():
         return result, []
-    with st.expander("Map processing (filters, footprint deconvolution)", expanded=False):
+    with st.expander("Map processing (filters)", expanded=False):
         kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}",
                             help=SCIENCE_HELP["map_filter"])
         size = st.slider("Window (cells)", 3, 51, 15 if kind == "high-pass" else 3, step=2,
@@ -2616,26 +2601,9 @@ def _map_processing(
         if kind == "despike":
             threshold = st.number_input("Despike threshold (× robust σ)", 1.0, 20.0, 4.0,
                                         key=f"mp_thr_{key}", help=SCIENCE_HELP["map_despike"])
-        deconv = st.checkbox(
-            "Deconvolve the sensor footprint", key=f"mp_dec_{key}",
-            help="Lateral Tikhonov deconvolution of the low-induction-number footprint of the "
-                 "coils (Rx minus bucking coil, sensor height from the sidebar). Sharpens "
-                 "apparent-conductivity maps; it does not resolve depth (cf. Guillemoteau et "
-                 "al., 2017, for multi-coil sensors).",
-        )
-        reg, angle = 1e-2, axis_angle
-        if deconv:
-            reg = st.select_slider("Regularisation", [1e-4, 1e-3, 1e-2, 1e-1, 1.0], value=1e-2,
-                                   key=f"mp_reg_{key}", help=SCIENCE_HELP["deconv_reg"])
-            angle = st.number_input("Coil axis (° from map x axis)", 0.0, 180.0,
-                                    float(round(axis_angle, 1)), key=f"mp_ang_{key}",
-                                    help=SCIENCE_HELP["coil_axis"])
-    if kind == "none" and not deconv:
+    if kind == "none":
         return result, []
-    z, msgs = gridtools.process_map(
-        result.z, result.spec.cell, kind, int(size), float(threshold), deconv, float(reg),
-        float(angle), sensor,
-    )
+    z, msgs = gridtools.process_map(result.z, kind, int(size), float(threshold))
     return replace(result, z=z), msgs
 
 

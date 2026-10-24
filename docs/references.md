@@ -22,7 +22,6 @@ Works cited in the app and in these pages, alphabetical by first author.
 - Geophex Ltd. (2004). *GEM-2 Manual*, version 3.8. Raleigh, NC.
 - Golden Software (n.d.). *Surfer User's Guide*: Gridding methods. Golden, CO.
 - González Jiménez, A. et al. (2022). Correcting on-the-go field measurement–coordinate mismatch by minimizing nearest neighbor difference. *Sensors*, **22**(4), 1496. https://doi.org/10.3390/s22041496
-- Guillemoteau, J., Christensen, N.B., Jacobsen, B.H. & Tronicke, J. (2017). Fast 3D multichannel deconvolution of electromagnetic induction loop-loop apparent conductivity data sets acquired at low induction numbers. *Geophysics*, **82**(6), E357–E369. https://doi.org/10.1190/geo2016-0518.1
 - Huang, H. & Won, I.J. (2000). Conductivity and susceptibility mapping using broadband electromagnetic sensors. *Journal of Environmental and Engineering Geophysics*, **5**(4), 31–41. https://doi.org/10.4133/JEEG5.4.31
 - Huang, H. & Won, I.J. (2003). Characterization of UXO-like targets using broadband electromagnetic induction sensors. *IEEE Transactions on Geoscience and Remote Sensing*, **41**(3), 652–663. https://doi.org/10.1109/TGRS.2003.809936
 - Huang, H. (2005). Depth of investigation for small broadband electromagnetic sensors. *Geophysics*, **70**(6), G135–G142. https://doi.org/10.1190/1.2122412
