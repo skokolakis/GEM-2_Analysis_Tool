@@ -374,6 +374,14 @@ def block_median(
     return agg["x"].to_numpy(), agg["y"].to_numpy(), agg["v"].to_numpy()
 
 
+def block_lines(x: np.ndarray, y: np.ndarray, lines: np.ndarray, spec: GridSpec) -> np.ndarray:
+    """Line of each block_median point (its first reading's), in the same order."""
+    ix = np.floor((np.asarray(x) - spec.x0) / spec.cell).astype(np.int64)
+    iy = np.floor((np.asarray(y) - spec.y0) / spec.cell).astype(np.int64)
+    df = pd.DataFrame({"ix": ix, "iy": iy, "line": np.asarray(lines)})
+    return df.groupby(["iy", "ix"], sort=True)["line"].first().to_numpy()
+
+
 # ---------------------------------------------------------------------------
 # Variogram
 # ---------------------------------------------------------------------------
@@ -1093,6 +1101,7 @@ class AreaMapResult:
     n_raw: int
     epsg: int | None = None             # CRS of x / y when known (UTM or user-given)
     options: dict = field(default_factory=dict)   # the method's settings (method_options)
+    bline: np.ndarray | None = None     # line of each block point (block_lines), None if unknown
 
 
 def method_title(result: AreaMapResult) -> str:
@@ -1221,6 +1230,7 @@ def compute_area_map(
         variogram=variogram, blank_distance=dist, origin=origin,
         levelled=levelled, n_raw=int(keep.sum()), epsg=epsg,
         options=method_options(method, options),
+        bline=None if lines is None else block_lines(x, y, lines, spec),
     )
 
 
@@ -1269,13 +1279,21 @@ def cross_validate(
     seed: int = 0,
     options: dict | None = None,
     spec: GridSpec | None = None,
-) -> dict[str, float]:
+    groups: np.ndarray | None = None,
+) -> dict:
     """
-    k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted points).
+    k-fold CV on the block-reduced points. Returns rmse, mae, n (predicted
+    points) and folds ("groups" or "random").
 
-    For kriging the variogram is held fixed across folds (pass the fit used
-    for the map). GRID_METHODS grid each training fold on *spec* (default:
-    automatic cell size) and are read at the held-out points bilinearly.
+    With *groups* (e.g. the survey line of each point, or its transect) and
+    at least k of them, whole groups are held out together, so each held-out
+    reading is estimated from other lines, as the map estimates the gaps
+    between lines. Random folds leave a neighbour a fraction of a metre away
+    on the same line in the training set, which makes any exact interpolator
+    look good. For kriging the variogram is held fixed across folds (pass
+    the fit used for the map). GRID_METHODS grid each training fold on *spec*
+    (default: automatic cell size) and are read at the held-out points
+    bilinearly.
     """
     if method == "metrics":
         raise ContouringError(
@@ -1285,7 +1303,14 @@ def cross_validate(
     px, py, pv = (np.asarray(a, dtype=float) for a in (px, py, pv))
     if method in GRID_METHODS and spec is None:
         spec = make_grid(px, py, auto_cell_size(px, py))
-    folds = np.random.default_rng(seed).permutation(len(pv)) % k
+    rng = np.random.default_rng(seed)
+    labels = None if groups is None else pd.factorize(pd.Series(np.asarray(groups, dtype=object)))[0]
+    if labels is not None and len(labels) == len(pv) and labels.max() + 1 >= k:
+        folds = (rng.permutation(labels.max() + 1) % k)[labels]
+        kind = "groups"
+    else:
+        folds = rng.permutation(len(pv)) % k
+        kind = "random"
     errors = []
     for f in range(k):
         test = folds == f
@@ -1311,6 +1336,7 @@ def cross_validate(
         "rmse": float(np.sqrt(np.mean(err ** 2))),
         "mae": float(np.mean(np.abs(err))),
         "n": int(err.size),
+        "folds": kind,
     }
 
 

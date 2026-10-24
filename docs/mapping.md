@@ -29,7 +29,7 @@ For GEM files covering an area (several lines with X/Y or Lat/Lon coordinates), 
 3. **Block-median reduction** — one median point per grid cell, so densely sampled lines do not dominate. Default cell size = √(bounding-box area / number of readings), about one node per reading.
 4. **Gridding** — see the [table below](#gridding-methods).
 5. **Blanking** — grid nodes farther than the blanking distance from any block median are left blank. The default keeps the gaps between survey lines filled: the larger of 2 × median point spacing and 1.5 × the 90th-percentile distance from grid nodes inside the survey to the nearest data point.
-6. **Cross-validation** (button **Cross-validate (5-fold)**) — RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Folds are random, so along densely sampled lines the errors are optimistic; use them to rank methods rather than as absolute accuracy.
+6. **Cross-validation** (button **Cross-validate (5-fold)**) — RMSE / MAE on the block medians, to compare methods on your data (Li & Heap, 2011). Whole transects are held out together (repeat passes of one transect count as one), so each held-out reading is estimated from the neighbouring lines — the gaps between lines are where gridding methods differ. Without line labels, or with fewer than five transects, the folds are random; along densely sampled lines those errors are optimistic and favour exact interpolators. On the sample survey (EC 5325 Hz) random folds rank linear interpolation first (RMSE 2.6 mS/m), while holding out lines ranks kriging first (5.7 mS/m, against 6.6 for linear).
 
 ### Gridding methods
 

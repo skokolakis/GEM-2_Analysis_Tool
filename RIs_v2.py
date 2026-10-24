@@ -2724,19 +2724,39 @@ def _render_area_map(
                     result.bx, result.by, result.bv, result.method,
                     contour.smoothing, result.variogram,
                     options=result.options, spec=result.spec,
+                    groups=cv_groups(result, file_bytes, file_name, prep),
                 )
             except ctr.ContouringError as exc:
                 st.error(str(exc))
             else:
+                folds = ("whole transects held out, so each is estimated from its neighbours"
+                         if cv["folds"] == "groups" else
+                         "random folds, optimistic for densely sampled lines")
                 st.write(
                     f"RMSE **{cv['rmse']:.4g}**, MAE **{cv['mae']:.4g}** "
-                    f"({label}, {cv['n']:,} held-out points; random folds, "
-                    "optimistic for densely sampled lines)"
+                    f"({label}, {cv['n']:,} held-out points; {folds})"
                 )
 
     _render_map_statistics(result, label, file_key)
     stem = Path(file_name).stem
     _render_map_downloads(result, png, f"{stem}_{mode}_{freq}_{result.method}", file_key)
+
+
+def cv_groups(
+    result: ctr.AreaMapResult, file_bytes: bytes, file_name: str, prep: pipeline.PrepSettings | None
+) -> np.ndarray | None:
+    """
+    Transect of each block point for cross-validation: its line, with repeat
+    passes of one transect (gem_io.track_groups) merged so a held-out line
+    is not estimated from its own repeat pass. None when lines are unknown.
+    """
+    if result.bline is None:
+        return None
+    try:
+        tracks = gem_io.track_groups(prepared_table(file_bytes, file_name, prep)[0]) or {}
+    except (ValueError, KeyError):
+        tracks = {}
+    return np.array([tracks.get(line, f"line {line}") for line in result.bline], dtype=object)
 
 
 def _map_processing(

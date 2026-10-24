@@ -371,7 +371,22 @@ def test_compute_area_map_transect_raises():
 def test_cross_validate_returns_finite_metrics(method):
     res = C.compute_area_map(line_survey(), VALUE_COL, method=method, cell_size=1.0)
     cv = C.cross_validate(res.bx, res.by, res.bv, method, variogram=res.variogram)
-    assert cv["n"] > 0 and 0 <= cv["mae"] <= cv["rmse"] < 1.0
+    assert cv["n"] > 0 and 0 <= cv["mae"] <= cv["rmse"] < 1.0 and cv["folds"] == "random"
+
+
+def test_cross_validate_holds_out_whole_lines():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="linear", cell_size=1.0)
+    assert res.bline is not None and len(res.bline) == len(res.bv)
+    random = C.cross_validate(res.bx, res.by, res.bv, "linear")
+    by_line = C.cross_validate(res.bx, res.by, res.bv, "linear", groups=res.bline)
+    assert by_line["folds"] == "groups"
+    assert by_line["rmse"] > random["rmse"]      # gaps between lines are harder than along them
+
+
+def test_cross_validate_falls_back_to_random_folds_with_few_groups():
+    res = C.compute_area_map(line_survey(), VALUE_COL, method="linear", cell_size=1.0)
+    cv = C.cross_validate(res.bx, res.by, res.bv, "linear", groups=np.zeros(len(res.bv)))
+    assert cv["folds"] == "random"
 
 
 # ---------------------------------------------------------------------------
