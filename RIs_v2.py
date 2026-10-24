@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit.errors import StreamlitAPIException
 from scipy.interpolate import PchipInterpolator
 
 import contouring as ctr
@@ -2786,10 +2785,10 @@ def render_gem_results(
 
 def soil_page_link() -> None:
     """Link to the soil-tools page (a caption where the app runs without its pages, e.g. in tests)."""
-    try:
+    if st.session_state.get(PAGES_KEY):
         st.page_link(SOIL_PAGE, label="Soil tools: sampling design, soil-property calibration, "
                      "management zones", icon=":material/grass:")
-    except StreamlitAPIException:
+    else:
         st.caption("Soil tools (sampling design, calibration, management zones) are on their own "
                    "page, in the navigation at the top of the sidebar.")
 
@@ -2804,6 +2803,7 @@ SOIL_PAGE = "pages/soil_tools.py"
 UPLOADER_KEY = "uploader"
 UPLOADS_KEY = "kept_uploads"       # the uploaded files, kept while another page is shown
 SURVEYS_KEY = "surveys"            # {name: (bytes, name, prep)} of the GEM files on the analysis page
+PAGES_KEY = "pages"                # set when the app runs with its page navigation
 
 
 @dataclass(frozen=True)
@@ -3077,6 +3077,7 @@ def run_app() -> None:
     """Entry point: the survey-analysis page and the soil-tools page."""
     st.set_page_config(page_title="GEM-2 Analysis Tool", page_icon=None, layout="wide")
     keep_settings(st.session_state)
+    st.session_state[PAGES_KEY] = True
     st.navigation([
         st.Page(main, title="Survey analysis", icon=":material/insights:", default=True),
         st.Page(SOIL_PAGE, title="Soil tools", icon=":material/grass:"),
