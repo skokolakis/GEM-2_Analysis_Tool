@@ -521,6 +521,12 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
   sample formula applies (with two passes the population formula would
   understate σ by √½ ≈ 0.71). Each pass is used only inside its own
   measured range — nothing is extrapolated.
+- **Lines at different positions** (an area survey): lines are grouped
+  into transects by their position across the line direction (less
+  than 1 m apart = one transect). σ and A are taken only within each
+  transect walked at least twice — or within each line when every
+  transect was walked once — since lines over different ground differ
+  by the geology, not by noise.
 - **1 pass (fallback):** from the *measured* samples, not the
   interpolated grid. Second differences Δ²y cancel a locally linear
   trend; for white noise var(Δ²y) = 6σ², so
@@ -587,7 +593,7 @@ in one step for direct comparison.
 |---|---|---|
 | **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration (ERT / TDR), EC at 25 °C, PCA noise reduction, running mean, heading filter | Vilhelmsen & Døssing (2022); Minsley et al. (2010); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
 | **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
-| **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured between-pass noise; EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
+| **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured noise (between passes, or within the line); EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
 | **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
 | **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and Surfer's gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, modified Shepard's method and more — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Franke & Nielson (1980); Renka (1988); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
 | **Soil tools** | Response-surface sampling design, soil-property calibration on ln(EC), fuzzy c-means management zones | Lesch (2005); Lesch et al. (1995); Bezdek (1981); Fridgen et al. (2004); Boydell & McBratney (2002) |
