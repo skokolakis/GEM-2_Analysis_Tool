@@ -10,7 +10,7 @@ The Streamlit entry point is [`RIs_v2.py`](../RIs_v2.py) (the file name predates
 |---|---|
 | [`gem_io.py`](../gem_io.py) | GEM-2 export channels, `.gbf`-converted column names, Status flags, event markers, line detection, distance along line |
 | [`pipeline.py`](../pipeline.py) | `PrepSettings` and `prepare_gem_table()`: the raw table before profiles and maps (flags, corrections, EC / MS from I / Q, distance) |
-| [`corrections.py`](../corrections.py) | Despike, clip, height, drift, temperature, calibration, EC25, PCA, GPS lag, heading |
+| [`corrections.py`](../corrections.py) | Despike, clip, height, drift, temperature, calibration, EC25, GPS lag |
 | [`emphysics.py`](../emphysics.py) | Layered-earth forward model, I/Q ↔ EC/MS conversion, skin depth, sensitivity, multi-height fit |
 | [`inversion.py`](../inversion.py) | Smooth 1D / laterally constrained inversion, stations, EMagPy export |
 | [`interpret.py`](../interpret.py) | Redundancy-aware frequency selection, magnetic viscosity, anomaly spectra |

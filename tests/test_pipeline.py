@@ -116,11 +116,11 @@ def test_ec_corrections_survive_recompute():
     import corrections
 
     prep = P.PrepSettings(recompute_from_iq=True,
-                          corrections=corrections.CorrectionSettings(ec_background=50.0))
+                          corrections=corrections.CorrectionSettings(soil_temperature=10.0))
     out, msgs = P.prepare_gem_table(_iq_table(), prep)
-    np.testing.assert_allclose(out["EC1525Hz[mS/m]"], 50.0, rtol=1e-6)
-    first = [m.split()[0] for m in msgs]
-    assert first.index("EC") < first.index("Shifted")
+    np.testing.assert_allclose(out["EC1525Hz[mS/m]"], corrections.ec_at_25(30.0, 10.0), rtol=1e-4)
+    recomputed = next(i for i, m in enumerate(msgs) if m.startswith("EC and MS recomputed"))
+    assert recomputed < next(i for i, m in enumerate(msgs) if m.startswith("EC converted to 25"))
 
 
 def test_recompute_compares_with_exported_ec_and_blanks_ms_at_ground_level():

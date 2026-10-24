@@ -110,8 +110,8 @@ SCORING_HELP = (
     "profiles, maps and exports are produced without scores."
 )
 SMOOTHING_SCORE_WARNING = (
-    "Despiking, smoothing or PCA noise reduction lower the noise σ, so scores "
-    "rise. Compare scores only between runs with the same filters."
+    "Despiking lowers the noise σ, so scores rise. Compare scores only between runs with "
+    "the same filters."
 )
 DISTANCE_HELP = (
     "How the distance of each reading along its line is found. "
@@ -139,10 +139,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "area_map": (
         "Grids the readings over the survey area from their coordinates and draws a contour "
         "map of one channel, on the EC, MS and AUX tabs."
-    ),
-    "background": (
-        "Shifts each EC channel so its median equals this value, e.g. from a reference "
-        "measurement. Removes a constant calibration offset."
     ),
     "bucking": (
         "Distance from the transmitter to the bucking coil, which cancels the primary field "
@@ -225,16 +221,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "leaves bull's-eyes around readings. Natural neighbour: weights from the area each "
         "reading would give up; smooth and never beyond the data range."
     ),
-    "heading": (
-        "Keeps only readings walked within a range of headings, e.g. to check for heading "
-        "error on lines walked back and forth."
-    ),
-    "heading_dir": (
-        "Walking direction to keep, clockwise from north (or from the +Y axis)."
-    ),
-    "heading_tol": (
-        "Readings within this many degrees of the heading are kept."
-    ),
     "height": (
         "Height of the coils above the ground. The response weakens with height and comes "
         "from deeper on average. Used by the physics tools, the EC / MS recompute and the "
@@ -293,10 +279,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "separation": (
         "Distance from the transmitter to the receiver coil (1.66 m on the GEM-2). Wider "
         "separation sees deeper."
-    ),
-    "smooth": (
-        "Centred moving average along each line. Lowers noise but blurs small anomalies (and "
-        "raises the scores)."
     ),
     "spacing": (
         "Reading number: distance walked between two readings. Markers: distance between two "
@@ -498,9 +480,8 @@ signal-to-noise ratio of seismic practice (RMS signal over RMS noise;
 Sheriff & Geldart, 1995; Bakulin et al., 2022): it rewards the largest
 contrast a frequency resolves.
 
-> **Filters change scores.** Despiking, the running mean and PCA all
-> lower σ and so raise the score. Compare scores only between runs with
-> the same settings.
+> **Filters change scores.** Despiking lowers σ and so raises the
+> score. Compare scores only between runs with the same settings.
 
 **Frequency selection** under the ranking keeps up to three
 high-scoring frequencies whose mean profiles are not strongly
@@ -514,7 +495,7 @@ correlated, since correlated frequencies carry the same information
 | Step | What happens |
 |---|---|
 | **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions); anything else is read as a legacy one-sheet-per-frequency workbook. Readings with a non-zero `Status` are dropped (optional). |
-| **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration, EC at 25 °C, PCA, running mean, heading filter. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
+| **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, reference calibration, EC at 25 °C. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
 | **3. Locate** | The distance of each reading along its line is found (sidebar **Distance along line**); each channel becomes a distance × line matrix. |
 | **4. Interpolate** | Every pass is resampled onto a common distance grid (**Distance step**) inside its own measured range. At a repeated distance within a pass only the first reading is kept. |
 | **5. Score** (optional) | With **Frequency scoring** on, the mean profile, σ and score of each frequency; frequencies ranked by descending score. |
@@ -542,7 +523,7 @@ grid, so the two give nearly the same profiles and scores.
 
 | Area | What it does | Key references |
 |---|---|---|
-| **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, background EC, reference calibration (ERT / TDR), EC at 25 °C, PCA noise reduction, running mean, heading filter | Vilhelmsen & Døssing (2022); Minsley et al. (2010); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
+| **Corrections & filters** | Despiking, percentile clipping, sensor-height correction, temperature and base-station drift, calibration offsets, GPS lag, reference calibration (ERT / TDR), EC at 25 °C | Vilhelmsen & Døssing (2022); González Jiménez et al. (2022); Lavoué et al. (2010); Mester et al. (2011); Dragonetti et al. (2018); Sheets & Hendrickx (1995); Corwin & Lesch (2005) |
 | **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
 | **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured noise (between passes, or within the line); EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
 | **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
@@ -1846,7 +1827,7 @@ def compute_area_map_cached(
 
 ADVANCED_KEY = "advanced"
 ADVANCED_HELP = (
-    "Shows every setting. Basic mode keeps the expert ones (coil geometry, PCA, calibration "
+    "Shows every setting. Basic mode keeps the expert ones (coil geometry, calibration "
     "files, variogram, projection, colour scaling, map filters …) at their defaults, so a hidden "
     "setting never changes the results."
 )
@@ -2157,11 +2138,10 @@ def _parse_labels(text: str) -> tuple[str, ...]:
 def render_corrections_sidebar() -> corrections.CorrectionSettings:
     """Corrections & filters applied to GEM tables before profiles and maps."""
     adv = show_advanced()
-    window, threshold, pca = 5, 4.0, 0
+    window, threshold = 5, 4.0
     drift_model, temp_col, alt_col, alt_ref = "piecewise", "", "", None
     offsets_file = ref_file = None
-    background, soil_t, ref_radius, ref_method = 0.0, 0.0, 2.0, "regression"
-    bearing_center, bearing_tol = None, 30.0
+    soil_t, ref_radius, ref_method = 0.0, 2.0, "regression"
     with st.expander("Corrections & filters", expanded=False):
         st.caption(PREP_APPLIES_TO + " Multi-height calibration uses the readings as recorded.")
         st.markdown("**Filters**")
@@ -2177,12 +2157,6 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
             lo, hi = st.slider("Keep percentiles", 0.0, 100.0, (1.0, 99.0), step=0.5, key=wkey("cor_crange"),
                                help=SCIENCE_HELP["clip_range"])
             clip_range = (float(lo), float(hi))
-        smooth = st.slider("Running mean (readings, 0 = off)", 0, 21, 0, key=wkey("cor_smooth"),
-                           help=SCIENCE_HELP["smooth"])
-        if adv:
-            pca = st.number_input("PCA components kept per mode (0 = off)", 0, 10, 0, key=wkey("cor_pca"),
-                                  help="Minsley et al. (2010): channels of a mode are strongly "
-                                       "correlated, trailing components are mostly noise.")
 
         st.markdown("**Drift and environment**")
         drift_text = st.text_input("Base-station lines (comma-separated Line labels)",
@@ -2211,8 +2185,6 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
                      "Produced by 'Multi-height calibration' under a file. I / Q offsets reach "
                      "EC / MS only with 'Recompute EC / MS from I / Q' (Sensor geometry).",
             )
-            background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
-                                         key=wkey("cor_bg"), help=SCIENCE_HELP["background"])
             ref_file = st.file_uploader("Reference values (.csv)", type=["csv"], key=wkey("cor_ref"),
                                         help="Same coordinate columns as the survey (X/Y or "
                                              "Lat/Lon) plus one column per channel to calibrate, "
@@ -2229,11 +2201,6 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
         lag = st.number_input("GPS lag (s)", -5.0, 5.0, 0.0, step=0.1, key=wkey("cor_lag"),
                               help="Positive: readings were logged after the position. Use "
                                    "'Estimate GPS lag' under a file to find it.")
-        if adv and st.checkbox("Keep one walking direction", key=wkey("cor_head"), help=SCIENCE_HELP["heading"]):
-            bearing_center = float(st.number_input("Heading (° from north)", 0.0, 359.0, 0.0,
-                                                    key=wkey("cor_hdir"), help=SCIENCE_HELP["heading_dir"]))
-            bearing_tol = float(st.number_input("± tolerance (°)", 1.0, 90.0, 30.0, key=wkey("cor_htol"),
-                                                help=SCIENCE_HELP["heading_tol"]))
         if not adv:
             st.caption(ADVANCED_HINT)
 
@@ -2244,13 +2211,10 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
         temperature_column=temp_col,
         drift_lines=_parse_labels(drift_text), drift_model=drift_model,
         iq_offsets=offsets_file.getvalue() if offsets_file is not None else None,
-        ec_background=float(background) or None,
         reference=ref_file.getvalue() if ref_file is not None else None,
         reference_radius=float(ref_radius), reference_method=ref_method,
         soil_temperature=float(soil_t) or None,
-        pca_components=int(pca), smooth_window=int(smooth),
         lag_seconds=float(lag),
-        bearing_center=bearing_center, bearing_tolerance=bearing_tol,
     )
 
 
@@ -2260,7 +2224,7 @@ def render_lag_estimate(
     """Expander that estimates the GPS time lag from crossings of neighbouring lines."""
     with st.expander("Estimate GPS lag", expanded=False):
         no_lag = replace(prep, recompute_from_iq=False,
-                         corrections=replace(prep.corrections, lag_seconds=0.0, bearing_center=None))
+                         corrections=replace(prep.corrections, lag_seconds=0.0))
         try:
             table, _ = prepared_table(file_bytes, file_name, no_lag)
         except ValueError as exc:

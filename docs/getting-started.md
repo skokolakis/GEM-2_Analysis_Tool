@@ -43,7 +43,7 @@ The empty page shows these steps in short (**How it works**).
 
 ### Basic and advanced settings
 
-The sidebar starts in basic mode: the settings most surveys need. **Show advanced settings** at its top adds the expert ones — coil spacings, EC / MS recomputation and magnetic viscosity, despike window and threshold, PCA, drift model, temperature and sensor-height columns, calibration files, background EC, EC at 25 °C, the heading filter, the gridding method's own settings, blanking, projection and EPSG code, colour scale and display, contour lines, and the map filters under each area map. A hidden setting is always at its default, so switching back to basic mode puts any advanced setting you changed back to its default.
+The sidebar starts in basic mode: the settings most surveys need. **Show advanced settings** at its top adds the expert ones — coil spacings, EC / MS recomputation and magnetic viscosity, despike window and threshold, drift model, temperature and sensor-height columns, calibration files, EC at 25 °C, the gridding method's own settings, blanking, projection and EPSG code, colour scale and display, contour lines, and the map filters under each area map. A hidden setting is always at its default, so switching back to basic mode puts any advanced setting you changed back to its default.
 
 Under the toggle, a line names every setting that differs from its default and changes the results (distance step, interpolation, data preparation, sensor geometry, corrections and filters); the same list is shown above the results. **Reset all settings** puts every sidebar setting back to its default and clears loaded calibration files; uploaded data files are kept.
 

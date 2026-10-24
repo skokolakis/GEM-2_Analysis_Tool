@@ -42,7 +42,7 @@ The ranking table and exports show the **noise method** and number of **traces**
 
 > **Why sample std (ddof = 1)?** The passes are a finite sample of the measurement process whose noise is being estimated, so the sample formula applies. With two passes the population formula (ddof = 0) would understate σ by a factor of √½ ≈ 0.71.
 
-> **Filters change scores.** Despiking, the running mean, PCA and the polynomial trend fit all lower σ and so raise the score. Compare scores only between runs with the same settings.
+> **Filters change scores.** Despiking lowers σ and so raises the score. Compare scores only between runs with the same settings.
 
 To go from scores to a short list of non-redundant frequencies, see [Frequency selection](interpretation.md#frequency-selection).
 

@@ -46,10 +46,9 @@ def test_despike_handles_integer_rounded_data():
     assert n == 1 and np.isnan(out[30])
 
 
-def test_clip_and_running_mean():
+def test_clip_to_percentiles():
     v, n = C.clip_to_percentiles(np.arange(100.0), 5, 95)
     assert n == 10 and np.isnan(v[0]) and v[50] == 50
-    np.testing.assert_allclose(C.running_mean(np.array([0, 3, 6.0]), 3), [1.5, 3, 4.5])
 
 
 def test_ec_at_25_is_identity_at_25_and_lowers_warm_soil():
@@ -176,17 +175,6 @@ def test_reference_calibration_skips_constant_channels():
     assert C.fit_reference_calibration(df, pts, radius=0.3) == []
 
 
-# ── PCA ──────────────────────────────────────────────────────────────────────
-
-def test_pca_denoise_reduces_independent_noise():
-    rng = np.random.default_rng(2)
-    signal = rng.normal(0, 1, (500, 1)) * np.array([[1.0, 0.9, 0.8, 0.7]])
-    noisy = signal + rng.normal(0, 0.1, signal.shape)
-    out, kept = C.pca_denoise(noisy, 1)
-    assert np.std(out - signal) < np.std(noisy - signal)
-    assert kept > 0.95
-
-
 # ── positioning ──────────────────────────────────────────────────────────────
 
 def test_estimate_lag_recovers_injected_lag():
@@ -200,12 +188,6 @@ def test_estimate_lag_recovers_injected_lag():
     lag, cost = C.estimate_lag(df, "EC1525Hz[mS/m]")
     assert lag == pytest.approx(0.5, abs=0.11)
     assert cost.argmin() == np.argmin(np.abs(C.LAG_SEARCH - lag))
-
-
-def test_heading_filter_keeps_one_direction():
-    df = _survey()                                     # even lines north, odd lines south
-    keep = C.heading_mask(df, 0.0, 30.0)
-    assert set(df.loc[keep, "Line"]) == {0, 2, 4}
 
 
 def test_estimate_lag_with_dense_sampling():
@@ -237,13 +219,6 @@ def test_shift_positions_keeps_gps_no_fix_rows_and_extrapolates():
     assert out["Y"].iloc[0] == pytest.approx(-1.0)          # extrapolated, not clamped
 
 
-def test_headings_use_whole_line_direction():
-    rng = np.random.default_rng(3)
-    y = np.concatenate([[0.0, 0.0, 0.0], np.arange(0, 20, 0.1)])  # stands still, then walks north
-    df = pd.DataFrame({"Line": 0, "X": rng.normal(0, 0.3, y.size), "Y": y + rng.normal(0, 0.3, y.size)})
-    assert C.heading_mask(df, 0.0, 30.0).all()
-
-
 def test_estimate_lag_on_one_long_line_fails_fast():
     import time
 
@@ -263,18 +238,16 @@ def test_shift_positions_extrapolates_with_end_velocity():
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
-def test_background_offset_and_soil_temperature_in_pipeline():
+def test_soil_temperature_in_pipeline():
     df = _survey()
-    s = C.CorrectionSettings(ec_background=30.0)
-    out, msgs = C.apply_corrections(df, s)
-    assert np.median(out["EC1525Hz[mS/m]"]) == pytest.approx(30.0)
+    out, msgs = C.apply_corrections(df, C.CorrectionSettings(soil_temperature=10.0))
+    np.testing.assert_allclose(out["EC1525Hz[mS/m]"], C.ec_at_25(df["EC1525Hz[mS/m]"], 10.0))
     assert out["MSusc1525Hz[1/1000]"].equals(df["MSusc1525Hz[1/1000]"])
 
 
 def test_corrections_reported_and_scores_flagged_through_pipeline():
-    prep = pipeline.PrepSettings(corrections=C.CorrectionSettings(smooth_window=5, despike=True))
+    prep = pipeline.PrepSettings(corrections=C.CorrectionSettings(despike=True))
     out, msgs = pipeline.prepare_gem_table(_survey(), prep)
-    assert any("Running mean over 5" in m for m in msgs)
     assert any("Despiking blanked" in m for m in msgs)
     assert prep.corrections.lowers_noise
 

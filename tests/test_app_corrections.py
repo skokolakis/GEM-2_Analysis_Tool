@@ -2,7 +2,7 @@
 from streamlit.testing.v1 import AppTest
 
 
-def _serpentine_app(smooth: int = 0):
+def _serpentine_app(despike: bool = False):
     """Script body run by AppTest; all imports must be local."""
     import numpy as np
     import pandas as pd
@@ -26,16 +26,16 @@ def _serpentine_app(smooth: int = 0):
     data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
     prep = pipeline.PrepSettings(
         distance_method="projection",
-        corrections=corrections.CorrectionSettings(smooth_window=smooth),
+        corrections=corrections.CorrectionSettings(despike=despike),
     )
     R.render_gem_results(data, "serp.csv", 0.5, "linear", None, False, prep)
 
 
 def test_correction_messages_are_listed():
-    at = AppTest.from_function(_serpentine_app, kwargs={"smooth": 5}, default_timeout=120)
+    at = AppTest.from_function(_serpentine_app, kwargs={"despike": True}, default_timeout=120)
     at.run()
     assert not at.exception
-    assert any("Running mean over 5 readings" in w.value for w in at.warning)
+    assert any("Despiking blanked" in w.value for w in at.warning)
 
 
 def test_lag_estimate_button():
@@ -46,11 +46,11 @@ def test_lag_estimate_button():
     assert any("Best lag" in m.value for m in at.markdown)
 
 
-def test_smoothing_with_scoring_warns_in_sidebar():
+def test_despiking_with_scoring_warns_in_sidebar():
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
     at.toggle(key="scoring").set_value(True)
-    at.slider(key="cor_smooth").set_value(5)
+    at.checkbox(key="cor_despike").check()
     at.run()
     assert not at.exception
-    assert any("lower the noise σ" in w.value for w in at.sidebar.warning)
+    assert any("lowers the noise σ" in w.value for w in at.sidebar.warning)

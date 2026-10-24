@@ -126,8 +126,8 @@ def test_summary_line():
 def test_corrections_describe_their_enabled_steps():
     import corrections
     assert corrections.CorrectionSettings().describe() == []
-    c = corrections.CorrectionSettings(despike=True, smooth_window=5, lag_seconds=-0.3)
-    assert c.describe() == ["despike", "GPS lag -0.3 s", "running mean (5 readings)"]
+    c = corrections.CorrectionSettings(despike=True, soil_temperature=15.0, lag_seconds=-0.3)
+    assert c.describe() == ["despike", "GPS lag -0.3 s", "EC at 25 °C (soil at 15 °C)"]
 
 
 def test_changed_settings_lists_only_what_differs():
@@ -147,12 +147,12 @@ def test_changed_settings_are_shown_and_reset():
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
     assert any("at their defaults" in c.value for c in at.sidebar.caption)
-    at.slider(key="cor_smooth").set_value(5).run()
-    assert any("running mean (5 readings)" in c.value for c in at.sidebar.caption)
+    at.checkbox(key="cor_despike").check().run()
+    assert any("despike" in c.value for c in at.sidebar.caption)
     at.button(key="settings_reset_btn").click().run()
     assert not at.exception
     assert any("at their defaults" in c.value for c in at.sidebar.caption)
-    assert all(s.value == 0 for s in at.slider if s.label.startswith("Running mean"))
+    assert not any(c.value for c in at.checkbox if c.label.startswith("Despike"))
 
 
 # ── Basic and advanced settings ──────────────────────────────────────────────
@@ -161,17 +161,17 @@ def test_basic_mode_hides_expert_settings():
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
     keys = {w.key for w in at.number_input}
-    assert "sen_h" in keys and "sen_sep" not in keys and "cor_pca" not in keys
+    assert "sen_h" in keys and "sen_sep" not in keys and "cor_soilt" not in keys
     at.toggle(key=R.ADVANCED_KEY).set_value(True).run()
     keys = {w.key for w in at.number_input}
-    assert {"sen_sep", "cor_pca", "cor_bg"} <= keys
+    assert {"sen_sep", "cor_soilt"} <= keys
 
 
 def test_hidden_settings_return_to_their_defaults():
     at = AppTest.from_file("RIs_v2.py", default_timeout=60)
     at.run()
     at.toggle(key=R.ADVANCED_KEY).set_value(True).run()
-    at.number_input(key="cor_pca").set_value(2).run()
-    assert any("PCA (2 components)" in c.value for c in at.sidebar.caption)
+    at.number_input(key="cor_soilt").set_value(15.0).run()
+    assert any("EC at 25 °C (soil at 15 °C)" in c.value for c in at.sidebar.caption)
     at.toggle(key=R.ADVANCED_KEY).set_value(False).run()
     assert any("at their defaults" in c.value for c in at.sidebar.caption)

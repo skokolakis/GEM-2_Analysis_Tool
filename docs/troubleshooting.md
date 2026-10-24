@@ -20,7 +20,7 @@ Each file's warnings (expander under the file name) list every step the app took
 - Columns with fewer valid points are skipped with a warning. Switch to `pchip` (≥ 2 points) or `linear` for sparse data.
 
 ### Scores rose after turning on a filter
-- Despiking, the running mean and PCA lower the noise σ. Compare scores only between runs with the same [corrections & filters](corrections.md).
+- Despiking lowers the noise σ. Compare scores only between runs with the same [corrections & filters](corrections.md).
 
 ### Lines of a `.gbf`-converted file are wrong
 - Without a `Line` column, lines are inferred from constant X / Y runs, coordinate restarts, or time gaps — the warnings say which. See [Input data](input-data.md#tables-converted-from-gbf-files).

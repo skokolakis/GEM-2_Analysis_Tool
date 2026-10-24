@@ -6,7 +6,7 @@ Read the pages in order for a first pass through the app, or go straight to the 
 |---|---|---|
 | 1 | [Getting started](getting-started.md) | Installing, running the app locally or online, the sample survey, running the tests |
 | 2 | [Input data](input-data.md) | GEM-2 exports (WinGEM, `.gbf`-converted), legacy multi-sheet files, Status flags, distance along line, CSV vs XLSX precision |
-| 3 | [Corrections & filters](corrections.md) | Despiking, clipping, sensor height, drift, GPS lag, calibration, EC at 25 °C, PCA, smoothing, heading filter |
+| 3 | [Corrections & filters](corrections.md) | Despiking, clipping, sensor height, drift, GPS lag, calibration, EC at 25 °C |
 | 4 | [Profiles, scoring & interpolation](profiles-and-scoring.md) | Representative profiles, the contrast-to-noise score, the interpolation methods, the graph editor |
 | 5 | [Sensor physics & inversion](sensor-physics.md) | Forward model, EC / MS from I / Q, depth of investigation, multi-height calibration, layered-earth inversion, EMagPy export |
 | 6 | [Interpretation aids](interpretation.md) | Frequency selection, magnetic viscosity, anomaly spectra, power-line noise |
