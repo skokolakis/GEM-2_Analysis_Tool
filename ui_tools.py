@@ -988,8 +988,19 @@ def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
                     except (ValueError, ctr.ContouringError) as exc:
                         st.info(str(exc))
                     else:
-                        st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} "
-                                 f"({'log scale' if log_p else 'property units'}), {model.n} samples.")
+                        scale = "log scale" if log_p else "property units"
+                        st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} ({scale}), {model.n} samples. "
+                                 f"Leave-one-out: R² **{model.loo_r2:.3f}**, RMSE {model.loo_rmse:.4g} — "
+                                 "how well a sample is predicted when it is left out of the fit.")
+                        if model.channel_correlation > soiltools.COLLINEAR_CHANNELS:
+                            st.warning(
+                                f"The chosen channels are almost collinear at the samples (|r| = "
+                                f"{model.channel_correlation:.3f}): their coefficients are unstable and "
+                                "can swap sign between sample sets. One channel usually predicts as well."
+                            )
+                        if log_p:
+                            st.caption("Predictions are back-transformed with exp(), which gives the "
+                                       "median, not the mean, of the property at a given EC.")
                         st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format),
                                      width="content")
                         if not model.log_channels:
