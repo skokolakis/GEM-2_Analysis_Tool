@@ -23,7 +23,7 @@ Each trace is used only inside its own measured distance range — grid points o
 | **Frequency scoring** | Off by default. With it off the app shows each mode's channels, profiles, maps and exports without scores. AUX channels are never scored. |
 | **Legacy workbook mode** | EC or MS — applies to legacy files only; GEM files show every mode. |
 | **Distance step (m)** | Spacing of the common interpolation grid (default 0.5 m). |
-| **Interpolation method** | One of the seven methods below. |
+| **Interpolation method** | Linear or PCHIP, below. |
 
 ## Scoring
 
@@ -59,14 +59,9 @@ The **skin depth** δ = √(2 / ωμσ) is the depth at which the primary field 
 | Method | Min. points | Characteristics |
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
-| **nearest** | 1 | Assigns each grid point the value of the closest data point. Useful for step-like signals. |
-| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
-| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
-| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
-| **akima** | 5 | Akima (1970) local spline. Derives slopes from neighbouring points only, so it is robust to isolated outliers that would disturb a global cubic spline. |
-| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Smooths each trace, which lowers σ and inflates the score — do not compare its scores with the other methods. Shown as "polynomial (trend fit)" in the sidebar. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
 
-Columns with fewer than the minimum number of points are skipped with a warning. **Generate all-methods export** (under **Export all files**) runs all seven methods in one go for direct comparison ([Outputs](outputs.md#batch-export)).
+Columns with fewer than two points are skipped with a warning. GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile grid, so the two methods give nearly the same profiles and scores. Splines that overshoot (cubic, quadratic), the nearest-neighbour step and the polynomial trend fit, which smoothed each trace and inflated its score, were removed.
 
 ## Viewing the results
 

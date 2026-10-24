@@ -17,12 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.interpolate import (
-    Akima1DInterpolator,
-    CubicSpline,
-    PchipInterpolator,
-    make_interp_spline,
-)
+from scipy.interpolate import PchipInterpolator
 
 import contouring as ctr
 import corrections
@@ -56,17 +51,9 @@ PSEUDOSECTION_MODES = tuple(MODES)
 AREA_MAP_MODES = (*MODES, "AUX")
 PREP_APPLIES_TO = "Applied to every GEM file before its profiles, maps and further analysis."
 
-ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
-
-# Methods that fit a smooth trend instead of passing through every sample.
-# They remove short-wavelength variability from each trace, lowering σ and
-# inflating the score, so their scores are not comparable with interpolants.
-TREND_FIT_METHODS = {"polynomial"}
-TREND_FIT_WARNING = (
-    "`polynomial` is a least-squares trend fit (degree ≤ 5), not an interpolant: "
-    "it smooths each trace, which lowers σ and inflates the score. Use it to view "
-    "trends, not to compare scores with the other methods."
-)
+# Readings are usually denser than the profile grid, so the method matters
+# little; both pass through every reading without overshoot.
+INTERP_METHODS = ["linear", "pchip"]
 
 LINE_STYLES = {
     "Solid": "-",
@@ -275,9 +262,8 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "and bull's-eyes soften. 0 passes through the readings."
     ),
     "interpolation": (
-        "How each pass is resampled onto the common grid. Linear and nearest are the most "
-        "conservative; cubic, quadratic, PCHIP and Akima are smooth (PCHIP and Akima do not "
-        "overshoot); polynomial fits a trend and lowers the noise."
+        "How each pass is resampled onto the common grid. Linear joins the readings with "
+        "straight lines; PCHIP is smooth and, like linear, never overshoots the readings."
     ),
     "lag_channel": (
         "Channel compared between neighbouring lines; one with clear anomalies works best."
@@ -545,9 +531,9 @@ signal-to-noise ratio of seismic practice (RMS signal over RMS noise;
 Sheriff & Geldart, 1995; Bakulin et al., 2022): it rewards the largest
 contrast a frequency resolves.
 
-> **Filters change scores.** Despiking, the running mean, PCA and the
-> polynomial trend fit all lower σ and so raise the score. Compare
-> scores only between runs with the same settings.
+> **Filters change scores.** Despiking, the running mean and PCA all
+> lower σ and so raise the score. Compare scores only between runs with
+> the same settings.
 
 **Frequency selection** under the ranking keeps up to three
 high-scoring frequencies whose mean profiles are not strongly
@@ -578,15 +564,10 @@ correlated, since correlated frequencies carry the same information
 | Method | Min. points | Characteristics |
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
-| **nearest** | 1 | Value of the closest data point. Useful for step-like signals. |
-| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
-| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth profiles; may overshoot at sharp boundaries. |
-| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Shape-preserving, monotone within each interval — avoids the overshoot of cubic splines. |
-| **akima** | 5 | Akima (1970) local spline. Slopes from neighbouring points only, so robust to isolated outliers. |
-| **polynomial** | 3 | **Trend fit, not an interpolant.** Global least-squares polynomial (degree = min(n − 1, 5)); exact only for ≤ 6 points. Lowers σ and inflates the score — do not compare its scores with the other methods. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
 
-**Generate all-methods export** (under *Export all files*) runs all seven
-in one step for direct comparison.
+GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile
+grid, so the two give nearly the same profiles and scores.
 
 ---
 
@@ -632,7 +613,6 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
-| **Akima spline** | Local spline with slopes from neighbouring points only |
 
 ---
 
@@ -877,12 +857,7 @@ def prepared_table(
 # Minimum point requirements per method
 _METHOD_MIN_POINTS = {
     "linear": 2,
-    "nearest": 1,
     "pchip": 2,
-    "quadratic": 3,
-    "polynomial": 3,
-    "akima": 5,
-    "cubic": 4,
 }
 
 
@@ -893,34 +868,8 @@ def _interpolate_with_method(
     if method == "linear":
         return np.interp(target_x, xp, yp)
 
-    if method == "nearest":
-        idx = np.searchsorted(xp, target_x, side="left")
-        idx_left = np.clip(idx - 1, 0, len(xp) - 1)
-        idx_right = np.clip(idx, 0, len(xp) - 1)
-        nearest = np.where(
-            np.abs(target_x - xp[idx_left]) <= np.abs(target_x - xp[idx_right]),
-            idx_left,
-            idx_right,
-        )
-        return yp[nearest]
-
     if method == "pchip":
         return PchipInterpolator(xp, yp)(target_x)
-
-    if method == "quadratic":
-        return make_interp_spline(xp, yp, k=2)(target_x)
-
-    if method == "polynomial":
-        # Least-squares trend fit (exact only for ≤ 6 points). Polynomial.fit
-        # maps x onto [-1, 1], keeping projected coordinates well-conditioned.
-        degree = min(len(xp) - 1, 5)
-        return np.polynomial.Polynomial.fit(xp, yp, degree)(target_x)
-
-    if method == "akima":
-        return Akima1DInterpolator(xp, yp)(target_x)
-
-    if method == "cubic":
-        return CubicSpline(xp, yp)(target_x)
 
     raise ValueError(f"Unknown interpolation method: {method!r}")
 
@@ -1523,98 +1472,6 @@ def build_batch_xlsx(
     return buf.getvalue()
 
 
-def build_all_methods_batch_xlsx(
-    uploaded_files: list,
-    mode: str,
-    distance_step: float,
-    include_scores: bool = True,
-    prep: pipeline.PrepSettings | None = None,
-) -> bytes:
-    """
-    Run every interpolation method against every uploaded file and pack all
-    interpolated profiles and scores into a single xlsx.
-
-    Workbook layout
-    ---------------
-    Sheet "Scores"            : File | Mode | Frequency | Method | Exact interpolant | Score
-                                | Amplitude | Noise(σ)
-                                | Noise method | Traces
-    "{stem}_{mode}_{method}"  : Distance (m) + one {freq}_mean column per frequency
-    """
-    buf = io.BytesIO()
-    score_rows: list[dict] = []
-
-    def _unique_sheet(name: str, existing: "KeysView[str]") -> str:
-        """Excel-safe, at most 31 chars, deduplicated."""
-        name = excel_sheet_title(name)
-        candidate = name
-        suffix = 2
-        while candidate in existing:
-            tag = f"_{suffix}"
-            candidate = name[: EXCEL_SHEET_NAME_MAX - len(tag)] + tag
-            suffix += 1
-        return candidate
-
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for uploaded_file in uploaded_files:
-            file_bytes = uploaded_file.getvalue()
-            file_name = uploaded_file.name
-            stem = Path(file_name).stem
-
-            is_gem = is_gem_upload(file_bytes, file_name)
-
-            for method in ALL_INTERP_METHODS:
-                # Retrieve processed data (uses @st.cache_data — free if already computed)
-                if is_gem:
-                    out, sc, _ = process_gem_file(file_bytes, file_name, distance_step, method, prep)
-                    entries = [
-                        (mode_key, out[mode_key], sc[mode_key])
-                        for mode_key in gem_io.GEM_MODES
-                        if out.get(mode_key)
-                    ]
-                else:
-                    out, sc, _ = process_file(file_bytes, mode, distance_step, method)
-                    entries = [(mode, out, sc)] if out else []
-
-                for mode_key, output_data, scores in entries:
-                    # Scores rows
-                    for freq, metrics in (scores.items() if include_scores else ()):
-                        score_rows.append({
-                            "File": stem,
-                            "Mode": mode_key,
-                            "Frequency / Sheet": freq,
-                            "Method": method,
-                            "Exact interpolant": method not in TREND_FIT_METHODS,
-                            "Score": round(metrics["score"], 4),
-                            "Amplitude": round(metrics["amplitude"], 6),
-                            "Noise (σ)": round(metrics["mean_std"], 6),
-                            "Noise method": metrics["noise_method"],
-                            "Traces": metrics["n_traces"],
-                        })
-
-                    # Data sheet: Distance + one mean column per frequency
-                    if not output_data:
-                        continue
-                    raw = f"{stem[:10]}_{mode_key}_{method}"
-                    sheet_name = _unique_sheet(raw, writer.sheets.keys())
-                    mean_profiles_table(output_data, label_len=18).to_excel(
-                        writer, sheet_name=sheet_name, index=False
-                    )
-
-        # Scores summary — written last (openpyxl appends; reorder below)
-        if score_rows:
-            pd.DataFrame(score_rows).to_excel(writer, sheet_name="Scores", index=False)
-
-    # Move "Scores" sheet to the first position
-    wb = __import__("openpyxl").load_workbook(io.BytesIO(buf.getvalue()))
-    if "Scores" in wb.sheetnames:
-        wb.move_sheet("Scores", offset=-len(wb.sheetnames) + 1)
-    out_buf = io.BytesIO()
-    wb.save(out_buf)
-    out_buf.seek(0)
-    return out_buf.getvalue()
-
-
 def fig_to_png(fig: plt.Figure) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=300)
@@ -2184,7 +2041,17 @@ def parse_settings(data: bytes) -> dict:
         raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.") from exc
     if not isinstance(settings, dict):
         raise ValueError("This is not a settings file saved by the GEM-2 Analysis Tool.")
-    return {k: tuple(v) if isinstance(v, list) else v for k, v in settings.items() if is_saved_setting(k)}
+    choices = setting_choices()
+    return {k: tuple(v) if isinstance(v, list) else v for k, v in settings.items()
+            if is_saved_setting(k) and (k not in choices or v in choices[k])}
+
+
+def setting_choices() -> dict[str, tuple]:
+    """Options of the sidebar choices: a saved value no longer offered keeps the default."""
+    return {
+        "prof_interp": tuple(INTERP_METHODS),
+        "ct_method": tuple(ctr.METHODS),
+    }
 
 
 def apply_settings(state, settings: dict) -> None:
@@ -3260,13 +3127,10 @@ def main():
 
             interp_kind = st.selectbox(
                 "Interpolation method",
-                ALL_INTERP_METHODS,
+                INTERP_METHODS,
                 index=0, key=wkey("prof_interp"),
-                format_func=lambda m: f"{m} (trend fit)" if m in TREND_FIT_METHODS else m,
                 help=SCIENCE_HELP["interpolation"],
             )
-            if scoring and interp_kind in TREND_FIT_METHODS:
-                st.warning(TREND_FIT_WARNING)
 
             if distance_step > 10.0:
                 st.warning(
@@ -3381,8 +3245,7 @@ def main():
     if contour.area_map and len(gem_files) >= 2:
         render_combined_maps(gem_files, contour, prep)
     if batch_results:
-        render_batch_export(batch_results, uploaded_files, mode, distance_step, interp_kind,
-                            scoring, prep)
+        render_batch_export(batch_results, uploaded_files, interp_kind, scoring)
     render_survey_planning(prep.sensor)
 
 
@@ -3403,41 +3266,19 @@ def pick_file(names: list[str]) -> int:
 
 
 def render_batch_export(
-    batch_results: list[dict], uploaded_files: list, mode: str, distance_step: float,
-    interp_kind: str, scoring: bool, prep: pipeline.PrepSettings,
+    batch_results: list[dict], uploaded_files: list, interp_kind: str, scoring: bool,
 ) -> None:
-    """Workbooks with the profiles (and scores) of every uploaded file."""
+    """Workbook with the profiles (and scores) of every uploaded file."""
     st.divider()
     st.subheader("Export all files")
-    dl_col1, dl_col2 = st.columns(2)
     what = "Interpolated profiles & scores" if scoring else "Interpolated profiles"
     files = ui_tools.plural(len(uploaded_files), "file")
-
-    with dl_col1:
-        st.caption(f"{what} for the **selected method** ({interp_kind}) across {files}.")
-        batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
-        ui_tools.download_button(
-            f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
-            key="dl_batch",
-        )
-
-    with dl_col2:
-        st.caption(
-            f"{what} for **all {len(ALL_INTERP_METHODS)} methods** across {files}. "
-            "May take a moment to generate."
-        )
-        if st.button("Generate all-methods export", key="btn_all_methods",
-                     icon=":material/play_arrow:"):
-            with st.spinner(
-                f"Running {len(ALL_INTERP_METHODS)} interpolation methods across {files}…"
-            ):
-                all_methods_bytes = build_all_methods_batch_xlsx(
-                    uploaded_files, mode, distance_step, scoring, prep
-                )
-            ui_tools.download_button(
-                "All files — all methods (.xlsx)", all_methods_bytes,
-                "batch_all_methods.xlsx", key="dl_all_methods",
-            )
+    st.caption(f"{what} ({interp_kind}) across {files}.")
+    batch_bytes = build_batch_xlsx(batch_results, include_scores=scoring)
+    ui_tools.download_button(
+        f"All files — {interp_kind} (.xlsx)", batch_bytes, f"batch_{interp_kind}.xlsx",
+        key="dl_batch",
+    )
 
 
 def render_survey_planning(sensor: emphysics.Sensor) -> None:

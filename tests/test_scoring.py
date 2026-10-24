@@ -174,7 +174,7 @@ def _trace(rng, lo=0.0, hi=100.0, noise=0.5):
     return s
 
 
-@pytest.mark.parametrize("method", [m for m in R.ALL_INTERP_METHODS if m != "polynomial"])
+@pytest.mark.parametrize("method", R.INTERP_METHODS)
 def test_traces_are_not_extrapolated(method):
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"d": X, "L1": _trace(rng, 0, 100), "L2": _trace(rng, 3, 97),
@@ -255,41 +255,3 @@ def test_zero_noise_gives_blank_score_ranked_last():
 def test_non_overlapping_traces_are_reported():
     df = pd.DataFrame({"d": X, "a": np.where(X < 40, 1.0, np.nan), "b": np.where(X > 60, 2.0, np.nan)})
     assert R.process_sheet(df, 0.5, "linear")[2] == "traces do not overlap in distance"
-
-
-# ---------------------------------------------------------------------------
-# Polynomial trend fit (#6)
-# ---------------------------------------------------------------------------
-
-def test_polynomial_is_well_conditioned_on_projected_coordinates():
-    rng = np.random.default_rng(0)
-    northing = 4.5e6 + X
-    df = pd.DataFrame({"d": northing, "a": _trace(rng), "b": _trace(rng)})
-    with np.errstate(all="raise"):
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")      # RankWarning used to be emitted here
-            utm = R.process_sheet(df, 0.5, "polynomial")[1]
-    local = R.process_sheet(df.assign(d=X), 0.5, "polynomial")[1]
-    assert utm["score"] == pytest.approx(local["score"], rel=1e-6)
-
-
-def test_all_methods_export_flags_polynomial_as_trend_fit():
-    class Upload:
-        name = "legacy.xlsx"
-
-        def __init__(self, data):
-            self._data = data
-
-        def getvalue(self):
-            return self._data
-
-    rng = np.random.default_rng(0)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)}).to_excel(
-            w, sheet_name="1000", index=False)
-    xlsx = R.build_all_methods_batch_xlsx([Upload(buf.getvalue())], "EC", 0.5)
-    scores = pd.read_excel(io.BytesIO(xlsx), sheet_name="Scores").set_index("Method")
-    assert not scores.loc["polynomial", "Exact interpolant"]
-    assert scores.drop(index="polynomial")["Exact interpolant"].all()

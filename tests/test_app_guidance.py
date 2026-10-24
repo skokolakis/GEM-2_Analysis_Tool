@@ -147,6 +147,12 @@ def test_settings_after_a_reset_use_the_current_widgets():
     assert R.current_settings(state) == {"cor_smooth": 7}
 
 
+def test_saved_choices_no_longer_offered_keep_the_default():
+    saved = {"prof_interp": "akima", "ct_method": "kriging", "prof_step": 0.5}
+    loaded = R.parse_settings(R.settings_json(saved))
+    assert loaded == {"ct_method": "kriging", "prof_step": 0.5}
+
+
 def test_foreign_files_are_refused():
     with pytest.raises(ValueError, match="not a settings file"):
         R.parse_settings(b'{"something": 1}')

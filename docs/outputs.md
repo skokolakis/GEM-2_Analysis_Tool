@@ -16,14 +16,12 @@ Under each mode tab, **Downloads**:
 
 Under **Export all files**, near the end of the page, when at least one file was processed.
 
-**Selected method** — one workbook for all uploaded files with the current interpolation method:
+One workbook for all uploaded files with the current interpolation method:
 
 | Sheet | Contents |
 |---|---|
 | `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ), Noise method, Traces — scoring on only |
 | `{stem}_{mode}` | Distance column + one `{freq}_mean` column per frequency, joined on distance (a frequency is blank where it has no data) |
-
-**All methods** — runs all seven [interpolation methods](profiles-and-scoring.md#interpolation-methods) across all files. Adds a `Method` column to `Scores` and writes one data sheet per (file, mode, method). Its `Exact interpolant` column is `False` for `polynomial`, whose scores are not comparable with the others.
 
 ## Elsewhere in the app
 

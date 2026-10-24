@@ -4,7 +4,6 @@
 
 Works cited in the app and in these pages, alphabetical by first author.
 
-- Akima, H. (1970). A new method of interpolation and smooth curve fitting based on local procedures. *Journal of the ACM*, **17**(4), 589–602. https://doi.org/10.1145/321607.321609
 - Auken, E. & Christiansen, A.V. (2004). Layered and laterally constrained 2D inversion of resistivity data. *Geophysics*, **69**(3), 752–761. https://doi.org/10.1190/1.1759461
 - Bakulin, A., Silvestrov, I. & Protasov, M. (2022). Signal-to-noise ratio computation for challenging land single-sensor seismic data. *Geophysical Prospecting*, **70**(3), 629–638. https://doi.org/10.1111/1365-2478.13178
 - Benech, C., Lombard, P., Rejiba, F. & Tabbagh, A. (2016). Demonstrating the contribution of dielectric permittivity to the in-phase EMI response of soils: example from an archaeological site in Bahrain. *Near Surface Geophysics*, **14**, 337–344. https://doi.org/10.3997/1873-0604.2016023

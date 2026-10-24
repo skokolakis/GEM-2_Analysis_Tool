@@ -7,16 +7,14 @@ Each file's warnings (expander under the file name) list every step the app took
 ### No usable frequencies or sheets found
 - Check **Distance step** in the sidebar (default 0.5 m) — a step larger than the profile skips every channel or sheet. For GEM-2 files the app shows the reading spacing and offers a step that suits it (**Use … m**).
 - Make sure the first column of a legacy sheet is numeric distance.
-- Check that traces have ≥ 2 valid points after blanks are removed (more for some [interpolation methods](profiles-and-scoring.md#interpolation-methods)).
+- Check that traces have ≥ 2 valid points after blanks are removed .
 
 ### "Reduced precision detected" (CSV only)
 - Expected — GEM CSV exports round EC to integers and MS to one decimal.
 - Use the XLSX export for full-precision analysis; scores may differ slightly between the two. See [Input data](input-data.md#csv-vs-xlsx-precision).
 
-### Different interpolation methods give different scores
-- Methods differ in how they smooth (or preserve) variability between data points: `linear` preserves inter-point noise; `cubic` / `pchip` reduce it; `polynomial` is a trend fit and inflates scores.
-- Use **Generate all-methods export** (under **Export all files**) to compare all seven on your data.
-- `pchip` is a good general-purpose default; `akima` is preferred when outliers are suspected.
+### Linear and PCHIP give different scores
+- Both pass through every reading; they differ only between readings. A noticeable difference means the distance step is finer than the reading spacing — set the step close to the spacing (the summary card shows it).
 
 ### Akima needs ≥ 5 points
 - Columns with fewer valid points are skipped with a warning. Switch to `pchip` (≥ 2 points) or `linear` for sparse data.

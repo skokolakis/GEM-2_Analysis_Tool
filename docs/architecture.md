@@ -44,7 +44,6 @@ RIs_v2.py
 │   ├── build_excel_download()
 │   ├── build_scores_csv()
 │   ├── build_batch_xlsx()
-│   ├── build_all_methods_batch_xlsx()
 │   └── fig_to_png()
 ├── UI components
 │   ├── render_graph_editor()
