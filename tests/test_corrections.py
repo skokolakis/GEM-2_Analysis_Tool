@@ -99,6 +99,18 @@ def test_drift_correction_flattens_and_drops_base_lines():
     assert "3 base-station occupation" in msgs[0]
 
 
+def test_linear_drift_is_relative_to_the_fitted_drift_at_the_first_visit():
+    t = np.array([0.0, 1.0, 2.0, 3.0]) * 3600.0
+    df = pd.DataFrame({
+        "Line": ["B0", "S", "B1", "B2"], "Time[ms]": 1000 * t,
+        "EC1525Hz[mS/m]": [10.0, 50.0, 13.0, 12.0],
+    })
+    out, _ = C.correct_drift(df, ("B0", "B1", "B2"), "linear")
+    slope, intercept = np.polyfit(t[[0, 2, 3]], [10.0, 13.0, 12.0], 1)
+    # the survey reading loses the drift since the first visit, nothing more
+    assert out["EC1525Hz[mS/m]"].iloc[0] == pytest.approx(50.0 - slope * 3600.0)
+
+
 def test_drift_needs_two_occupations_and_time():
     table, _ = _with_base_station()
     with pytest.raises(ValueError, match="at least 2"):

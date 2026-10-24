@@ -265,7 +265,8 @@ def correct_drift(
     """
     Removes instrument drift measured by repeated base-station occupations
     (USGS GEM-2 practice: mean of each occupation, trend in time, subtract),
-    relative to the first occupation, then drops the base-station lines.
+    relative to the drift at the first occupation, then drops the
+    base-station lines.
     """
     t = _require_time(df, "Drift correction")
     occ = base_station_occupations(df, lines)
@@ -282,7 +283,8 @@ def correct_drift(
         v = _numeric(df, col)
         v_occ = np.array([np.nanmean(v[i]) for i in occ])
         curve = drift_curve(t_occ, v_occ, t, model)
-        out[col] = v - (curve - v_occ[first])
+        # the fitted drift at the first occupation (a straight line need not pass through it)
+        out[col] = v - (curve - drift_curve(t_occ, v_occ, t_occ[first: first + 1], model)[0])
         drifts.append(f"{col}: {np.ptp(v_occ):.4g}")
     base = np.concatenate(occ)
     out = out.drop(index=out.index[base]).reset_index(drop=True)
