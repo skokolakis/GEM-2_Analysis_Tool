@@ -6,7 +6,6 @@ Each file's warnings (expander under the file name) list every step the app took
 
 ### No usable frequencies or sheets found
 - Check **Distance step** in the sidebar (default 0.5 m) — a step larger than the profile skips every channel or sheet. For GEM-2 files the app shows the reading spacing and offers a step that suits it (**Use … m**).
-- Make sure the first column of a legacy sheet is numeric distance.
 - Check that traces have ≥ 2 valid points after blanks are removed .
 
 ### "Reduced precision detected" (CSV only)

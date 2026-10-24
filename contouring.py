@@ -138,10 +138,8 @@ AUX_LABELS = {
 }
 
 
-def value_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
+def value_label(mode: str, channel: str | None = None) -> str:
     """Axis / colour-bar label with correct GEM units; AUX channels carry their own."""
-    if not is_gem:
-        return f"{mode} (input units)"
     if mode == "AUX":
         return AUX_LABELS.get(channel, str(channel) if channel else "Auxiliary channel")
     return UNIT_LABELS.get(mode, mode)

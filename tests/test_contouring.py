@@ -52,9 +52,8 @@ def make_result(spec, z, origin=None):
 # ---------------------------------------------------------------------------
 
 def test_value_label_units():
-    assert C.value_label("EC", True) == "EC (mS/m)"
-    assert C.value_label("MS", True) == "MS (10⁻³ SI)"
-    assert C.value_label("EC", False) == "EC (input units)"
+    assert C.value_label("EC") == "EC (mS/m)"
+    assert C.value_label("MS") == "MS (10⁻³ SI)"
 
 
 # ---------------------------------------------------------------------------

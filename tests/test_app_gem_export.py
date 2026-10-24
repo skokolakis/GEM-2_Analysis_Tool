@@ -54,7 +54,7 @@ def test_is_gem_format_accepts_iq_only_export():
 def test_overview_legend_without_scores_and_markers():
     interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
     fig = R.make_overview_figure(
-        {"f": interp}, {"f": {"score": 3.0}}, "EC", "x", is_gem=True,
+        {"f": interp}, {"f": {"score": 3.0}}, "EC", "x",
         show_scores=False, markers=[0.5],
     )
     labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
@@ -170,7 +170,7 @@ def test_unique_file_keys_avoid_widget_collisions():
     taken = set()
     assert R.unique_file_key("site", taken, ("EC",)) == "site"
     assert R.unique_file_key("site", taken, ("EC",)) == "site_2"
-    assert R.unique_file_key("site_EC", taken) == "site_EC_2"      # a legacy file named like a GEM mode key
+    assert R.unique_file_key("site_EC", taken, ("EC",)) == "site_EC_2"   # named like another file's mode key
     at = AppTest.from_function(_two_uploads_app, default_timeout=180)
     at.run()
     assert not at.exception

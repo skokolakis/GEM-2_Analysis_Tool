@@ -27,10 +27,10 @@ def _export(lines=2, n=11, mark=None, status=None):
 
 
 def test_value_labels_for_new_modes():
-    assert ctr.value_label("I", True) == "In-phase (ppm)"
-    assert ctr.value_label("Q", True) == "Quadrature (ppm)"
-    assert ctr.value_label("AUX", True, "PowerLn") == "Power-line noise (mG)"
-    assert ctr.value_label("EC", True) == "EC (mS/m)"
+    assert ctr.value_label("I") == "In-phase (ppm)"
+    assert ctr.value_label("Q") == "Quadrature (ppm)"
+    assert ctr.value_label("AUX", "PowerLn") == "Power-line noise (mG)"
+    assert ctr.value_label("EC") == "EC (mS/m)"
 
 
 def test_find_channels_recognises_every_mode():

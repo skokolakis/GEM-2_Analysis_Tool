@@ -483,7 +483,7 @@ correlated, since correlated frequencies carry the same information
 
 | Step | What happens |
 |---|---|
-| **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions); anything else is read as a legacy one-sheet-per-frequency workbook. Readings with a non-zero `Status` are dropped (optional). |
+| **1. Ingest** | CSV or XLSX. A GEM-2 export is recognised by its columns (`Line`, `Y`, `EC…Hz[mS/m]`, `MSusc…Hz[1/1000]`, `I_…Hz`, `Q_…Hz`, or `Ip_` / `Qd_` from `.gbf` conversions). Readings with a non-zero `Status` are dropped (optional). |
 | **2. Correct** | The enabled **Corrections & filters** run in a fixed order — despike, clip, sensor height, temperature and base-station drift, calibration offsets, GPS lag, reference calibration, EC at 25 °C. Optionally EC / MS are recomputed from I / Q after the calibration offsets. |
 | **3. Locate** | The distance of each reading along its line is found (sidebar **Distance along line**); each channel becomes a distance × line matrix. |
 | **4. Interpolate** | Every pass is resampled onto a common distance grid (**Distance step**) inside its own measured range. At a repeated distance within a pass only the first reading is kept. |
@@ -531,7 +531,6 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
 | **GEM-2 I / Q** | `I_…Hz` / `Q_…Hz` in ppm, plus `PowerLn`, `QSum`, `TotalEC[mS/m]` when present |
 | **`.gbf`-converted tables** | `Ip_` / `Qd_` columns; lines found from X / Y or time when there is no `Line` column |
-| **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = passes |
 
 ---
 
@@ -1025,68 +1024,15 @@ def rank_scores(scores: dict[str, dict]) -> list[tuple[str, dict]]:
     )
 
 
-@st.cache_data(show_spinner=False)
-def process_file(
-    excel_bytes: bytes,
-    mode: str,
-    distance_step: float = DEFAULT_DISTANCE_STEP,
-    interp_kind: str = DEFAULT_INTERP_KIND,
-) -> tuple[dict, dict, list[str]]:
-    """
-    Process all sheets in an uploaded Excel file (legacy multi-sheet format).
-
-    Returns
-    -------
-    output_data               : {sheet_name: interpolated_df}
-    representativeness_scores : {sheet_name: score_dict}
-    warnings                  : list of warning strings
-    """
-    output_data: dict[str, pd.DataFrame] = {}
-    scores: dict[str, dict] = {}
-    warnings: list[str] = []
-
-    try:
-        excel = pd.ExcelFile(io.BytesIO(excel_bytes))
-    except Exception as exc:
-        warnings.append(f"Could not open file: {exc}")
-        return output_data, scores, warnings
-
-    for sheet_name in excel.sheet_names:
-        sheet_name = str(sheet_name)  # guard against integer sheet names (e.g. 9000)
-        try:
-            df = pd.read_excel(excel, sheet_name=sheet_name)
-        except Exception as exc:
-            warnings.append(f"Sheet '{sheet_name}': read error — {exc}")
-            continue
-
-        interp_df, score_dict, error, col_warnings = process_sheet(df, distance_step, interp_kind)
-
-        for w in col_warnings:
-            warnings.append(f"Sheet '{sheet_name}': {w}")
-
-        if error:
-            warnings.append(f"Sheet '{sheet_name}': skipped — {error}")
-            continue
-
-        output_data[sheet_name] = interp_df
-        scores[sheet_name] = score_dict
-
-    mixed = noise_method_warning(scores)
-    if mixed:
-        warnings.append(mixed)
-
-    return output_data, scores, warnings
-
-
 # ---------------------------------------------------------------------------
 # Plot helpers (return Figure objects, never touch global pyplot state)
 # ---------------------------------------------------------------------------
 
-def profile_label(mode: str, is_gem: bool, channel: str | None = None) -> str:
-    """Y-axis label for mean profiles: GEM units are known, legacy units are not."""
+def profile_label(mode: str, channel: str | None = None) -> str:
+    """Y-axis label for mean profiles, with the GEM units."""
     if mode == "AUX" and channel is None:
         return "Mean value (units in legend)"
-    return f"Mean {ctr.value_label(mode, is_gem, channel)}"
+    return f"Mean {ctr.value_label(mode, channel)}"
 
 
 def _draw_markers(ax: plt.Axes, markers: list[float] | None) -> None:
@@ -1102,7 +1048,6 @@ def make_overview_figure(
     mode: str,
     file_name: str,
     opts: GraphOptions | None = None,
-    is_gem: bool = False,
     show_scores: bool = True,
     markers: list[float] | None = None,
 ) -> plt.Figure:
@@ -1113,7 +1058,7 @@ def make_overview_figure(
     visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    y_label = profile_label(mode, is_gem)
+    y_label = profile_label(mode)
 
     for sheet_name in visible:
         interp_df = output_data.get(sheet_name)
@@ -1121,7 +1066,7 @@ def make_overview_figure(
             continue
         rep_prof = interp_df.mean(axis=1, skipna=True)
         common_dist = interp_df.index.values
-        name = ctr.value_label(mode, is_gem, sheet_name) if mode == "AUX" else sheet_name
+        name = ctr.value_label(mode, sheet_name) if mode == "AUX" else sheet_name
         if show_scores:
             name = f"{name} (score={scores[sheet_name]['score']:.2f})"
         if not np.all(np.isnan(rep_prof.values)):
@@ -1152,7 +1097,7 @@ def plot_axis_options(table: pd.DataFrame | None, mode: str = "") -> tuple[list[
     line (the representative-profile view), the position, time and reading
     columns, then every data channel (for cross-plots). Y: the representative
     profiles, then every data channel, those of *mode* first. Only the
-    profile view without a prepared GEM table (legacy files).
+    profile view without a prepared GEM table.
     """
     xs, ys = [PROFILE_X], [PROFILE_Y]
     if table is None:
@@ -1221,7 +1166,6 @@ def make_sheet_figure(
     interp_df: pd.DataFrame,
     mode: str,
     opts: GraphOptions | None = None,
-    is_gem: bool = False,
     markers: list[float] | None = None,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean +/- 1 sigma envelope."""
@@ -1268,7 +1212,7 @@ def make_sheet_figure(
 
     _draw_markers(ax, markers)
     ax.set_xlabel("Distance (m)")
-    ax.set_ylabel(profile_label(mode, is_gem, sheet_name))
+    ax.set_ylabel(profile_label(mode, sheet_name))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
     ax.grid(True)
@@ -1417,12 +1361,10 @@ def fig_to_png(fig: plt.Figure) -> bytes:
 # Graph editor UI helper
 # ---------------------------------------------------------------------------
 
-def item_noun(mode: str, is_gem: bool) -> tuple[str, str]:
-    """(singular, plural) for the items of a mode: AUX channels, legacy sheets, or frequencies."""
+def item_noun(mode: str) -> tuple[str, str]:
+    """(singular, plural) for the items of a mode: AUX channels or frequencies."""
     if mode == "AUX":
         return "channel", "channels"
-    if not is_gem:
-        return "sheet", "sheets"
     return "frequency", "frequencies"
 
 
@@ -1431,7 +1373,6 @@ def render_graph_editor(
     file_key: str,
     table: pd.DataFrame | None = None,
     mode: str = "",
-    is_gem: bool = True,
 ) -> GraphOptions:
     """
     Render the graph editor expander and return the current GraphOptions.
@@ -1483,7 +1424,7 @@ def render_graph_editor(
         col_sheets, col_axes = st.columns(2)
 
         with col_sheets:
-            st.markdown(f"**Visible {item_noun(mode, is_gem)[1]}**")
+            st.markdown(f"**Visible {item_noun(mode)[1]}**")
             selected = st.multiselect(
                 "Visible items",
                 options=all_sheet_names,
@@ -1540,7 +1481,7 @@ def render_graph_editor(
 
 
 # ---------------------------------------------------------------------------
-# Reusable rendering section (shared by legacy and GEM paths)
+# Rendering of one mode
 # ---------------------------------------------------------------------------
 
 def _render_mode_section(
@@ -1549,7 +1490,6 @@ def _render_mode_section(
     mode: str,
     file_name: str,
     file_key: str,
-    is_gem: bool = False,
     scoring: bool = True,
     markers: list[float] | None = None,
     sensor: emphysics.Sensor | None = None,
@@ -1565,12 +1505,11 @@ def _render_mode_section(
     mode        : "EC" or "MS"
     file_name   : original uploaded filename (for plot titles)
     file_key    : unique string for Streamlit widget key namespacing
-    is_gem      : True for GEM files (known units); False for legacy files
     scoring     : show the frequency ranking and scores (never for AUX channels)
     markers     : event-marker distances drawn on the profiles
     table       : prepared GEM table, for plots of chosen columns (graph editor)
     """
-    noun, nouns = item_noun(mode, is_gem)
+    noun, nouns = item_noun(mode)
     if not output_data:
         st.error(f"No usable {nouns} found.")
         return
@@ -1582,15 +1521,15 @@ def _render_mode_section(
         if len(output_data) > 1:
             ui_tools.render_frequency_selection(output_data, scores, file_key)
     else:
-        _render_channel_list(output_data, scores, mode, is_gem)
-    if is_gem and mode == "EC":
+        _render_channel_list(output_data, scores, mode)
+    if mode == "EC":
         ui_tools.render_frequency_info(output_data, sensor or emphysics.GEM2, file_key)
     freqs = [ctr.parse_frequency(name) or 0.0 for name in output_data]
-    if is_gem and mode in ("MS", "I") and max(freqs) >= ui_tools.PERMITTIVITY_FREQUENCY:
+    if mode in ("MS", "I") and max(freqs) >= ui_tools.PERMITTIVITY_FREQUENCY:
         st.caption(ui_tools.PERMITTIVITY_CAPTION)
 
     # ── Graph editor ─────────────────────────────────────────────────────
-    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode, is_gem=is_gem)
+    opts = render_graph_editor(output_data, file_key=file_key, table=table, mode=mode)
     readings = opts.readings and table is not None
 
     def overview() -> plt.Figure:
@@ -1598,7 +1537,7 @@ def _render_mode_section(
             return make_readings_figure(
                 table, opts, f"{opts.y_column} against {opts.x_column} — {file_name}"
             )
-        return make_overview_figure(output_data, scores, mode, file_name, opts, is_gem, show_scores, markers)
+        return make_overview_figure(output_data, scores, mode, file_name, opts, show_scores, markers)
 
     # ── Overview plot ────────────────────────────────────────────────────
     title = f"{opts.y_column} against {opts.x_column}" if readings else "Representative profiles"
@@ -1624,7 +1563,7 @@ def _render_mode_section(
                 )
             else:
                 st.markdown(f"**{sheet_name}** — {ui_tools.plural(sc['n_traces'], 'trace')}")
-            ui_tools.show_figure(make_sheet_figure(sheet_name, interp_df, mode, opts, is_gem, markers))
+            ui_tools.show_figure(make_sheet_figure(sheet_name, interp_df, mode, opts, markers))
 
     # ── Downloads ────────────────────────────────────────────────────────
     st.markdown("#### Downloads")
@@ -1648,14 +1587,14 @@ def _render_mode_section(
 
 
 def _render_channel_list(
-    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str, is_gem: bool
+    output_data: dict[str, pd.DataFrame], scores: dict[str, dict], mode: str
 ) -> None:
     """Channels of one mode without scores: passes and covered distance."""
     st.markdown("#### Channels")
     rows = [
         {
             "Channel": name,
-            "Units": ctr.value_label(mode, is_gem, name),
+            "Units": ctr.value_label(mode, name),
             "Traces": scores[name]["n_traces"],
             "From (m)": round(float(df.index.min()), 3),
             "To (m)": round(float(df.index.max()), 3),
@@ -2353,7 +2292,6 @@ def _render_pseudosection(
     file_name: str,
     file_key: str,
     contour: ContourSettings,
-    is_gem: bool,
     table: pd.DataFrame | None = None,
     sensor: emphysics.Sensor | None = None,
 ) -> None:
@@ -2367,7 +2305,7 @@ def _render_pseudosection(
     try:
         ps = ctr.build_pseudosection(profiles)
         fig = ctr.make_pseudosection_figure(
-            ps, ctr.value_label(mode, is_gem),
+            ps, ctr.value_label(mode),
             f"Pseudo-section [{mode}] — {file_name}", contour.n_levels, contour.colours,
         )
     except ctr.ContouringError as exc:
@@ -2379,7 +2317,7 @@ def _render_pseudosection(
     png = fig_to_png(fig)
     ui_tools.show_figure(fig)
     st.caption(PSEUDOSECTION_CAPTION)
-    if is_gem and mode == "EC":
+    if mode == "EC":
         depths = ui_tools.depth_caption(profiles, sensor or emphysics.GEM2)
         if depths:
             st.caption(depths)
@@ -2396,21 +2334,14 @@ def _render_area_map(
     file_key: str,
     contour: ContourSettings,
     file_bytes: bytes,
-    is_gem: bool,
     prep: pipeline.PrepSettings | None = None,
 ) -> None:
     st.markdown("#### Area map")
-    if not is_gem:
-        st.info(
-            "Area maps need a GEM file with X/Y or Lat/Lon coordinates; "
-            "the legacy multi-sheet format has none."
-        )
-        return
 
     freq = st.selectbox("Channel", list(output_data.keys()), key=f"ct_freq_{file_key}",
                         help="Channel to grid and map. Gridding settings are in the sidebar "
                              "under 2D contouring.")
-    label = ctr.value_label(mode, is_gem, freq)
+    label = ctr.value_label(mode, freq)
     try:
         with st.spinner("Gridding…"):
             result = compute_area_map_cached(
@@ -2558,23 +2489,20 @@ def render_contouring(
     file_key: str,
     contour: ContourSettings,
     file_bytes: bytes,
-    is_gem: bool,
     prep: pipeline.PrepSettings | None = None,
 ) -> None:
     """Render the enabled 2D contouring sections for one file and mode."""
     if not output_data:
         return
     if contour.pseudosection and mode in PSEUDOSECTION_MODES:
-        table = None
-        if is_gem:
-            try:
-                table, _ = prepared_table(file_bytes, file_name, prep)
-            except ValueError:   # preparation problems are already listed in the warnings
-                pass
-        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem, table,
+        try:
+            table, _ = prepared_table(file_bytes, file_name, prep)
+        except ValueError:   # preparation problems are already listed in the warnings
+            table = None
+        _render_pseudosection(output_data, mode, file_name, file_key, contour, table,
                               (prep or pipeline.PrepSettings()).sensor)
     if contour.area_map and mode in AREA_MAP_MODES:
-        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
+        _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, prep)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -2616,7 +2544,7 @@ def render_combined_maps(
         return
     col = st.selectbox("Channel", sorted(channels), key="cm_col")
     mode, label = channels[col]
-    unit = ctr.value_label(mode, True, label)
+    unit = ctr.value_label(mode, label)
     names = [n for _, n in gem_files]
     kind = st.radio("Map", ["Merged (edge-matched)", "Difference (B − A)"], horizontal=True,
                     key="cm_kind", help=SCIENCE_HELP["combined"])
@@ -2684,46 +2612,6 @@ def unique_file_key(stem: str, taken: set[str], suffixes: tuple[str, ...] = ()) 
     return key
 
 
-def render_legacy_results(
-    file_bytes: bytes,
-    file_name: str,
-    mode: str,
-    distance_step: float,
-    interp_kind: str,
-    contour: ContourSettings | None = None,
-    scoring: bool = True,
-    file_key: str | None = None,
-) -> None:
-    """Process and render a legacy multi-sheet Excel file."""
-    stem = file_key or Path(file_name).stem
-
-    with st.spinner("Processing…"):
-        output_data, scores, warnings = process_file(
-            file_bytes, mode,
-            distance_step=distance_step,
-            interp_kind=interp_kind,
-        )
-
-    render_file_warnings(warnings)
-
-    if not output_data:
-        st.error("No usable sheets found in this file. "
-                 + ui_tools.doc_link("troubleshooting", "no-usable-frequencies-or-sheets-found",
-                                     "What to check"))
-        if distance_step > 1.0:
-            st.info("Try reducing the distance step in the sidebar.")
-        return
-
-    st.caption(f"Legacy workbook — {ui_tools.plural(len(output_data), 'sheet')} read as "
-               f"{MODES[mode]} ({mode}); change this under Legacy workbook mode in the sidebar.")
-    _render_mode_section(output_data, scores, mode, file_name, file_key=stem, scoring=scoring)
-    if contour is not None:
-        render_contouring(
-            output_data, mode, file_name, stem, contour, file_bytes, is_gem=False
-        )
-    render_next_steps(next_steps(mode, len(output_data), scoring, contour, has_xy=False), stem)
-
-
 def render_file_warnings(warnings: list[str]) -> None:
     """Collapsed list of the reading and processing messages of one file."""
     if warnings:
@@ -2784,7 +2672,7 @@ def render_gem_results(
         st.caption(note)
     prep = prep or pipeline.PrepSettings()
     tabs = st.tabs([
-        f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m, True))})"
+        f"{m} ({ui_tools.plural(len(output_data[m]), *item_noun(m))})"
         for m in available_modes
     ])
 
@@ -2796,7 +2684,6 @@ def render_gem_results(
                 mode_key,
                 file_name,
                 file_key=f"{stem}_{mode_key}",
-                is_gem=True,
                 scoring=scoring,
                 markers=markers,
                 sensor=prep.sensor,
@@ -2805,7 +2692,7 @@ def render_gem_results(
             if contour is not None:
                 render_contouring(
                     output_data[mode_key], mode_key, file_name,
-                    f"{stem}_{mode_key}", contour, file_bytes, is_gem=True, prep=prep,
+                    f"{stem}_{mode_key}", contour, file_bytes, prep=prep,
                 )
             render_next_steps(
                 next_steps(mode_key, len(output_data[mode_key]), scoring, contour,
@@ -2929,14 +2816,6 @@ def main():
                        "ranking, pseudo-sections, inversion and batch export.")
             scoring = st.toggle("Frequency scoring", value=False, key=wkey("scoring"), help=SCORING_HELP)
 
-            mode = st.radio(
-                "Legacy workbook mode",
-                list(MODES.keys()),
-                horizontal=True, key=wkey("prof_mode"),
-                help="What the sheets of a legacy one-sheet-per-frequency workbook hold. GEM-2 "
-                     "exports are read from their column names and show every mode.",
-            )
-
             distance_step = st.number_input(
                 "Distance step (m)",
                 min_value=0.01,
@@ -2979,8 +2858,7 @@ def main():
         "Upload one or more data files (.xlsx or .csv)",
         type=["xlsx", "csv"],
         accept_multiple_files=True,
-        help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX), .gbf-converted tables, "
-             "or legacy workbooks with one sheet per frequency.",
+        help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX) or .gbf-converted tables.",
     )
     uploaded_files = list(uploaded_files or [])
     if uploaded_files:
@@ -3007,62 +2885,51 @@ def main():
             icon=":material/tune:",
         )
 
+    # ── Only GEM-2 exports are read ────────────────────────────────────────
+    others = [f.name for f in uploaded_files if not is_gem_upload(f.getvalue(), f.name)]
+    if others:
+        st.error(
+            f"Not a GEM-2 export: {', '.join(others)}. The app reads WinGEM / EMExport tables "
+            "and .gbf-converted tables, recognised by their column names. "
+            + ui_tools.doc_link("input-data", "", "Input data")
+        )
+        uploaded_files = [f for f in uploaded_files if f.name not in others]
+        if not uploaded_files:
+            render_survey_planning(prep.sensor)
+            return
+
     # ── Process each file and accumulate results for batch export ──────────
     batch_results: list[dict] = []
-    gem_flags = [is_gem_upload(f.getvalue(), f.name) for f in uploaded_files]
-
-    for uploaded_file, is_gem in zip(uploaded_files, gem_flags):
+    for uploaded_file in uploaded_files:
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
         stem = Path(file_name).stem
-
         # Collect processed data (cached — no extra computation cost)
-        if is_gem:
-            gem_output, gem_scores, _ = process_gem_file(
-                file_bytes, file_name, distance_step, interp_kind, prep
-            )
-            for mode_key in gem_io.GEM_MODES:
-                if gem_output.get(mode_key):
-                    batch_results.append({
-                        "stem": stem,
-                        "mode": mode_key,
-                        "output_data": gem_output[mode_key],
-                        "scores": gem_scores[mode_key],
-                    })
-        else:
-            leg_output, leg_scores, _ = process_file(
-                file_bytes, mode, distance_step, interp_kind
-            )
-            if leg_output:
+        gem_output, gem_scores, _ = process_gem_file(
+            file_bytes, file_name, distance_step, interp_kind, prep
+        )
+        for mode_key in gem_io.GEM_MODES:
+            if gem_output.get(mode_key):
                 batch_results.append({
                     "stem": stem,
-                    "mode": mode,
-                    "output_data": leg_output,
-                    "scores": leg_scores,
+                    "mode": mode_key,
+                    "output_data": gem_output[mode_key],
+                    "scores": gem_scores[mode_key],
                 })
 
     # ── Per-file detailed results: one file at a time ──────────────────────
     taken_keys: set[str] = set()
-    file_keys = [
-        unique_file_key(Path(f.name).stem, taken_keys, gem_io.GEM_MODES if is_gem else ())
-        for f, is_gem in zip(uploaded_files, gem_flags)
-    ]
+    file_keys = [unique_file_key(Path(f.name).stem, taken_keys, gem_io.GEM_MODES) for f in uploaded_files]
     shown = pick_file([f.name for f in uploaded_files])
-    uploaded_file, is_gem, file_key = uploaded_files[shown], gem_flags[shown], file_keys[shown]
+    uploaded_file, file_key = uploaded_files[shown], file_keys[shown]
     st.divider()
     st.subheader(uploaded_file.name)
-    if is_gem:
-        render_gem_results(
-            uploaded_file.getvalue(), uploaded_file.name, distance_step, interp_kind, contour,
-            scoring, prep, file_key=file_key,
-        )
-    else:
-        render_legacy_results(
-            uploaded_file.getvalue(), uploaded_file.name, mode, distance_step, interp_kind,
-            contour, scoring, file_key=file_key,
-        )
+    render_gem_results(
+        uploaded_file.getvalue(), uploaded_file.name, distance_step, interp_kind, contour,
+        scoring, prep, file_key=file_key,
+    )
 
-    gem_files = [(f.getvalue(), f.name) for f, g in zip(uploaded_files, gem_flags) if g]
+    gem_files = [(f.getvalue(), f.name) for f in uploaded_files]
     if contour.area_map and len(gem_files) >= 2:
         render_combined_maps(gem_files, contour, prep)
     if batch_results:

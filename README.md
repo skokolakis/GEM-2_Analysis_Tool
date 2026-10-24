@@ -26,7 +26,7 @@ Then upload a GEM-2 export (`.csv` / `.xlsx`) — or the [synthetic sample surve
 
 | | | Read more |
 |---|---|---|
-| **Read** | WinGEM / EMExport tables and `.gbf`-converted exports with every GEM-2 channel (EC, MS, I, Q, power-line noise, QSum, total EC), or legacy multi-sheet workbooks. Status flags, event markers and five ways to measure distance along a line | [Input data](docs/input-data.md) |
+| **Read** | WinGEM / EMExport tables and `.gbf`-converted exports with every GEM-2 channel (EC, MS, I, Q, power-line noise, QSum, total EC). Status flags, event markers and five ways to measure distance along a line | [Input data](docs/input-data.md) |
 | **Correct** | Despike, clip, sensor-height, temperature and base-station drift, I/Q calibration offsets, GPS lag, reference calibration (ERT / TDR), EC at 25 °C | [Corrections & filters](docs/corrections.md) |
 | **Profile & rank** | Representative (mean) profiles on a common distance grid (linear or PCHIP), and an optional contrast-to-noise score — amplitude ÷ measured noise — to rank frequencies | [Profiles, scoring & interpolation](docs/profiles-and-scoring.md) |
 | **Model** | Layered-earth forward model with the bucking coil, EC / MS recomputed from I / Q, skin depth and depth of investigation, multi-height calibration, smooth 1D / laterally constrained inversion with EMagPy export | [Sensor physics & inversion](docs/sensor-physics.md) |

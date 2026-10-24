@@ -16,9 +16,8 @@ def test_plural():
 
 
 def test_item_noun_follows_the_data():
-    assert R.item_noun("EC", True) == ("frequency", "frequencies")
-    assert R.item_noun("AUX", True) == ("channel", "channels")
-    assert R.item_noun("EC", False) == ("sheet", "sheets")
+    assert R.item_noun("EC") == ("frequency", "frequencies")
+    assert R.item_noun("AUX") == ("channel", "channels")
 
 
 def test_empty_page_offers_the_sample_and_survey_planning():

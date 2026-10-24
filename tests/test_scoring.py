@@ -109,20 +109,19 @@ def test_area_survey_file_warns_about_separate_lines():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "mode, is_gem, expected",
+    "mode, expected",
     [
-        ("EC", True, "Mean EC (mS/m)"),
-        ("MS", True, "Mean MS (10⁻³ SI)"),
-        ("EC", False, "Mean EC (input units)"),
+        ("EC", "Mean EC (mS/m)"),
+        ("MS", "Mean MS (10⁻³ SI)"),
     ],
 )
-def test_plot_axes_carry_correct_units(mode, is_gem, expected):
+def test_plot_axes_carry_correct_units(mode, expected):
     interp = pd.DataFrame({"a": [1.0, 2.0], "b": [1.5, 2.5]}, index=[0.0, 1.0])
     scores = {"f": {"score": 1.0}}
-    fig = R.make_overview_figure({"f": interp}, scores, mode, "x", is_gem=is_gem)
+    fig = R.make_overview_figure({"f": interp}, scores, mode, "x")
     assert fig.axes[0].get_ylabel() == expected
     plt.close(fig)
-    fig = R.make_sheet_figure("f", interp, mode, is_gem=is_gem)
+    fig = R.make_sheet_figure("f", interp, mode)
     assert fig.axes[0].get_ylabel() == expected
     plt.close(fig)
 
@@ -230,17 +229,14 @@ def test_single_and_multi_trace_scores_agree_and_are_labelled():
     assert np.mean(ratios) == pytest.approx(1.0, abs=0.1)
 
 
-def test_mixed_noise_methods_warn_in_legacy_file():
+def test_mixed_noise_methods_warn():
     rng = np.random.default_rng(0)
     multi = pd.DataFrame({"d": X, "a": _trace(rng), "b": _trace(rng)})
     single = pd.DataFrame({"d": X, "a": _trace(rng)})
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        multi.to_excel(w, sheet_name="1000", index=False)
-        single.to_excel(w, sheet_name="5000", index=False)
-    _, scores, warnings = R.process_file.__wrapped__(buf.getvalue(), "EC", 0.5, "linear")
-    assert scores["5000"]["noise_method"] == R.NOISE_INTRA
-    assert any("Only one usable pass for 5000" in w for w in warnings)
+    scores = {"1000Hz": R.process_sheet(multi, 0.5, "linear")[1],
+              "5000Hz": R.process_sheet(single, 0.5, "linear")[1]}
+    assert scores["5000Hz"]["noise_method"] == R.NOISE_INTRA
+    assert "Only one usable pass for 5000Hz" in R.noise_method_warning(scores)
 
 
 def test_zero_noise_gives_blank_score_ranked_last():

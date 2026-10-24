@@ -8,15 +8,12 @@ import contouring as ctr
 def _gem_app(
     method: str = "spline",
     lines: int = 6,
-    legacy: bool = False,
     blank_distance=None,
     constant_ms: bool = False,
     options: tuple = (),
     colours: dict | None = None,
 ):
     """Script body run by AppTest; all imports must be local."""
-    import io
-
     import numpy as np
     import pandas as pd
 
@@ -44,17 +41,7 @@ def _gem_app(
         area_map=True, pseudosection=True, method=method, blank_distance=blank_distance,
         method_options=options, colours=ctr.ColourStyle(**(colours or {})),
     )
-    if legacy:
-        legacy_df = pd.DataFrame({"d": np.arange(0.0, 40.0, 0.5)})
-        legacy_df["t1"] = legacy_df["d"] * 0.1
-        legacy_df["t2"] = legacy_df["d"] * 0.1 + 0.05
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as w:
-            legacy_df.to_excel(w, sheet_name="1000", index=False)
-            legacy_df.to_excel(w, sheet_name="5000", index=False)
-        R.render_legacy_results(buf.getvalue(), "legacy.xlsx", "EC", 0.5, "linear", contour)
-    else:
-        R.render_gem_results(data, "survey.csv", 0.5, "linear", contour)
+    R.render_gem_results(data, "survey.csv", 0.5, "linear", contour)
 
 
 def _texts(at):
@@ -82,14 +69,6 @@ def test_single_line_shows_transect_message():
     at.run()
     assert not at.exception
     assert any("single transect" in i.value for i in at.info)
-
-
-def test_legacy_file_area_map_message_and_pseudosection():
-    at = AppTest.from_function(_gem_app, kwargs={"legacy": True}, default_timeout=120)
-    at.run()
-    assert not at.exception
-    assert any("legacy multi-sheet format" in i.value for i in at.info)
-    assert "### Pseudo-section" in " ".join(_texts(at))
 
 
 def test_tiny_blanking_distance_shows_message_not_traceback():

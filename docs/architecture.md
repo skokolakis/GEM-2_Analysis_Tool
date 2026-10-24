@@ -31,7 +31,6 @@ RIs_v2.py
 │   └── parse_gem_dataframe()
 ├── Data processing (cached)
 │   ├── process_sheet()             — core interpolation & scoring
-│   ├── process_file()              — legacy multi-sheet XLSX
 │   ├── process_gem_file()          — GEM CSV / XLSX
 │   └── rank_scores()
 ├── Interpolation helpers
@@ -51,7 +50,6 @@ RIs_v2.py
 │   ├── render_data_sidebar() / render_sensor_sidebar() / render_corrections_sidebar()
 │   └── render_contouring_sidebar() / render_contouring() / render_combined_maps()
 ├── Dispatch
-│   ├── render_legacy_results()
 │   └── render_gem_results()
 └── Streamlit app — main()
 ```
