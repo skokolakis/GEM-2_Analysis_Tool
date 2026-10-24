@@ -43,7 +43,7 @@ Under each GEM file, **Layered-earth inversion** ([`inversion.py`](../inversion.
 
 - Fixed layers growing geometrically from the first thickness to the depth of the half-space; parameters are log₁₀ conductivity.
 - Gauss–Newton with vertical smoothing (Occam-style, Constable et al., 1987) and, between neighbouring stations, lateral smoothing (laterally constrained inversion, Auken & Christiansen, 2004). Lateral constraint 0 gives independent 1D inversions.
-- The regularisation weight starts at the chosen value and is halved each iteration until χ² per datum reaches 1.
+- Regularisation search (Occam, Constable et al., 1987): every iteration tries weights from 64 × to 1/16 × the current one. While χ² per datum is above 1 it takes the step that fits best (stopping when the misfit improves by less than 1 %); once χ² reaches 1 it takes the smoothest step that keeps it, and stops when no smoother model does. The weight never drops below 0.01.
 - Data errors: the larger of *relative error × |data| + floor* and, optionally, the **measured noise** of each frequency — the same σ the [scoring](profiles-and-scoring.md#scoring) uses (between repeat passes, or within the line for a single pass), divided by √(passes averaged) and converted to ppm for EC data.
 - When the lines of a file lie at different positions (an area survey), choose the **Transect** to invert; its repeat passes, if any, are averaged.
 - EC-only files are converted to quadrature with the half-space model, which undoes a half-space conversion like the one in WinGEM.
