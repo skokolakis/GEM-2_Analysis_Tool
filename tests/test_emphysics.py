@@ -184,3 +184,26 @@ def test_multiheight_bias_from_ground_level():
     assert fit["sigma"] == pytest.approx(0.03, rel=1e-3)
     np.testing.assert_allclose(fit["bias_i"], bias_i, atol=0.5)
     np.testing.assert_allclose(fit["bias_q"], bias_q, atol=0.5)
+
+
+FREQS_GRAD = [475.0, 5325.0, 63025.0]
+
+
+# Not at h = 0: there R0 loses digits to cancellation at large lam and finite
+# differences of the in-phase are noise, while the analytic gradient is not.
+@pytest.mark.parametrize("height, kappa", [(1.0, 0.0), (0.2, 0.0), (0.5, 0.01)])
+def test_gradient_matches_finite_differences(height, kappa):
+    sensor = E.Sensor(height=height)
+    sigma = np.array([[0.01, 0.08, 0.02], [0.3, 0.005, 0.05]])
+    kap = np.full_like(sigma, kappa)
+    thickness = [0.3, 1.2]
+    z, dz = E.forward_ppm_gradient(FREQS_GRAD, sigma, kap, thickness, sensor)
+    np.testing.assert_allclose(z, E.forward_ppm_batch(FREQS_GRAD, sigma, kap, thickness, sensor))
+    for k in range(sigma.shape[1]):
+        step = 1e-5 * sigma[:, k]
+        up, down = sigma.copy(), sigma.copy()
+        up[:, k] += step
+        down[:, k] -= step
+        fd = (E.forward_ppm_batch(FREQS_GRAD, up, kap, thickness, sensor)
+              - E.forward_ppm_batch(FREQS_GRAD, down, kap, thickness, sensor)) / (2 * step[:, None])
+        np.testing.assert_allclose(dz[:, :, k], fd, rtol=1e-4, atol=1e-5 * np.abs(dz).max())

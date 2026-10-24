@@ -23,12 +23,12 @@ import pipeline
 
 MIN_LOG_SIGMA = -5.0          # 0.01 mS/m
 MAX_LOG_SIGMA = 1.0           # 10 S/m
-JACOBIAN_STEP = 0.01          # log10 units
 MAX_ITERATIONS = 20
 ALPHA_FACTORS = (64.0, 8.0, 1.0, 0.25, 0.0625)   # regularisation weights tried per iteration (x current)
 ALPHA_MIN = 0.01              # regularisation never drops below this
 MIN_IMPROVEMENT = 0.01        # relative misfit decrease below which the search stops
 FORWARD_CHUNK = 400           # models per forward call (memory: ~0.35 MB per model)
+GRADIENT_CHUNK = 50           # models per forward-and-gradient call (memory: ~10 MB per model)
 MAX_STATIONS = 200            # stations the panel inverts at once
 STEP_HALVINGS = 5
 MODEL_TOLERANCE = 1e-3        # log10 units; smaller model updates end the iterations
@@ -95,15 +95,20 @@ def _forward_q(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Se
 
 
 def _jacobian(frequencies, log_sigma: np.ndarray, grid: LayerGrid, sensor: E.Sensor):
-    """Forward response (S, F) and per-station Jacobians (S, F, N) by forward differences."""
+    """
+    Forward response (S, F) and per-station Jacobians d Q / d log10(sigma)
+    (S, F, N), from the analytic gradient of the forward model,
+    GRADIENT_CHUNK stations at a time.
+    """
     s, n = log_sigma.shape
-    perturbed = np.repeat(log_sigma[:, None, :], n + 1, axis=1)          # (S, N+1, N)
-    idx = np.arange(n)
-    perturbed[:, idx + 1, idx] += JACOBIAN_STEP
-    d = _forward_q(frequencies, perturbed.reshape(-1, n), grid, sensor).reshape(s, n + 1, -1)
-    base = d[:, 0, :]                                                     # (S, F)
-    jac = (d[:, 1:, :] - base[:, None, :]) / JACOBIAN_STEP                # (S, N, F)
-    return base, np.transpose(jac, (0, 2, 1))                             # (S, F, N)
+    base = np.empty((s, len(np.atleast_1d(frequencies))))
+    jac = np.empty(base.shape + (n,))
+    for a in range(0, s, GRADIENT_CHUNK):
+        sigma = 10.0 ** log_sigma[a: a + GRADIENT_CHUNK]
+        z, dz = E.forward_ppm_gradient(frequencies, sigma, None, grid.thickness, sensor)
+        base[a: a + len(sigma)] = z.imag
+        jac[a: a + len(sigma)] = dz.imag * (np.log(10.0) * sigma)[:, None, :]
+    return base, jac
 
 
 def _roughness(n_stations: int, n_layers: int, lateral_weight: float) -> sparse.csr_matrix:

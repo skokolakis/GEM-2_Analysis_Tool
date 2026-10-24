@@ -75,12 +75,15 @@ def _surface_reflection(
     sigma: np.ndarray,
     kappa: np.ndarray,
     thickness: np.ndarray,
-) -> np.ndarray:
+    gradient: bool = False,
+):
     """
     TE reflection coefficient at the surface, quasi-static.
 
     lam: (L,), omega: (F,), sigma/kappa: (M, N) for M models of N layers
-    (last = half-space), thickness: (N-1,). Returns (M, F, L).
+    (last = half-space), thickness: (N-1,). Returns R0 (M, F, L) and, with
+    `gradient`, also dR0/dsigma (M, N, F, L), by differentiating the layer
+    recursion (one pass instead of N forward models).
     """
     mu = MU0 * (1.0 + kappa)[:, :, None, None]          # (M, N, 1, 1)
     sig = sigma[:, :, None, None]
@@ -89,48 +92,104 @@ def _surface_reflection(
     n = sigma.shape[1]
     u = np.sqrt(lam ** 2 + 1j * w * mu[:, n - 1] * sig[:, n - 1])
     y_hat = u / mu[:, n - 1]
+    du_dsigma = [None] * n
+    dyhat_du = [None] * n          # d Yhat_k / d u_k with Yhat_{k+1} fixed
+    dyhat_dbelow = [None] * n      # d Yhat_k / d Yhat_{k+1}
+    if gradient:
+        du_dsigma[n - 1] = 1j * w * mu[:, n - 1] / (2.0 * u)
+        dyhat_du[n - 1] = 1.0 / mu[:, n - 1]
     for k in range(n - 2, -1, -1):
         u = np.sqrt(lam ** 2 + 1j * w * mu[:, k] * sig[:, k])
         y = u / mu[:, k]
         e = np.exp(-2.0 * u * thickness[k])   # Re(u) > 0: no overflow, unlike tanh
         t = (1.0 - e) / (1.0 + e)
-        y_hat = y * (y_hat + y * t) / (y + y_hat * t)
+        num, den = y_hat + y * t, y + y_hat * t
+        if gradient:
+            dyhat_dbelow[k] = y * y * (1.0 - t * t) / den ** 2
+            d_dy = (num + y * t) / den - y * num / den ** 2
+            d_dt = y * y / den - y * num * y_hat / den ** 2
+            dyhat_du[k] = d_dy / mu[:, k] + d_dt * thickness[k] * (1.0 - t * t)
+            du_dsigma[k] = 1j * w * mu[:, k] / (2.0 * u)
+        y_hat = y * num / den
     y0 = lam / MU0
-    return (y0 - y_hat) / (y0 + y_hat)
+    r0 = (y0 - y_hat) / (y0 + y_hat)
+    if not gradient:
+        return r0
+    chain = -2.0 * y0 / (y0 + y_hat) ** 2   # dR0 / dYhat_0, then times dYhat_0 / dYhat_k going down
+    grad = np.empty((sigma.shape[0], n) + r0.shape[1:], dtype=complex)
+    for k in range(n):
+        grad[:, k] = chain * dyhat_du[k] * du_dsigma[k]
+        if k < n - 1:
+            chain = chain * dyhat_dbelow[k]
+    return r0, grad
 
 
 def _hcp_ratio(
-    r: float,
+    radii: tuple[tuple[float, float], ...],
     height: float,
     omega: np.ndarray,
     sigma: np.ndarray,
     kappa: np.ndarray,
     thickness: np.ndarray,
-) -> np.ndarray:
+    gradient: bool = False,
+):
     """
-    Secondary/primary field ratio Hs/Hp, shape (M, F), for vertical magnetic
-    dipoles at separation r and height h above M layered earths:
+    Sum over (r, weight) of weight x the secondary/primary field ratio
+    Hs/Hp, shape (M, F), for vertical magnetic dipoles at separation r and
+    height h above M layered earths:
 
         Z = -r^3 * Int lam^2 R0(lam) exp(-2 lam h) J0(lam r) dlam
 
     The large-lam limit lam^2 R0 -> A lam^2 + B (A, B from the top layer) is
     integrated analytically, so the numerical integrand decays like lam^-2
-    even when h = 0.
+    even when h = 0. All radii share one set of nodes (panels of the largest
+    r, up to the cut-off of the smallest), so R0 is computed once. With
+    `gradient`, also returns dZ/dsigma, shape (M, F, N).
     """
     a = 2.0 * height
     mur = 1.0 + kappa[:, :1]                                        # (M, 1)
     A = (mur - 1.0) / (mur + 1.0)                                   # (M, 1)
-    B = -1j * omega[None, :] * MU0 * mur ** 2 * sigma[:, :1] / (mur + 1.0) ** 2   # (M, F)
-    lam_max = LAMBDA_MAX_TIMES_R / r
+    dB = -1j * omega[None, :] * MU0 * mur ** 2 / (mur + 1.0) ** 2   # dB / dsigma_0, (M, F)
+    B = dB * sigma[:, :1]                                           # (M, F)
+    r_max, r_min = max(r for r, _ in radii), min(r for r, _ in radii)
+    lam_max = LAMBDA_MAX_TIMES_R / r_min
     if len(thickness):
         lam_max = max(lam_max, THIN_LAYER_FACTOR / float(np.min(thickness)))
-    lam, w = _quadrature_nodes(r, lam_max)
-    R0 = _surface_reflection(lam, omega, sigma, kappa, thickness)    # (M, F, L)
+    lam, w = _quadrature_nodes(r_max, lam_max)
+    out = _surface_reflection(lam, omega, sigma, kappa, thickness, gradient)
+    R0, dR0 = out if gradient else (out, None)                      # (M, F, L), (M, N, F, L)
     rest = lam ** 2 * R0 - A[:, :, None] * lam ** 2 - B[:, :, None]
-    integral = (rest * (np.exp(-a * lam) * j0(lam * r))) @ w         # (M, F)
-    d2 = a * a + r * r
-    analytic = A * (2 * a * a - r * r) / d2 ** 2.5 + B / np.sqrt(d2)
-    return -r ** 3 * (integral + analytic)
+    z = np.zeros(B.shape, dtype=complex)
+    dz = np.zeros(B.shape + (sigma.shape[1],), dtype=complex) if gradient else None
+    for r, weight in radii:
+        kernel = np.exp(-a * lam) * j0(lam * r) * w                 # (L,)
+        d2 = a * a + r * r
+        analytic = A * (2 * a * a - r * r) / d2 ** 2.5 + B / np.sqrt(d2)
+        z += weight * -r ** 3 * (rest @ kernel + analytic)
+        if gradient:
+            g = np.einsum("mnfl,l->mfn", dR0 * lam ** 2, kernel)
+            g[:, :, 0] += dB * (1.0 / np.sqrt(d2) - kernel.sum())   # the B terms
+            dz += weight * -r ** 3 * g
+    return (z, dz) if gradient else z
+
+
+def _check_models(sigma, kappa, thickness, sensor: "Sensor"):
+    """Arrays of forward_ppm_batch: sigma, kappa (M, N), thickness (N-1,); raises on bad models."""
+    sigma = np.atleast_2d(np.asarray(sigma, dtype=float))
+    kappa = np.zeros_like(sigma) if kappa is None else np.atleast_2d(np.asarray(kappa, float))
+    thickness = np.zeros(0) if thickness is None else np.atleast_1d(np.asarray(thickness, float))
+    if kappa.shape != sigma.shape or sigma.shape[1] != len(thickness) + 1:
+        raise ValueError("need kappa.shape == sigma.shape == (M, len(thickness) + 1)")
+    if np.any(sigma < 0) or np.any(thickness <= 0) or sensor.height < 0:
+        raise ValueError("conductivities and height must be >= 0, thicknesses > 0")
+    if np.any(kappa <= -1):
+        raise ValueError("susceptibilities must be > -1 SI")
+    return sigma, kappa, thickness
+
+
+def _radii(sensor: "Sensor") -> tuple[tuple[float, float], ...]:
+    """(r, weight): the receiver, minus the bucking coil when there is one."""
+    return ((sensor.separation, 1.0),) + (((sensor.bucking, -1.0),) if sensor.bucking else ())
 
 
 def forward_ppm_batch(
@@ -150,20 +209,27 @@ def forward_ppm_batch(
     secondary contribute with weight 1 relative to the receiver's primary.
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
-    sigma = np.atleast_2d(np.asarray(sigma, dtype=float))
-    kappa = np.zeros_like(sigma) if kappa is None else np.atleast_2d(np.asarray(kappa, float))
-    thickness = np.zeros(0) if thickness is None else np.atleast_1d(np.asarray(thickness, float))
-    if kappa.shape != sigma.shape or sigma.shape[1] != len(thickness) + 1:
-        raise ValueError("need kappa.shape == sigma.shape == (M, len(thickness) + 1)")
-    if np.any(sigma < 0) or np.any(thickness <= 0) or sensor.height < 0:
-        raise ValueError("conductivities and height must be >= 0, thicknesses > 0")
-    if np.any(kappa <= -1):
-        raise ValueError("susceptibilities must be > -1 SI")
-    omega = 2 * np.pi * f
-    z = _hcp_ratio(sensor.separation, sensor.height, omega, sigma, kappa, thickness)
-    if sensor.bucking:
-        z = z - _hcp_ratio(sensor.bucking, sensor.height, omega, sigma, kappa, thickness)
-    return PPM * z
+    sigma, kappa, thickness = _check_models(sigma, kappa, thickness, sensor)
+    return PPM * _hcp_ratio(_radii(sensor), sensor.height, 2 * np.pi * f, sigma, kappa, thickness)
+
+
+def forward_ppm_gradient(
+    frequencies,
+    sigma,
+    kappa=None,
+    thickness=None,
+    sensor: Sensor = GEM2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    forward_ppm_batch and its derivative with respect to each layer's
+    conductivity: (response (M, F), d response / d sigma (M, F, N) in ppm per
+    S/m). The derivative is exact for the discretised integral, so it agrees
+    with finite differences of forward_ppm_batch.
+    """
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    sigma, kappa, thickness = _check_models(sigma, kappa, thickness, sensor)
+    z, dz = _hcp_ratio(_radii(sensor), sensor.height, 2 * np.pi * f, sigma, kappa, thickness, True)
+    return PPM * z, PPM * dz
 
 
 def forward_ppm(
