@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 from scipy.interpolate import PchipInterpolator
 
 import contouring as ctr
@@ -2780,7 +2781,17 @@ def render_gem_results(
     ui_tools.render_inversion(output_data, scores, table, stem, prep.sensor)
     if table is not None:
         ui_tools.render_anomaly_spectrum(table, stem)
-        ui_tools.render_soil_tools(table, stem)
+    soil_page_link()
+
+
+def soil_page_link() -> None:
+    """Link to the soil-tools page (a caption where the app runs without its pages, e.g. in tests)."""
+    try:
+        st.page_link(SOIL_PAGE, label="Soil tools: sampling design, soil-property calibration, "
+                     "management zones", icon=":material/grass:")
+    except StreamlitAPIException:
+        st.caption("Soil tools (sampling design, calibration, management zones) are on their own "
+                   "page, in the navigation at the top of the sidebar.")
 
 
 # ---------------------------------------------------------------------------
@@ -2789,6 +2800,10 @@ def render_gem_results(
 
 SAMPLE_FILE = Path(__file__).resolve().parent / "sample_data" / "synthetic_gem2_area_map.csv"
 SAMPLE_STATE_KEY = "use_sample"
+SOIL_PAGE = "pages/soil_tools.py"
+UPLOADER_KEY = "uploader"
+UPLOADS_KEY = "kept_uploads"       # the uploaded files, kept while another page is shown
+SURVEYS_KEY = "surveys"            # {name: (bytes, name, prep)} of the GEM files on the analysis page
 
 
 @dataclass(frozen=True)
@@ -2803,6 +2818,26 @@ class SampleFile:
     @classmethod
     def load(cls) -> "SampleFile":
         return cls(SAMPLE_FILE.name, SAMPLE_FILE.read_bytes())
+
+
+def keep_uploads() -> None:
+    """
+    Uploader callback: a copy of the uploaded files that outlives the page.
+    Streamlit drops the uploader's files when another page is shown, and an
+    uploader's value cannot be set back, so the analysis page reads this copy.
+    """
+    files = st.session_state.get(UPLOADER_KEY) or []
+    st.session_state[UPLOADS_KEY] = [SampleFile(f.name, f.getvalue()) for f in files]
+
+
+def keep_settings(state) -> None:
+    """
+    Keeps the sidebar settings while another page is shown: Streamlit drops
+    the state of widgets a page does not draw, unless it was set in code.
+    """
+    for key in list(state.keys()):
+        if is_saved_setting(str(key).partition("~")[0]):
+            state[key] = state[key]
 
 
 TOUR_STEPS = [                   # (icon, title, where it happens)
@@ -2852,12 +2887,6 @@ def is_gem_upload(file_bytes: bytes, file_name: str) -> bool:
 
 
 def main():
-    st.set_page_config(
-        page_title="GEM-2 Analysis Tool",
-        page_icon=None,
-        layout="wide",
-    )
-
     st.title("GEM-2 Analysis Tool")
     st.caption(
         "Multi-frequency EMI survey analysis for the GEM-2 — profiles, frequency ranking, "
@@ -2913,13 +2942,20 @@ def main():
             st.markdown(about_references_markdown())
 
     # ── File uploader ───────────────────────────────────────────────────────
-    uploaded_files = st.file_uploader(
+    st.file_uploader(
         "Upload one or more data files (.xlsx or .csv)",
         type=["xlsx", "csv"],
-        accept_multiple_files=True,
+        accept_multiple_files=True, key=UPLOADER_KEY, on_change=keep_uploads,
         help="GEM-2 exports from WinGEM / EMExport (CSV or XLSX) or .gbf-converted tables.",
     )
-    uploaded_files = list(uploaded_files or [])
+    uploaded_files = list(st.session_state.get(UPLOADS_KEY) or [])
+    if uploaded_files and not st.session_state.get(UPLOADER_KEY):
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        c1.caption("Showing the files uploaded before: "
+                   + ", ".join(f.name for f in uploaded_files) + ". Upload others above to replace them.")
+        if c2.button("Clear files", key="uploads_clear", width="stretch"):
+            st.session_state.pop(UPLOADS_KEY, None)
+            st.rerun()
     if uploaded_files:
         st.session_state.pop(SAMPLE_STATE_KEY, None)    # real data replaces the sample
     elif st.session_state.get(SAMPLE_STATE_KEY):
@@ -2932,6 +2968,7 @@ def main():
             st.session_state.pop(SAMPLE_STATE_KEY, None)
             st.rerun()
 
+    st.session_state[SURVEYS_KEY] = {}
     if not uploaded_files:
         render_welcome()
         render_survey_planning(prep.sensor)
@@ -2956,6 +2993,7 @@ def main():
         if not uploaded_files:
             render_survey_planning(prep.sensor)
             return
+    st.session_state[SURVEYS_KEY] = {f.name: (f.getvalue(), f.name, prep) for f in uploaded_files}
 
     # ── Process each file and accumulate results for batch export ──────────
     batch_results: list[dict] = []
@@ -3035,5 +3073,15 @@ def render_survey_planning(sensor: emphysics.Sensor) -> None:
     ui_tools.render_forward_model(sensor)
 
 
+def run_app() -> None:
+    """Entry point: the survey-analysis page and the soil-tools page."""
+    st.set_page_config(page_title="GEM-2 Analysis Tool", page_icon=None, layout="wide")
+    keep_settings(st.session_state)
+    st.navigation([
+        st.Page(main, title="Survey analysis", icon=":material/insights:", default=True),
+        st.Page(SOIL_PAGE, title="Soil tools", icon=":material/grass:"),
+    ]).run()
+
+
 if __name__ == "__main__":
-    main()
+    run_app()

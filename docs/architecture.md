@@ -18,7 +18,8 @@ The Streamlit entry point is [`RIs_v2.py`](../RIs_v2.py) (the file name predates
 | [`contouring.py`](../contouring.py) | Area maps (all gridding methods, cross-validation, colour styles), pseudo-sections, unit labels |
 | [`gridtools.py`](../gridtools.py) | Grid filters, statistics, survey merging, UTM, GeoTIFF, `.prj` |
 | [`ui_tools.py`](../ui_tools.py) | Streamlit panels for the physics, inversion, interpretation and soil tools |
-| [`RIs_v2.py`](../RIs_v2.py) | The app: sidebar, file handling, profiles, scoring, plots, exports, map rendering |
+| [`RIs_v2.py`](../RIs_v2.py) | The app: navigation, sidebar, file handling, profiles, scoring, plots, exports, map rendering |
+| [`pages/soil_tools.py`](../pages/soil_tools.py) | The soil-tools page, on the surveys loaded on the analysis page |
 
 ## Inside `RIs_v2.py`
 

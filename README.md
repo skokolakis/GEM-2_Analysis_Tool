@@ -54,7 +54,8 @@ Start with the **[documentation index](docs/README.md)**, or jump to:
 ## Repository layout
 
 ```
-RIs_v2.py          Streamlit app (entry point)
+RIs_v2.py          Streamlit app (entry point, survey-analysis page)
+pages/             soil-tools page
 gem_io.py          GEM-2 export reading, lines, distance
 pipeline.py        preparation of the raw table
 corrections.py     corrections & filters

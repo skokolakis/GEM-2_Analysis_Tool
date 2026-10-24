@@ -909,143 +909,142 @@ def show_plan_view(fig) -> None:
 
 def render_soil_tools(table: pd.DataFrame, file_key: str) -> None:
     """Sampling design, calibration of a soil property, and management zones from EC channels."""
-    with st.expander("Soil tools (sampling design, calibration, management zones)", expanded=False):
-        ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
-        if not ec_cols:
-            show_needs("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
-                    "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry (advanced "
-                    "settings) to add them.")
-            return
+    ec_cols = list(gem_io.find_channels(table.columns)["EC"].values())
+    if not ec_cols:
+        show_needs("The soil tools work on EC channels (EC…Hz[mS/m]); this file has none. "
+                   "Turn on 'Recompute EC / MS from I / Q' under Sensor geometry (advanced "
+                   "settings) to add them.")
+        return
+    try:
+        x, y, origin = corrections.xy_metres(table)
+    except ctr.ContouringError:
+        show_needs(NEEDS_XY)
+        return
+    chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}",
+                           help=SCIENCE_HELP["soil_channels"])
+    if not chans:
+        st.caption("Choose at least one EC channel.")
+        return
+    features = table[chans].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    t_design, t_cal, t_zones = st.tabs(["Sampling design", "Calibration", "Management zones"])
+
+    with t_design:
+        st.caption(
+            "Sampling sites that span the conductivity range and are spread over the field "
+            "(response-surface design after Lesch, 2005; ESAP-RSSD)."
+        )
+        n_sites = st.number_input("Sites", 4, 60, 12, key=f"soil_n_{file_key}",
+                                  help=SCIENCE_HELP["soil_sites"])
         try:
-            x, y, origin = corrections.xy_metres(table)
-        except ctr.ContouringError:
-            show_needs(NEEDS_XY)
-            return
-        chans = st.multiselect("EC channels", ec_cols, default=ec_cols[:2], key=f"soil_ch_{file_key}",
-                               help=SCIENCE_HELP["soil_channels"])
-        if not chans:
-            st.caption("Choose at least one EC channel.")
-            return
-        features = table[chans].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-        t_design, t_cal, t_zones = st.tabs(["Sampling design", "Calibration", "Management zones"])
+            sites = soiltools.sampling_design(np.column_stack([x, y]), features, int(n_sites))
+        except ValueError as exc:
+            st.info(str(exc))
+        else:
+            extra = _lonlat_columns(sites["x"].to_numpy(), sites["y"].to_numpy(), origin)
+            sites = sites.assign(**extra)
+            show_table(sites.round(4))
+            fig, ax = plan_view(x, y)
+            ax.scatter(x, y, s=2, c="0.7")
+            ax.scatter(sites["x"], sites["y"], c="red", s=25)
+            for k, (sx, sy) in enumerate(zip(sites["x"], sites["y"]), 1):
+                ax.annotate(str(k), (sx, sy), fontsize=8, xytext=(3, 3), textcoords="offset points")
+            fig.tight_layout()
+            show_plan_view(fig)
+            download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
+                            f"{file_key}_sampling_sites.csv", key=f"soil_dl_sites_{file_key}")
 
-        with t_design:
-            st.caption(
-                "Sampling sites that span the conductivity range and are spread over the field "
-                "(response-surface design after Lesch, 2005; ESAP-RSSD)."
-            )
-            n_sites = st.number_input("Sites", 4, 60, 12, key=f"soil_n_{file_key}",
-                                      help=SCIENCE_HELP["soil_sites"])
+    with t_cal:
+        st.caption(
+            "Regression of a measured soil property on the conductivity at the sampling "
+            "sites (Lesch et al., 1995; ESAP-Calibrate). The samples file has the survey's "
+            "coordinate columns and one column per measured property."
+        )
+        upload = st.file_uploader("Soil samples (.csv)", type=["csv"], key=f"soil_up_{file_key}")
+        if upload is not None:
             try:
-                sites = soiltools.sampling_design(np.column_stack([x, y]), features, int(n_sites))
-            except ValueError as exc:
-                st.info(str(exc))
+                samples = _read_samples(upload)
+            except ValueError as exc:            # includes pandas' ParserError
+                st.info(f"Could not read the samples file: {exc}")
+                samples = pd.DataFrame()
+            skip = {"x", "y", "lat", "latitude", "lon", "long", "longitude", "row", "pc1", "pc2",
+                    "target", "line", "id", "zone"}
+            props = [c for c in samples.columns if str(c).lower() not in skip
+                     and pd.to_numeric(samples[c], errors="coerce").notna().any()]
+            if not props:
+                st.info("No numeric property column in the samples file.")
             else:
-                extra = _lonlat_columns(sites["x"].to_numpy(), sites["y"].to_numpy(), origin)
-                sites = sites.assign(**extra)
-                show_table(sites.round(4))
-                fig, ax = plan_view(x, y)
-                ax.scatter(x, y, s=2, c="0.7")
-                ax.scatter(sites["x"], sites["y"], c="red", s=25)
-                for k, (sx, sy) in enumerate(zip(sites["x"], sites["y"]), 1):
-                    ax.annotate(str(k), (sx, sy), fontsize=8, xytext=(3, 3), textcoords="offset points")
-                fig.tight_layout()
-                show_plan_view(fig)
-                download_button("Sites (.csv)", sites.to_csv(index=False).encode(),
-                                f"{file_key}_sampling_sites.csv", key=f"soil_dl_sites_{file_key}")
-
-        with t_cal:
-            st.caption(
-                "Regression of a measured soil property on the conductivity at the sampling "
-                "sites (Lesch et al., 1995; ESAP-Calibrate). The samples file has the survey's "
-                "coordinate columns and one column per measured property."
-            )
-            upload = st.file_uploader("Soil samples (.csv)", type=["csv"], key=f"soil_up_{file_key}")
-            if upload is not None:
+                c1, c2 = st.columns(2)
+                prop = c1.selectbox("Property", props, key=f"soil_prop_{file_key}",
+                                    help=SCIENCE_HELP["soil_property"])
+                radius = c1.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=f"soil_rad_{file_key}",
+                                         help=SCIENCE_HELP["soil_radius"])
+                log_p = c2.checkbox("Fit the property on a log scale", True, key=f"soil_log_{file_key}",
+                                    help=SCIENCE_HELP["soil_log"])
+                trend = c2.checkbox("Add a trend surface (x, y)", False, key=f"soil_tr_{file_key}",
+                                    help=SCIENCE_HELP["soil_trend"])
                 try:
-                    samples = _read_samples(upload)
-                except ValueError as exc:            # includes pandas' ParserError
-                    st.info(f"Could not read the samples file: {exc}")
-                    samples = pd.DataFrame()
-                skip = {"x", "y", "lat", "latitude", "lon", "long", "longitude", "row", "pc1", "pc2",
-                        "target", "line", "id", "zone"}
-                props = [c for c in samples.columns if str(c).lower() not in skip
-                         and pd.to_numeric(samples[c], errors="coerce").notna().any()]
-                if not props:
-                    st.info("No numeric property column in the samples file.")
+                    model = soiltools.fit_property_model(table, samples, prop, chans, radius, log_p, trend)
+                except (ValueError, ctr.ContouringError) as exc:
+                    st.info(str(exc))
                 else:
-                    c1, c2 = st.columns(2)
-                    prop = c1.selectbox("Property", props, key=f"soil_prop_{file_key}",
-                                        help=SCIENCE_HELP["soil_property"])
-                    radius = c1.number_input("Matching radius (m)", 0.1, 100.0, 2.0, key=f"soil_rad_{file_key}",
-                                             help=SCIENCE_HELP["soil_radius"])
-                    log_p = c2.checkbox("Fit the property on a log scale", True, key=f"soil_log_{file_key}",
-                                        help=SCIENCE_HELP["soil_log"])
-                    trend = c2.checkbox("Add a trend surface (x, y)", False, key=f"soil_tr_{file_key}",
-                                        help=SCIENCE_HELP["soil_trend"])
+                    scale = "log scale" if log_p else "property units"
+                    st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} ({scale}), {model.n} samples. "
+                             f"Leave-one-out: R² **{model.loo_r2:.3f}**, RMSE {model.loo_rmse:.4g} — "
+                             "how well a sample is predicted when it is left out of the fit.")
+                    if model.channel_correlation > soiltools.COLLINEAR_CHANNELS:
+                        st.warning(
+                            f"The chosen channels are almost collinear at the samples (|r| = "
+                            f"{model.channel_correlation:.3f}): their coefficients are unstable and "
+                            "can swap sign between sample sets. One channel usually predicts as well."
+                        )
+                    if log_p:
+                        st.caption("Predictions are back-transformed with exp(), which gives the "
+                                   "median, not the mean, of the property at a given EC.")
+                    st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format),
+                                 width="content")
+                    if not model.log_channels:
+                        st.caption("Some samples have EC ≤ 0, so EC enters linearly, not as ln(EC).")
+                    column = f"Predicted {prop}"
+                    predicted = table.assign(**{column: soiltools.predict_property(model, table)})
                     try:
-                        model = soiltools.fit_property_model(table, samples, prop, chans, radius, log_p, trend)
-                    except (ValueError, ctr.ContouringError) as exc:
+                        result = _property_map(predicted, column)
+                        fig = ctr.make_area_map_figure(result, column, column)
+                    except ctr.ContouringError as exc:
                         st.info(str(exc))
                     else:
-                        scale = "log scale" if log_p else "property units"
-                        st.write(f"R² **{model.r2:.3f}**, RMSE {model.rmse:.4g} ({scale}), {model.n} samples. "
-                                 f"Leave-one-out: R² **{model.loo_r2:.3f}**, RMSE {model.loo_rmse:.4g} — "
-                                 "how well a sample is predicted when it is left out of the fit.")
-                        if model.channel_correlation > soiltools.COLLINEAR_CHANNELS:
-                            st.warning(
-                                f"The chosen channels are almost collinear at the samples (|r| = "
-                                f"{model.channel_correlation:.3f}): their coefficients are unstable and "
-                                "can swap sign between sample sets. One channel usually predicts as well."
-                            )
-                        if log_p:
-                            st.caption("Predictions are back-transformed with exp(), which gives the "
-                                       "median, not the mean, of the property at a given EC.")
-                        st.dataframe(model.coefficients.rename("coefficient").to_frame().map("{:.6g}".format),
-                                     width="content")
-                        if not model.log_channels:
-                            st.caption("Some samples have EC ≤ 0, so EC enters linearly, not as ln(EC).")
-                        column = f"Predicted {prop}"
-                        predicted = table.assign(**{column: soiltools.predict_property(model, table)})
-                        try:
-                            result = _property_map(predicted, column)
-                            fig = ctr.make_area_map_figure(result, column, column)
-                        except ctr.ContouringError as exc:
-                            st.info(str(exc))
-                        else:
-                            show_figure(fig)
-                        out = pd.DataFrame({"x": x, "y": y, **_lonlat_columns(x, y, origin),
-                                            column: predicted[column]})
-                        download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
-                                        f"{file_key}_{prop}_predicted.csv", key=f"soil_dl_pred_{file_key}")
+                        show_figure(fig)
+                    out = pd.DataFrame({"x": x, "y": y, **_lonlat_columns(x, y, origin),
+                                        column: predicted[column]})
+                    download_button("Predictions (.csv)", out.to_csv(index=False).encode(),
+                                    f"{file_key}_{prop}_predicted.csv", key=f"soil_dl_pred_{file_key}")
 
-        with t_zones:
-            st.caption(
-                "Fuzzy c-means on the standardised channels (clipped to their 1st–99th "
-                "percentiles; Bezdek, 1981), as in Management "
-                "Zone Analyst (Fridgen et al., 2004). The lowest FPI and MPE (modified partition "
-                "entropy, Boydell & McBratney, 2002) suggest the number of zones."
-            )
-            ok = np.all(np.isfinite(features), axis=1) & np.isfinite(x) & np.isfinite(y)
-            if ok.sum() < 10:
-                st.info("Fewer than 10 readings have every chosen channel and coordinates: "
-                        "too few to form zones.")
-                return
-            data = soiltools.robust_standardise(features[ok])
-            m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}",
-                          help=SCIENCE_HELP["soil_m"])
-            rng = np.random.default_rng(0)
-            subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
-            indices = _zone_table(subset, float(m))
-            show_table(indices.round(4))
-            best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
-            c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}", help=SCIENCE_HELP["soil_zones"])
-            u = _zone_fit(data, int(c), float(m))
-            zone = u.argmax(axis=1) + 1
-            if (u.sum(axis=0) < 0.01 * len(u)).any():
-                st.warning("A zone holds less than 1 % of the readings: try fewer zones or a larger exponent.")
-            show_plan_view(zone_figure(x[ok], y[ok], zone, int(c)))
-            out = pd.DataFrame({"x": x[ok], "y": y[ok], **_lonlat_columns(x[ok], y[ok], origin), "zone": zone,
-                                **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
-            download_button("Zones (.csv)", out.to_csv(index=False).encode(),
-                            f"{file_key}_zones.csv", key=f"soil_dl_zones_{file_key}")
+    with t_zones:
+        st.caption(
+            "Fuzzy c-means on the standardised channels (clipped to their 1st–99th "
+            "percentiles; Bezdek, 1981), as in Management "
+            "Zone Analyst (Fridgen et al., 2004). The lowest FPI and MPE (modified partition "
+            "entropy, Boydell & McBratney, 2002) suggest the number of zones."
+        )
+        ok = np.all(np.isfinite(features), axis=1) & np.isfinite(x) & np.isfinite(y)
+        if ok.sum() < 10:
+            st.info("Fewer than 10 readings have every chosen channel and coordinates: "
+                    "too few to form zones.")
+            return
+        data = soiltools.robust_standardise(features[ok])
+        m = st.slider("Fuzziness exponent", 1.1, 3.0, 1.3, step=0.05, key=f"soil_m_{file_key}",
+                      help=SCIENCE_HELP["soil_m"])
+        rng = np.random.default_rng(0)
+        subset = data if len(data) <= ZONE_SAMPLE else data[rng.choice(len(data), ZONE_SAMPLE, replace=False)]
+        indices = _zone_table(subset, float(m))
+        show_table(indices.round(4))
+        best = int(indices.loc[indices["FPI"].idxmin(), "Zones"])
+        c = st.slider("Zones", 2, 6, best, key=f"soil_c_{file_key}", help=SCIENCE_HELP["soil_zones"])
+        u = _zone_fit(data, int(c), float(m))
+        zone = u.argmax(axis=1) + 1
+        if (u.sum(axis=0) < 0.01 * len(u)).any():
+            st.warning("A zone holds less than 1 % of the readings: try fewer zones or a larger exponent.")
+        show_plan_view(zone_figure(x[ok], y[ok], zone, int(c)))
+        out = pd.DataFrame({"x": x[ok], "y": y[ok], **_lonlat_columns(x[ok], y[ok], origin), "zone": zone,
+                            **{f"membership_{k + 1}": u[:, k] for k in range(int(c))}})
+        download_button("Zones (.csv)", out.to_csv(index=False).encode(),
+                        f"{file_key}_zones.csv", key=f"soil_dl_zones_{file_key}")
