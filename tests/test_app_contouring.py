@@ -164,8 +164,6 @@ def test_sidebar_offers_method_settings_and_colours():
     shown = at.main.markdown[-1].value
     assert "method='idw'" in shown and "('power', 3.0)" in shown
     assert "cmap='surfer_rainbow'" in shown and "vmax=80.0" in shown
-    at.sidebar.selectbox(key="ct_method").set_value("metrics").run()
-    assert at.sidebar.selectbox(key="ct_metric").value == "count"
 
 
 def test_sidebar_colours_apply_to_the_pseudosection_alone():

@@ -17,7 +17,6 @@ Works cited in the app and in these pages, alphabetical by first author.
 - De Smedt, P., Van Meirvenne, M., Herremans, D., De Reu, J., Saey, T., Meerschman, E., Crombé, P. & De Clercq, W. (2013). The 3-D reconstruction of medieval wetland reclamation through electromagnetic induction survey. *Scientific Reports*, **3**, 1517. https://doi.org/10.1038/srep01517
 - Delefortrie, S., Saey, T., Van De Vijver, E., De Smedt, P., Missiaen, T., Demerre, I. & Van Meirvenne, M. (2014). Frequency domain electromagnetic induction survey in the intertidal zone: Limitations of low-induction-number and depth of exploration. *Journal of Applied Geophysics*, **100**, 14–22. https://doi.org/10.1016/j.jappgeo.2013.10.005
 - Dragonetti, G., Comegna, A., Ajeel, A., Deidda, G.P., Lamaddalena, N., Rodriguez, G., Vignoli, G. & Coppola, A. (2018). Calibrating electromagnetic induction conductivities with time-domain reflectometry measurements. *Hydrology and Earth System Sciences*, **22**, 1509–1523. https://doi.org/10.5194/hess-22-1509-2018
-- Franke, R. & Nielson, G. (1980). Smooth interpolation of large sets of scattered data. *International Journal for Numerical Methods in Engineering*, **15**(11), 1691–1704. https://doi.org/10.1002/nme.1620151110
 - Fridgen, J.J., Kitchen, N.R., Sudduth, K.A., Drummond, S.T., Wiebold, W.J. & Fraisse, C.W. (2004). Management Zone Analyst (MZA): software for subfield management zone delineation. *Agronomy Journal*, **96**, 100–108. https://doi.org/10.2134/agronj2004.0100
 - Fritsch, F.N. & Carlson, R.E. (1980). Monotone piecewise cubic interpolation. *SIAM Journal on Numerical Analysis*, **17**(2), 238–246. https://doi.org/10.1137/0717021
 - Geophex Ltd. (2004). *GEM-2 Manual*, version 3.8. Raleigh, NC.
@@ -39,7 +38,6 @@ Works cited in the app and in these pages, alphabetical by first author.
 - Minsley, B.J., Smith, B.D., Hammack, R., Sams, J.I. & Veloski, G. (2010). Calibration and filtering strategies for frequency domain electromagnetic data. *SAGEEP 2010*. https://doi.org/10.4133/1.3445431
 - Oliver, M.A. & Webster, R. (2014). A tutorial guide to geostatistics: Computing and modelling variograms and kriging. *Catena*, **113**, 56–69. https://doi.org/10.1016/j.catena.2013.09.006
 - Park, S.W., Linsen, L., Kreylos, O., Owens, J.D. & Hamann, B. (2006). Discrete Sibson interpolation. *IEEE Transactions on Visualization and Computer Graphics*, **12**(2), 243–253. https://doi.org/10.1109/TVCG.2006.27
-- Renka, R.J. (1988). Multivariate interpolation of large sets of scattered data. *ACM Transactions on Mathematical Software*, **14**(2), 139–148. https://doi.org/10.1145/45054.45055
 - Reynolds, J.M. (2011). *An Introduction to Applied and Environmental Geophysics* (2nd ed.). Wiley-Blackwell.
 - Sandwell, D.T. (1987). Biharmonic spline interpolation of GEOS-3 and SEASAT altimeter data. *Geophysical Research Letters*, **14**(2), 139–142. https://doi.org/10.1029/GL014i002p00139
 - Sheets, K.R. & Hendrickx, J.M.H. (1995). Noninvasive soil water content measurement using electromagnetic induction. *Water Resources Research*, **31**(10), 2401–2409. https://doi.org/10.1029/95WR01949

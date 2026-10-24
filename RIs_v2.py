@@ -229,14 +229,8 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "the spatial correlation (variogram), with an error map. Linear: flat triangles "
         "between readings. Minimum curvature: the smoothest surface through the data, common "
         "for geophysical maps. Inverse distance: weighted mean, nearer readings count more; "
-        "leaves bull's-eyes around readings. Radial basis function: spline-like surface from "
-        "a chosen kernel. Natural neighbour: weights from the area each reading would give "
-        "up; smooth and never beyond the data range. Nearest neighbour: value of the closest "
-        "reading. Modified Shepard: inverse distance blending local quadratics, so it "
-        "follows trends. Local polynomial: a weighted polynomial fitted around each node. "
-        "Polynomial regression: one trend surface for the whole area (regional trend). "
-        "Moving average: mean of the readings within a search radius. Data metrics: a "
-        "statistic of the readings within a search radius, e.g. their number."
+        "leaves bull's-eyes around readings. Natural neighbour: weights from the area each "
+        "reading would give up; smooth and never beyond the data range."
     ),
     "heading": (
         "Keeps only readings walked within a range of headings, e.g. to check for heading "
@@ -271,9 +265,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "levels": (
         "Number of colour bands between the lowest and highest mapped value."
     ),
-    "local_power": (
-        "How fast a reading's weight falls across the search: (1 − d / R)^power."
-    ),
     "map_despike": (
         "How far from the local median a cell must be, in robust σ units, to be replaced."
     ),
@@ -288,14 +279,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "map_window": (
         "Size of the moving window, in cells per side."
     ),
-    "method_order": (
-        "Order of the polynomial: 1 is a plane, 2 a quadratic surface, 3 a cubic one. Higher "
-        "orders follow more detail but swing more where readings are sparse."
-    ),
-    "metric": (
-        "Statistic of the readings within the search radius of each node. The number and "
-        "density of readings show the survey coverage; the others summarise the values."
-    ),
     "min_curvature_tension": (
         "0 gives the smoothest surface (minimum curvature), which may overshoot between "
         "readings; values towards 1 pull the surface tight between them, like a stretched "
@@ -306,11 +289,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "quadrature grow with frequency, so they are left out). Lower frequencies see deeper "
         "on average, but the frequency axis is not a calibrated depth (McNeill, 1980)."
     ),
-    "rbf_kernel": (
-        "Basis function of the surface. Multiquadric (Surfer's default) gives a smooth "
-        "surface that follows the data closely; inverse multiquadric is flatter away from "
-        "readings; the natural cubic and thin-plate splines bend least."
-    ),
     "ref_method": (
         "Regression: least-squares line through the matched pairs. Moments: gain and offset "
         "that match the mean and spread of the reference values."
@@ -318,10 +296,6 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     "ref_radius": (
         "Survey readings within this distance of a reference point are matched to it (their "
         "median)."
-    ),
-    "search_radius": (
-        "Readings within this distance of a node are used. 0 = automatic: a circle that "
-        "holds about 16 readings at the survey's mean density."
     ),
     "separation": (
         "Distance from the transmitter to the receiver coil (1.66 m on the GEM-2). Wider "
@@ -579,7 +553,7 @@ grid, so the two give nearly the same profiles and scores.
 | **Sensor physics** | Layered-earth forward model with the bucking coil; EC / MS recomputed from I / Q by a half-space fit; frequency information; survey-planning forward model; multi-height calibration | Won et al. (1996); Ward & Hohmann (1988); McNeill (1980); Huang & Won (2000); Minsley et al. (2014) |
 | **Layered-earth inversion** | Smooth layered conductivity along the line from the quadrature, laterally constrained, with data errors from the measured noise (between passes, or within the line); EMagPy export | Constable et al. (1987); Auken & Christiansen (2004); McLachlan et al. (2021) |
 | **Interpretation aids** | Redundancy-aware frequency selection, magnetic viscosity from two frequencies, anomaly spectrum (Argand diagram), power-line noise map | Minsley et al. (2010); Simon et al. (2015); Huang & Won (2003); Geophex (2004) |
-| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and Surfer's gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, modified Shepard's method and more — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Franke & Nielson (1980); Renka (1988); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
+| **2D mapping** | Pseudo-sections (the frequency axis is not a depth axis); area maps with line levelling, block-median reduction and six gridding methods — kriging with a fitted variogram, minimum curvature, thin-plate spline, natural neighbour, linear and inverse distance — cross-validation, footprint deconvolution and combined surveys | Briggs (1974); Sandwell (1987); Smith & Wessel (1990); Park et al. (2006); Cressie (1985); Oliver & Webster (2014); Corwin & Lesch (2005); Lesch et al. (1995); Mauring & Kihle (2006); Li & Heap (2011); Guillemoteau et al. (2017) |
 | **Soil tools** | Response-surface sampling design, soil-property calibration on ln(EC), fuzzy c-means management zones | Lesch (2005); Lesch et al. (1995); Bezdek (1981); Fridgen et al. (2004); Boydell & McBratney (2002) |
 
 Methods in full: [documentation]({DOCS_URL}/README.md).
@@ -2369,11 +2343,6 @@ def _render_gridding_controls() -> dict:
             "Spline smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_smooth"),
             help="0 = exact interpolation; larger values trade fit for smoothness.",
         )
-    if adv and method == "rbf":
-        smoothing = st.number_input(
-            "Smoothing", min_value=0.0, value=0.0, step=0.1, key=wkey("ct_rbf_smooth"),
-            help="0 = exact interpolation; larger values trade fit for smoothness.",
-        )
     if adv and method == "kriging":
         variogram_model = st.selectbox(
             "Variogram model", ctr.VARIOGRAM_MODELS, key=wkey("ct_vario"), help=SCIENCE_HELP["variogram"],
@@ -2426,16 +2395,11 @@ def _render_gridding_controls() -> dict:
 
 def render_method_options(method: str) -> tuple:
     """
-    Sidebar inputs for the settings of *method*; returns (name, value) pairs.
-    In basic mode only the data-metrics statistic is offered (it picks what is
-    mapped); the other settings keep contouring.METHOD_DEFAULTS.
+    Sidebar inputs for the settings of *method* (advanced settings); returns
+    (name, value) pairs. In basic mode the settings keep contouring.METHOD_DEFAULTS.
     """
     defaults = ctr.METHOD_DEFAULTS.get(method, {})
     opts = {}
-    if method == "metrics":
-        opts["statistic"] = st.selectbox("Statistic", list(ctr.METRICS),
-                                         format_func=ctr.METRICS.get, key=wkey("ct_metric"),
-                                         help=SCIENCE_HELP["metric"])
     if not show_advanced():
         return tuple(opts.items())
     if method == "idw":
@@ -2447,21 +2411,6 @@ def render_method_options(method: str) -> tuple:
     elif method == "min_curvature":
         opts["tension"] = st.slider("Tension", 0.0, 0.95, defaults["tension"], step=0.05,
                                     key=wkey("ct_tension"), help=SCIENCE_HELP["min_curvature_tension"])
-    elif method == "rbf":
-        opts["kernel"] = st.selectbox("Basis function", list(ctr.RBF_KERNELS),
-                                      format_func=ctr.RBF_KERNELS.get, key=wkey("ct_rbf_kernel"),
-                                      help=SCIENCE_HELP["rbf_kernel"])
-    elif method in ("local_polynomial", "polynomial"):
-        opts["order"] = st.selectbox("Polynomial order", [1, 2, 3], key=wkey(f"ct_{method}_order"),
-                                     help=SCIENCE_HELP["method_order"])
-        if method == "local_polynomial":
-            opts["power"] = st.number_input("Weighting power", 0.0, 10.0, defaults["power"],
-                                            step=0.5, key=wkey("ct_local_power"),
-                                            help=SCIENCE_HELP["local_power"])
-    if method in ("moving_average", "metrics"):
-        opts["radius"] = st.number_input("Search radius (m, 0 = auto)", 0.0, value=0.0,
-                                         step=0.5, format="%.2f", key=wkey("ct_radius"),
-                                         help=SCIENCE_HELP["search_radius"])
     return tuple(opts.items())
 
 
@@ -2577,7 +2526,6 @@ def _render_area_map(
         result, processing = _map_processing(
             result, file_key, (prep or pipeline.PrepSettings()).sensor, axis
         )
-        label = ctr.result_label(result, label)
         fig = ctr.make_area_map_figure(
             result, label, f"{freq} [{mode}] — {ctr.method_title(result)}",
             contour.n_levels, show_points=contour.show_points, style=contour.colours,
@@ -2815,7 +2763,7 @@ def render_combined_maps(
                                                      **grid_params(contour))
             st.dataframe(pd.DataFrame({"Survey": chosen, "Offset added": offsets}).round(4),
                          hide_index=True, width="content")
-            fig = ctr.make_area_map_figure(result, ctr.result_label(result, unit),
+            fig = ctr.make_area_map_figure(result, unit,
                                            f"{col} — merged", contour.n_levels,
                                            show_points=contour.show_points,
                                            style=contour.colours)

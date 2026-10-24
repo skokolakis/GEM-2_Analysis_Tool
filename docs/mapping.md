@@ -43,14 +43,7 @@ The gridding methods of Golden Software's Surfer:
 | Linear (Delaunay) | Triangulation; blank outside the data hull. |
 | Minimum curvature | The smoothest surface through the data (Briggs, 1974), the usual choice for geophysical maps. Tension 0–0.95 (Smith & Wessel, 1990): 0 is pure minimum curvature, which can overshoot between readings; higher tension pulls the surface tight between them. Solved directly as one sparse least-squares system on the grid (edges free), so it is limited to 300,000 grid nodes. |
 | Inverse distance to a power | Weighted mean of the 64 nearest block medians, weights 1 / (d² + δ²)^(power/2). Power 2 by default; a smoothing distance δ > 0 stops the surface passing exactly through readings and softens the bull's-eyes this method leaves around them. |
-| Radial basis function | Multiquadric (Surfer's default), inverse multiquadric, natural cubic spline (r³) or thin-plate spline, with the 64 nearest points above 2,000 block medians. The multiquadric shape follows Surfer: R² = (diagonal of the data extent)² / (25 n). |
 | Natural neighbour | Sibson weights — the area each reading would give up to a new point — computed in the discrete form of Park et al. (2006) on a raster four times finer than the grid. Smooth, never beyond the data range, and blank-free inside the data. |
-| Nearest neighbour | Value of the closest block median: no smoothing, useful for dense regular grids. |
-| Modified Shepard's method | Inverse-distance blend of local quadratics fitted around every reading (Franke & Nielson, 1980), with 13 points per quadratic and 19 for the weights as in Surfer, so it follows trends that plain inverse distance flattens. |
-| Local polynomial | A polynomial of order 1–3 fitted around each node to its 64 nearest block medians, weights (1 − d / R)^power. |
-| Polynomial regression | One trend surface (order 1–3) for the whole area, to show or remove a regional trend. |
-| Moving average | Mean of the block medians within a search radius (automatic: a circle that holds about 16 readings at the survey's mean density). |
-| Data metrics | A statistic of the block medians within the search radius: number, density, median, minimum, maximum, range or standard deviation. Number and density show the survey coverage. Not cross-validated, since these are summaries rather than estimates. |
 
 Minimum curvature and natural neighbour are computed on the grid itself; cross-validation grids each training fold and reads it at the held-out points.
 

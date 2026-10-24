@@ -690,8 +690,7 @@ def test_kriging_pure_noise_stays_within_noise(model):
 
 BUMP_RMSE = {          # cell 1 m, lines 5 m apart; smoothing / non-exact methods get more room
     "spline": 0.05, "kriging": 0.1, "linear": 0.2, "min_curvature": 0.05, "idw": 0.5,
-    "rbf": 0.1, "natural_neighbor": 0.2, "nearest": 0.6, "shepard": 0.1,
-    "local_polynomial": 0.5, "moving_average": 0.5,
+    "natural_neighbor": 0.2,
 }
 
 
@@ -707,8 +706,6 @@ def test_every_method_maps_the_bump(method):
 
 @pytest.mark.parametrize("method,options,tol", [
     ("min_curvature", {"tension": 0.0}, 1e-6),
-    ("local_polynomial", {"order": 1}, 1e-6),
-    ("polynomial", {"order": 1}, 1e-6),
     ("natural_neighbor", {}, 0.2),
 ])
 def test_methods_reproduce_a_plane_inside_the_survey(method, options, tol):
@@ -731,24 +728,10 @@ def test_min_curvature_honours_the_readings_at_any_tension(tension):
     assert np.max(np.abs(at_points - res.bv)[inside]) < 0.01
 
 
-def test_polynomial_orders_fit_their_own_surfaces():
-    rng = np.random.default_rng(1)
-    px, py = rng.uniform(0, 10, 200), rng.uniform(0, 10, 200)
-    f = 1 + px - 2 * py + 0.3 * px * py - 0.1 * py ** 2 + 0.02 * px ** 3
-    q = np.array([2.0, 7.5]), np.array([3.0, 6.0])
-    exact = 1 + q[0] - 2 * q[1] + 0.3 * q[0] * q[1] - 0.1 * q[1] ** 2 + 0.02 * q[0] ** 3
-    est, _ = C.predict(px, py, f, *q, "polynomial", options={"order": 3})
-    assert np.allclose(est, exact)
-    est, _ = C.predict(px, py, f, *q, "polynomial", options={"order": 1})
-    assert not np.allclose(est, exact)
-    with pytest.raises(C.ContouringError, match="order"):
-        C.predict(px, py, f, *q, "polynomial", options={"order": 4})
-
-
 def test_exact_methods_pass_through_readings():
     rng = np.random.default_rng(2)
     px, py, pv = rng.uniform(0, 10, 50), rng.uniform(0, 10, 50), rng.normal(0, 1, 50)
-    for method in ("idw", "nearest", "shepard", "rbf"):
+    for method in ("idw", "spline"):
         est, _ = C.predict(px, py, pv, px[:5], py[:5], method)
         assert np.allclose(est, pv[:5], atol=1e-6), method
 
@@ -764,45 +747,6 @@ def test_idw_power_and_smoothing():
     assert on[0] > 0.0                                # smoothing no longer honours the reading
     with pytest.raises(C.ContouringError, match="power"):
         C.predict(px, py, pv, *q, "idw", options={"power": 0.0})
-
-
-def test_moving_average_and_data_metrics():
-    px = np.array([0.0, 1.0, 0.0, 1.0, 10.0])
-    py = np.array([0.0, 0.0, 1.0, 1.0, 10.0])
-    pv = np.array([1.0, 2.0, 3.0, 6.0, 100.0])
-    q = np.array([0.5, 20.0]), np.array([0.5, 20.0])
-    mean, _ = C.predict(px, py, pv, *q, "moving_average", options={"radius": 2.0})
-    assert mean[0] == pytest.approx(3.0) and np.isnan(mean[1])
-
-    def metric(stat):
-        return C.predict(px, py, pv, *q, "metrics", options={"statistic": stat, "radius": 2.0})[0]
-
-    assert metric("count").tolist() == [4.0, 0.0]
-    assert metric("density")[0] == pytest.approx(4 / (math.pi * 4.0))
-    assert metric("median")[0] == pytest.approx(2.5)
-    assert metric("minimum")[0] == 1.0 and metric("maximum")[0] == 6.0
-    assert metric("range")[0] == 5.0
-    assert metric("std")[0] == pytest.approx(np.std([1, 2, 3, 6], ddof=1))
-
-
-def test_rbf_kernels_and_titles():
-    for kernel in C.RBF_KERNELS:
-        res = C.compute_area_map(line_survey(), VALUE_COL, method="rbf", cell_size=2.0,
-                                 options={"kernel": kernel})
-        assert bump_rmse(res) < 0.5, kernel           # inverse multiquadric is the flattest
-        assert C.RBF_KERNELS[kernel].lower() in C.method_title(res)
-
-
-def test_metrics_label_title_and_no_cross_validation():
-    res = C.compute_area_map(line_survey(), VALUE_COL, method="metrics", cell_size=2.0,
-                             options={"statistic": "count"})
-    assert C.result_label(res, "EC (mS/m)") == "Readings within the search radius"
-    assert C.method_title(res) == "Data metrics: number of readings"
-    res = C.compute_area_map(line_survey(), VALUE_COL, method="metrics", cell_size=2.0,
-                             options={"statistic": "median"})
-    assert C.result_label(res, "EC (mS/m)") == "Median of EC (mS/m)"
-    with pytest.raises(C.ContouringError, match="summaries"):
-        C.cross_validate(res.bx, res.by, res.bv, "metrics", options=res.options)
 
 
 def test_grid_methods_need_the_grid_and_limit_its_size():
