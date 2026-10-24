@@ -78,19 +78,44 @@ def test_repeat_passes_are_pooled_within_their_transect():
     _, sc, *_ = R.process_sheet(df, 0.5, "linear", {f"Line_{k}": k // 2 for k in range(4)})
     assert sc["noise_method"] == R.NOISE_BETWEEN and sc["passes"] == 2
     assert 0.7 < sc["mean_std"] < 1.4
-    assert 15 < sc["amplitude"] < 30                           # range within a transect, not 100 + 20
+    assert 6 < sc["signal_std"] < 8.5                          # 10 sin within a transect (≈ 7.1), not the 100 step
 
 
-def test_amplitude_ignores_a_spike_but_keeps_a_real_anomaly():
-    d = np.arange(0.0, 40.0, 0.5)
-    anomaly = 20.0 * np.exp(-((d - 20.0) / 1.5) ** 2)          # as wide as the sensor footprint
-    clean = pd.DataFrame({"d": d, "a": anomaly, "b": anomaly + 0.1})
-    _, sc, *_ = R.process_sheet(clean, 0.5, "linear")
-    assert sc["amplitude"] == pytest.approx(20.0, rel=0.15)     # the median trims the very top
-    spiked = clean.copy()
-    spiked.loc[10, ["a", "b"]] += 100.0                          # one reading, both passes
-    _, sp, *_ = R.process_sheet(spiked, 0.5, "linear")
-    assert sp["amplitude"] == pytest.approx(sc["amplitude"], rel=0.02)
+@pytest.mark.parametrize("passes", [2, 5])
+def test_snr_is_signal_power_over_noise_power_whatever_the_passes(passes):
+    d = np.arange(0.0, 200.0, 0.5)
+    signal = 3.0 * np.sin(d / 7.0)                              # power 4.5
+    est = []
+    for seed in range(40):
+        rng = np.random.default_rng(seed)
+        df = pd.DataFrame({"d": d, **{f"p{k}": signal + rng.normal(0, 1.0, d.size) for k in range(passes)}})
+        _, sc, *_ = R.process_sheet(df, 0.5, "linear")
+        est.append(sc["snr"])
+        assert sc["score"] == pytest.approx(10 * np.log10(sc["snr"]))
+    # var(mean profile) holds 1/passes of the noise; it is subtracted, so the SNR is unbiased
+    assert np.mean(est) == pytest.approx(4.5, rel=0.05)
+
+
+def test_snr_of_a_single_pass():
+    d = np.arange(0.0, 200.0, 0.5)
+    est = [R.process_sheet(pd.DataFrame({"d": d, "a": 3.0 * np.sin(d / 7.0)
+                                         + np.random.default_rng(s).normal(0, 1.0, d.size)}),
+                           0.5, "linear")[1]["snr"] for s in range(40)]
+    assert np.mean(est) == pytest.approx(4.5, rel=0.1)
+
+
+def test_pure_noise_has_no_signal_and_a_blank_score():
+    rng = np.random.default_rng(3)
+    d = np.arange(0.0, 100.0, 0.5)
+    blank = 0
+    for _ in range(20):
+        df = pd.DataFrame({"d": d, "a": rng.normal(0, 1, d.size), "b": rng.normal(0, 1, d.size)})
+        _, sc, _, warnings = R.process_sheet(df, 0.5, "linear")
+        assert sc["snr"] < 0.15 or np.isnan(sc["score"])          # no signal beyond chance
+        if np.isnan(sc["score"]):
+            blank += 1
+            assert any("no signal rises above the noise" in w for w in warnings)
+    assert blank > 0
 
 
 def test_area_survey_file_warns_about_separate_lines():
@@ -163,7 +188,7 @@ def test_batch_export_handles_grids_of_different_length():
 # ---------------------------------------------------------------------------
 
 X = np.arange(0, 100.5, 0.5)
-STEP = 20 + 10 * np.tanh((X - 50) / 5)      # true amplitude ≈ 20
+STEP = 20 + 10 * np.tanh((X - 50) / 5)      # true signal σ ≈ 9.5
 
 
 def _trace(rng, lo=0.0, hi=100.0, noise=0.5):
@@ -182,7 +207,7 @@ def test_traces_are_not_extrapolated(method):
     assert error is None
     assert interp.loc[interp.index < 3, "L2"].isna().all()
     assert interp.loc[interp.index > 95, "L3"].isna().all()
-    assert sc["amplitude"] < 22                      # was up to 294 for cubic
+    assert sc["signal_std"] < 11                     # extrapolated ends would inflate it
     assert 0.4 < sc["mean_std"] < 0.6
 
 
@@ -222,7 +247,7 @@ def test_single_and_multi_trace_scores_agree_and_are_labelled():
         b["L2"] = np.nan
         sa = R.process_sheet(a, 0.5, "linear")[1]
         sb = R.process_sheet(b, 0.5, "linear")[1]
-        ratios.append(sb["score"] / sa["score"])
+        ratios.append(sb["snr"] / sa["snr"])
     assert (sa["noise_method"], sa["n_traces"]) == (R.NOISE_BETWEEN, 3)
     assert (sb["noise_method"], sb["n_traces"]) == (R.NOISE_INTRA, 1)
     # Same signal and noise: the estimators agree on average (was 38 vs 64)

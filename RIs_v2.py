@@ -33,7 +33,6 @@ import ui_tools
 DEFAULT_DISTANCE_STEP = 0.5
 DEFAULT_INTERP_KIND = "linear"
 SCORE_EPSILON = 1e-8
-AMPLITUDE_WINDOW_M = 1.0   # running median before the range: narrower than the GEM-2 footprint
 
 # Noise estimators recorded in each score_dict ("noise_method")
 NOISE_BETWEEN = "between-trace"   # ≥ 2 overlapping passes
@@ -106,7 +105,7 @@ GEM_MS_PATTERN = gem_io.CHANNEL_PATTERNS["MS"]
 GEM_REQUIRED_COLS = {'Line', 'Y'}
 
 SCORING_HELP = (
-    "Rank frequencies by contrast-to-noise score (amplitude / noise σ). Off: "
+    "Rank frequencies by their signal-to-noise ratio (signal power / noise power, in dB). Off: "
     "profiles, maps and exports are produced without scores."
 )
 SMOOTHING_SCORE_WARNING = (
@@ -441,14 +440,17 @@ instrument drift, operator-induced variability and short-term
 environmental noise; this replicated design is what makes the
 between-pass spread a meaningful noise estimate.
 
-Each frequency receives a **representativeness score**:
+Each frequency receives a **signal-to-noise ratio** (SNR), the ratio
+of signal power to noise power (Sheriff & Geldart, 1995), in decibels
+as is usual for data quality (Bakulin et al., 2022):
 
-$$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
+$$\\mathrm{{SNR_{{dB}}}} = 10\\,\\log_{{10}}\\frac{{P_s}}{{P_n}}, \\qquad P_n = \\sigma_{{\\text{{noise}}}}^2, \\qquad P_s = \\operatorname{{var}}(\\bar p) - \\sigma_{{\\text{{noise}}}}^2 \\left\\langle \\tfrac{{1}}{{k}} \\right\\rangle$$
 
 | Symbol | Meaning |
 |---|---|
-| **A** | Amplitude — max − min of the mean profile after a 1 m running median, taken where at least two passes overlap (single-pass files: the whole profile). The total contrast resolved at that frequency; the running median keeps a single spike or noise extreme from setting it; real anomalies, wider than the sensor, lose only the very top of their peak, alike at every frequency. |
-| **σ_noise** | Noise, estimated from the data as below. |
+| **p̄** | Mean profile of the passes, where at least two overlap (single-pass files: the measured readings) |
+| **P_s** | Signal power — the variance of p̄ about its mean, less the noise still in it: averaging k passes leaves σ²/k of noise at each distance (single pass: k = 1). So P_s does not grow with the noise, however many passes there are. |
+| **P_n** | Noise power, σ², with σ estimated from the data as below. |
 
 - **≥ 2 passes (recommended):** at each distance step where at least
   two passes were measured, the sample variance across passes
@@ -474,11 +476,9 @@ $$\\text{{Score}} = \\frac{{A}}{{\\sigma_{{\\text{{noise}}}}}}$$
 - **σ < 10⁻⁸ or not estimable:** the score is left blank and ranked
   last, with a warning.
 
-The score is a **contrast-to-noise ratio**: the range of the signal
-over the noise σ. It is related to, but not the same as, the
-signal-to-noise ratio of seismic practice (RMS signal over RMS noise;
-Sheriff & Geldart, 1995; Bakulin et al., 2022): it rewards the largest
-contrast a frequency resolves.
+0 dB means as much signal as noise power; every 10 dB is ten times
+more. When P_s ≤ 0 — no signal rises above the noise — the score is
+left blank and ranked last.
 
 > **Filters change scores.** Despiking lowers σ and so raises the
 > score. Compare scores only between runs with the same settings.
@@ -555,8 +555,8 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **MS** | Apparent magnetic susceptibility (10⁻³ SI) — from the in-phase |
 | **LIN** | Low-induction-number approximation (B = s/δ ≪ 1), under which EC and MS decouple (McNeill, 1980) |
 | **Skin depth (δ)** | Depth at which the primary field falls to 1/e; decreases with frequency and conductivity |
-| **Score** | A / σ_noise — a contrast-to-noise ratio, used for frequency ranking |
-| **Amplitude (A)** | max − min of the mean profile (1 m running median) where at least two passes overlap |
+| **SNR** | Signal-to-noise ratio, 10 log₁₀(P_s / P_n) dB — the score used for frequency ranking |
+| **P_s, P_n** | Signal power (variance of the mean profile less its remaining noise) and noise power (σ²_noise) |
 | **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
@@ -836,17 +836,26 @@ def process_sheet(
 
     *tracks* maps trace columns to transects (gem_io.track_groups): only
     traces on one transect are repeat passes, so the between-trace noise and
-    the amplitude are taken within each transect walked at least twice, or
-    within each trace when every transect was walked once. None: all traces
-    are repeat passes of one transect.
+    the signal power are taken within each transect walked at least twice,
+    or within each trace when every transect was walked once. None: all
+    traces are repeat passes of one transect.
+
+    The score is the signal-to-noise ratio in dB, 10 log10(P_s / P_n): the
+    noise power P_n = sigma^2, and the signal power P_s is the variance of
+    the mean profile about its mean minus the noise left in it, sigma^2 x
+    mean(1 / k) with k passes at each distance (single pass: the variance of
+    the measured readings minus sigma^2), so P_s is unbiased however many
+    passes were averaged.
 
     Returns
     -------
     interpolated_df : DataFrame indexed by common distance, columns = original trace
                       columns; NaN outside each trace's own measured range
-    score_dict      : {"mean_std": σ_noise, "amplitude": float, "score": float,
-                       "noise_method": NOISE_BETWEEN | NOISE_INTRA, "n_traces": int,
-                       "passes": passes per transect behind σ (median)}
+    score_dict      : {"mean_std": σ_noise, "signal_std": √P_s, "snr": P_s / P_n,
+                       "score": SNR in dB, "noise_method": NOISE_BETWEEN | NOISE_INTRA,
+                       "n_traces": int, "passes": passes per transect behind σ (median)}
+                      score is NaN when the noise is zero or undefined, or
+                      when no signal rises above the noise
                       score is NaN when the noise is zero or undefined
     error           : human-readable reason for failure, or None on success
     col_warnings    : list of per-column warning strings surfaced to the UI
@@ -938,42 +947,47 @@ def process_sheet(
         # measured. The passes are a finite sample of the measurement process,
         # hence ddof=1; the point-wise variances are pooled as sqrt(mean(var)).
         # Lines at different positions differ by the ground, not by noise.
-        variances, ranges, passes = [], [], []
+        variances, profiles, passes = [], [], []
         for cols in repeats:
             sub = interpolated_df[cols]
-            overlap = sub.notna().sum(axis=1) >= 2
+            count = sub.notna().sum(axis=1)
+            overlap = count >= 2
             if not overlap.any():
                 continue
             variances.append(sub[overlap].var(axis=1, skipna=True, ddof=1).to_numpy())
-            ranges.append(profile_range(sub[overlap].mean(axis=1, skipna=True), distance_step))
+            # mean profile and the number of passes averaged at each distance
+            profiles.append((sub[overlap].mean(axis=1, skipna=True).to_numpy(), count[overlap].to_numpy()))
             passes.append(len(cols))
         if not variances:
             return None, None, "traces do not overlap in distance", col_warnings
         noise = float(np.sqrt(np.nanmean(np.concatenate(variances))))
+        signal_power = _signal_power([p for p, _ in profiles], [1.0 / k for _, k in profiles], noise)
         noise_method = NOISE_BETWEEN
     else:
-        # Every transect walked once: noise and contrast within each trace.
+        # Every transect walked once: noise and signal within each trace, on
+        # its measured readings (the noise estimate comes from them too).
         sigmas = np.array([_intra_profile_noise(raw_samples[c]) for c in interpolated_df.columns])
         noise = float(np.sqrt(np.nanmean(sigmas ** 2))) if np.isfinite(sigmas).any() else float("nan")
-        ranges = [profile_range(interpolated_df[c], distance_step) for c in interpolated_df.columns]
+        traces = [raw_samples[c] for c in interpolated_df.columns]
+        signal_power = _signal_power(traces, [np.ones(len(t)) for t in traces], noise)
         passes = [1]
         noise_method = NOISE_INTRA
 
-    amplitude = float(np.median(ranges))   # one transect: the range of its mean profile
-
-    if np.isfinite(noise) and noise >= SCORE_EPSILON:
-        score = amplitude / noise
+    snr, score = np.nan, np.nan
+    if not (np.isfinite(noise) and noise >= SCORE_EPSILON):
+        # Zero or undefined noise: a ratio would be meaningless.
+        col_warnings.append(f"{noise_method} noise is zero or undefined — score left blank")
+    elif not signal_power > 0:
+        snr = 0.0
+        col_warnings.append("no signal rises above the noise (signal power ≤ 0) — score left blank")
     else:
-        # Zero or undefined noise: a ratio would be meaningless, and falling
-        # back to the amplitude would rank a data-unit value against ratios.
-        score = np.nan
-        col_warnings.append(
-            f"{noise_method} noise is zero or undefined — score left blank"
-        )
+        snr = signal_power / noise ** 2
+        score = 10.0 * np.log10(snr)
 
     score_dict = {
         "mean_std": noise,
-        "amplitude": amplitude,
+        "signal_std": float(np.sqrt(signal_power)) if signal_power > 0 else 0.0,
+        "snr": snr,
         "score": score,
         "noise_method": noise_method,
         "n_traces": n_traces,
@@ -982,17 +996,23 @@ def process_sheet(
     return interpolated_df, score_dict, None, col_warnings
 
 
-def profile_range(profile: pd.Series, distance_step: float) -> float:
+def _signal_power(profiles: list[np.ndarray], noise_shares: list[np.ndarray], noise: float) -> float:
     """
-    Contrast of a profile: max − min after a running median over
-    AMPLITUDE_WINDOW_M (at least 3 grid points). A single spike or a noise
-    extreme no longer sets the range, while any real anomaly is wider than
-    the sensor's footprint (coils 1.66 m apart) and survives; only the very
-    top of a peak is trimmed, alike at every frequency.
+    Signal power pooled over transects: for each profile its variance about
+    its mean (ddof = 1) minus the noise left in it, noise^2 x mean(share),
+    the share being 1 / (passes averaged) at each distance; weighted by the
+    number of distances. NaN when no profile has two values.
     """
-    window = max(3, int(round(AMPLITUDE_WINDOW_M / distance_step)) | 1)
-    smooth = pd.Series(np.asarray(profile, dtype=float)).rolling(window, center=True, min_periods=1).median()
-    return float(np.nanmax(smooth) - np.nanmin(smooth))
+    total, weight = 0.0, 0
+    for p, share in zip(profiles, noise_shares):
+        p, share = np.asarray(p, dtype=float), np.asarray(share, dtype=float)
+        ok = np.isfinite(p)
+        if ok.sum() < 2:
+            continue
+        power = float(np.var(p[ok], ddof=1)) - (noise ** 2 * float(np.mean(share[ok])) if np.isfinite(noise) else 0.0)
+        total += power * ok.sum()
+        weight += int(ok.sum())
+    return total / weight if weight else float("nan")
 
 
 def _intra_profile_noise(y: np.ndarray) -> float:
@@ -1079,7 +1099,7 @@ def make_overview_figure(
         common_dist = interp_df.index.values
         name = ctr.value_label(mode, sheet_name) if mode == "AUX" else sheet_name
         if show_scores:
-            name = f"{name} (score={scores[sheet_name]['score']:.2f})"
+            name = f"{name} (SNR {scores[sheet_name]['score']:.1f} dB)"
         if not np.all(np.isnan(rep_prof.values)):
             ax.plot(
                 common_dist,
@@ -1307,7 +1327,7 @@ def build_batch_xlsx(
 
     Workbook layout
     ---------------
-    Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise,
+    Sheet "Scores"   : one row per (file, mode, frequency) with SNR (dB) / signal σ / noise σ,
                        noise method and number of traces (only if *include_scores*)
     Per (file, mode) : distance column + one mean-profile column per frequency
     """
@@ -1327,8 +1347,8 @@ def build_batch_xlsx(
                     "File": stem,
                     "Mode": mode,
                     "Frequency / Sheet": freq,
-                    "Score": round(sc["score"], 4),
-                    "Amplitude": round(sc["amplitude"], 6),
+                    "SNR (dB)": round(sc["score"], 4),
+                    "Signal (σ)": round(sc["signal_std"], 6),
                     "Noise (σ)": round(sc["mean_std"], 6),
                     "Noise method": sc["noise_method"],
                     "Traces": sc["n_traces"],
@@ -1616,8 +1636,8 @@ def _render_mode_section(
             sc = scores[sheet_name]
             if show_scores:
                 st.markdown(
-                    f"**{sheet_name}** — score {sc['score']:.2f} · "
-                    f"A = {sc['amplitude']:.4g} · σ = {sc['mean_std']:.4g} "
+                    f"**{sheet_name}** — SNR {sc['score']:.1f} dB · "
+                    f"signal σ = {sc['signal_std']:.4g} · noise σ = {sc['mean_std']:.4g} "
                     f"({sc['noise_method']}, {ui_tools.plural(sc['n_traces'], 'trace')})"
                 )
             else:
@@ -1675,8 +1695,8 @@ def _render_ranking(scores: dict[str, dict]) -> None:
             {
                 "Rank": i,
                 "Frequency / Sheet": name,
-                "Score": round(m["score"], 2),
-                "Amplitude": round(m["amplitude"], 6),
+                "SNR (dB)": round(m["score"], 2),
+                "Signal (σ)": round(m["signal_std"], 6),
                 "Noise (σ)": round(m["mean_std"], 6),
                 "Noise method": m["noise_method"],
                 "Traces": m["n_traces"],
@@ -1689,28 +1709,26 @@ def _render_ranking(scores: dict[str, dict]) -> None:
     with col_table:
         st.markdown("#### Frequency ranking")
         styled = rank_df.style.format(
-            {"Score": "{:.2f}", "Amplitude": "{:.4g}", "Noise (σ)": "{:.4g}"}, na_rep="—"
+            {"SNR (dB)": "{:.2f}", "Signal (σ)": "{:.4g}", "Noise (σ)": "{:.4g}"}, na_rep="—"
         )
-        if rank_df["Score"].notna().any():  # all-blank scores have nothing to colour
-            styled = styled.background_gradient(subset=["Score"], cmap="Blues")
+        if rank_df["SNR (dB)"].notna().any():  # all-blank scores have nothing to colour
+            styled = styled.background_gradient(subset=["SNR (dB)"], cmap="Blues")
         ui_tools.show_table(styled)
     with col_best:
         best_name, best_metrics = ranking[0]
         st.metric("Best frequency", best_name)
         st.metric(
-            "Score (A / σ)",
-            f"{best_metrics['score']:.2f}",
+            "SNR",
+            f"{best_metrics['score']:.1f} dB",
             help=(
-                "Score = amplitude / noise (σ). "
-                "Multi-trace: σ = pooled sample std across passes (ddof=1), "
-                "where ≥ 2 passes overlap. "
-                "Single-trace: σ from second differences of the measured "
-                "samples (robust MAD). "
-                "If σ is zero or undefined, the score is left blank. "
-                "Higher score = cleaner, larger signal."
+                "SNR = 10 log10(P_signal / P_noise). P_noise = σ²: the pooled sample variance "
+                "across passes (ddof=1) where ≥ 2 passes overlap, or from second differences of "
+                "the measured samples (robust MAD) for a single pass. P_signal = variance of the "
+                "mean profile minus the noise left in it (σ² / passes averaged). Blank when σ is "
+                "zero or undefined, or when no signal rises above the noise."
             ),
         )
-        st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
+        st.metric("Signal (σ)", f"{best_metrics['signal_std']:.4g}")
         st.metric("Noise (σ)", f"{best_metrics['mean_std']:.4g}")
 
 
@@ -2846,7 +2864,7 @@ TOUR_STEPS = [                   # (icon, title, where it happens)
     (":material/fact_check:", "Check the summary",
      "A card under each file gives its lines, frequencies and the tools it supports."),
     (":material/leaderboard:", "Rank frequencies",
-     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by contrast-to-noise."),
+     "Switch on **Frequency scoring** (sidebar → Profiles) to rank them by signal-to-noise ratio."),
     (":material/map:", "Map",
      "Switch on **Area map** or **Pseudo-section** (sidebar → 2D contouring)."),
     (":material/download:", "Export",

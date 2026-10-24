@@ -26,16 +26,20 @@ Each trace is used only inside its own measured distance range — grid points o
 
 ## Scoring
 
-$$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
+Each frequency is scored by its **signal-to-noise ratio** — the ratio of signal power to noise power (Sheriff & Geldart, 1995), in decibels as is usual for data-quality assessment (Bakulin et al., 2022):
 
-- **A (amplitude)** = max − min of the representative (mean) profile after a running median over 1 m (at least 3 grid points), taken where at least two passes overlap (single-pass files: the whole profile). It is the total geophysical contrast resolved at that frequency. The plain max − min is an extreme-value statistic — one spike sets it, and noise pushes it up most at the noisiest frequencies, partly cancelling the penalty in σ. Real anomalies are wider than the GEM-2's footprint (coils 1.66 m apart), so the 1 m median keeps them; it trims the very top of a peak by about the change over one grid step (≈ 10 % for an anomaly 3 m wide at a 0.5 m step), the same at every frequency, so the ranking is unchanged.
-- **σ_noise** depends on the number of passes:
+$$\mathrm{SNR_{dB}} = 10\,\log_{10}\frac{P_s}{P_n}, \qquad P_n = \sigma_{\text{noise}}^2, \qquad P_s = \operatorname{var}(\bar p) - \sigma_{\text{noise}}^2\left\langle \tfrac{1}{k} \right\rangle$$
+
+- **p̄** is the representative (mean) profile, where at least two passes overlap (single-pass files: the measured readings), and **k** the number of passes averaged at each distance.
+- **P_s (signal power)** is the variance of p̄ about its mean less the noise still in it. Averaging k passes leaves σ²/k of noise at each distance, so var(p̄) = P_s + σ²⟨1/k⟩ on average; subtracting that term makes P_s unbiased, so a noisier frequency does not gain signal from its own noise (a single pass: k = 1, P_s = var(y) − σ²). The signal is the variation of the profile about its mean — the contrasts the frequency resolves; a constant level carries no information about the ground.
+- **P_n (noise power)** is σ²_noise, with σ estimated as follows:
   - **Multi-trace (≥ 2 passes)** — sample standard deviation across passes (ddof = 1) at each distance step where ≥ 2 passes were measured, pooled as √(mean variance). It captures instrument noise, positioning uncertainty and short-term drift.
   - **Single-trace fallback** — estimated from the *measured* samples (not the interpolated grid) by second differences, which cancel a locally linear trend: for white noise var(Δ²y) = 6σ², so σ ≈ 1.4826 · MAD(Δ²y) / √6. The median absolute deviation ignores the few large differences at sharp boundaries, and the estimate does not depend on the distance step or interpolation method.
-  - **Lines at different positions** — the passes are grouped into transects by their position across the line direction (lines less than 1 m apart are one transect). The between-pass σ is pooled only over transects walked at least twice, and A is the median range of their mean profiles. When every transect was walked once (an area survey), σ is the single-trace estimate pooled over the lines as √(mean σ²) and A is the median range of the lines. Lines over different ground differ by the geology, not by noise, so they are never compared with each other. Files without coordinates are taken as repeat passes of one transect.
+  - **Lines at different positions** — the passes are grouped into transects by their position across the line direction (lines less than 1 m apart are one transect). The between-pass σ is pooled only over transects walked at least twice, and P_s over their mean profiles (weighted by length). When every transect was walked once (an area survey), σ is the single-trace estimate pooled over the lines as √(mean σ²) and P_s is pooled over the lines. Lines over different ground differ by the geology, not by noise, so they are never compared with each other. Files without coordinates are taken as repeat passes of one transect.
   - **Zero or undefined noise** (σ < 10⁻⁸ or not estimable) — the score is left blank and ranked last, with a warning.
+- **No signal above the noise** (P_s ≤ 0) — the score is left blank and ranked last, with a warning.
 
-**Higher score = cleaner, larger-contrast signal** → better for detailed profiling. The score is a **contrast-to-noise ratio** (range of the signal over the noise σ), related to but not the same as the RMS signal-to-noise ratio used in seismic data quality (Sheriff & Geldart, 1995; Bakulin et al., 2022).
+**Higher SNR = more of the measured variation is ground, less is noise** → better for detailed profiling. 0 dB means equal signal and noise power; every 10 dB is a tenfold ratio. The ranking and exports show the SNR in dB with the signal σ (√P_s) and the noise σ in the data's units.
 
 The ranking table and exports show the **noise method** and number of **traces** behind each score. When some frequencies in a file fall back to the single-trace estimate, a warning says their scores are not strictly comparable with the others.
 

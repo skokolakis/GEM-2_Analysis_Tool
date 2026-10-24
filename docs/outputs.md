@@ -9,7 +9,7 @@ Under each mode tab, **Downloads**:
 | File | Content |
 |---|---|
 | Interpolated profiles (`.xlsx`) | One sheet per frequency: `Distance (m)` (the common interpolation grid) and `{Frequency}_mean` (the representative profile, mean across lines) |
-| Scores (`.csv`) — scoring on only | One row per frequency: `mean_std` (noise σ, in the measurement's units), `amplitude`, `score` (amplitude ÷ noise; blank if σ is zero or undefined), `noise_method` (`between-trace` or `intra-profile`), `n_traces` (passes used) |
+| Scores (`.csv`) — scoring on only | One row per frequency: `mean_std` (noise σ, in the measurement's units), `signal_std` (signal σ = √P_s), `snr` (P_s / P_n), `score` (SNR in dB; blank if σ is zero or undefined or no signal rises above the noise), `noise_method` (`between-trace` or `intra-profile`), `n_traces` (passes used) |
 | Overview plot (`.png`) | All frequencies on one axes; scores in the legend when scoring is on |
 
 ## Batch export
@@ -20,7 +20,7 @@ One workbook for all uploaded files with the current interpolation method:
 
 | Sheet | Contents |
 |---|---|
-| `Scores` | One row per (file, mode, frequency) with Score, Amplitude, Noise (σ), Noise method, Traces — scoring on only |
+| `Scores` | One row per (file, mode, frequency) with SNR (dB), Signal (σ), Noise (σ), Noise method, Traces — scoring on only |
 | `{stem}_{mode}` | Distance column + one `{freq}_mean` column per frequency, joined on distance (a frequency is blank where it has no data) |
 
 ## Elsewhere in the app
