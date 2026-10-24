@@ -2350,7 +2350,8 @@ def render_corrections_sidebar() -> corrections.CorrectionSettings:
             offsets_file = st.file_uploader(
                 "Calibration offsets (.csv)", type=["csv"], key=wkey("cor_offsets"),
                 help="Columns 'column' and 'offset'; each offset is subtracted from that column. "
-                     "Produced by 'Multi-height calibration' under a file.",
+                     "Produced by 'Multi-height calibration' under a file. I / Q offsets reach "
+                     "EC / MS only with 'Recompute EC / MS from I / Q' (Sensor geometry).",
             )
             background = st.number_input("Known background EC (mS/m, 0 = off)", 0.0, 10_000.0, 0.0,
                                          key=wkey("cor_bg"), help=SCIENCE_HELP["background"])

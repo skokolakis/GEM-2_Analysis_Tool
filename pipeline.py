@@ -20,6 +20,12 @@ import interpret
 
 DISTANCE_COL = gem_io.DISTANCE_COL   # column added by prepare_gem_table
 READING_ORDER_METHODS = ("sample", "markers")   # distances that count every logged reading
+OFFSETS_NOT_IN_EC = (
+    "The calibration offsets were subtracted from the I / Q channels only: the EC and MS "
+    "columns of this file are still as exported, so EC / MS profiles, scores and maps are not "
+    "calibrated. Turn on 'Recompute EC / MS from I / Q' (Sensor geometry, advanced settings) "
+    "to calibrate them."
+)
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,8 @@ def prepare_gem_table(raw: pd.DataFrame, prep: PrepSettings | None = None) -> tu
     elif prep.corrections.active:
         df, steps = corrections.apply_corrections(df, prep.corrections)
         messages.extend(steps)
+        if prep.corrections.iq_offsets and corrections.channel_columns(df, ("EC", "MS")):
+            messages.append(OFFSETS_NOT_IN_EC)
 
     if prep.viscosity_pair:
         try:

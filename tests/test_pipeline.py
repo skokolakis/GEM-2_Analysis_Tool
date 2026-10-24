@@ -84,6 +84,18 @@ def test_iq_offsets_are_subtracted():
     assert any("Subtracted calibration offsets" in m for m in msgs)
 
 
+def test_iq_offsets_warn_that_exported_ec_is_unchanged():
+    import corrections
+
+    offsets = b"column,offset\nQ_1525Hz,10.0\n"
+    df = _iq_table().assign(**{"EC1525Hz[mS/m]": 20.0})
+    settings = corrections.CorrectionSettings(iq_offsets=offsets)
+    _, msgs = P.prepare_gem_table(df, P.PrepSettings(corrections=settings))
+    assert P.OFFSETS_NOT_IN_EC in msgs
+    _, msgs = P.prepare_gem_table(df, P.PrepSettings(corrections=settings, recompute_from_iq=True))
+    assert P.OFFSETS_NOT_IN_EC not in msgs
+
+
 def test_ec_corrections_survive_recompute():
     import corrections
 
