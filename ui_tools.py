@@ -71,8 +71,14 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "profile but take longer."
     ),
     "inv_noise": (
-        "Uses the noise measured between repeated passes (σ / √passes) where it is larger "
-        "than the relative error plus floor."
+        "Uses the measured noise of each frequency (between repeat passes, or within the line "
+        "for a single pass), divided by √passes, where it is larger than the relative error "
+        "plus floor."
+    ),
+    "transect": (
+        "The lines of this file lie at different positions, so their mean is not a profile of "
+        "one place. Choose the transect to use; lines walked over the same transect (repeat "
+        "passes) are averaged."
     ),
     "inv_rel": (
         "Data error as a percentage of each quadrature value."
@@ -594,6 +600,34 @@ def run_inversion(
     return inversion.invert(frequencies, data_q, errors, grid, sensor, alpha, lateral)
 
 
+def transect_columns(
+    traces, table: pd.DataFrame | None, key: str, label: str = "Transect"
+) -> list[str] | None:
+    """
+    Trace columns of the transect the user picks when the lines of *table*
+    lie at different positions (gem_io.track_groups); None when they are all
+    repeat passes of one transect, or their positions are unknown.
+    """
+    try:
+        tracks = gem_io.track_groups(table) if table is not None else None
+    except (KeyError, ValueError):
+        tracks = None
+    if not tracks or len(set(tracks.values())) < 2:
+        return None
+    by_track: dict[int, list[str]] = {}
+    for line, track in tracks.items():
+        col = gem_io.trace_column(line)
+        if col in traces:
+            by_track.setdefault(track, []).append(col)
+    if not by_track:
+        return None
+    names = {t: "Line " + ", ".join(gem_io.line_labels(pd.Series([c[len("Line_"):] for c in cols])))
+             for t, cols in by_track.items()}
+    track = st.selectbox(label, list(by_track), format_func=names.get, key=key,
+                         help=SCIENCE_HELP["transect"])
+    return by_track[track]
+
+
 def render_inversion(
     output_data: dict[str, dict[str, pd.DataFrame]],
     scores: dict[str, dict[str, dict]],
@@ -628,8 +662,11 @@ def render_inversion(
                                 help=SCIENCE_HELP["inv_floor"])
         use_noise = c3.checkbox("Use measured noise (between passes)", True, key=f"inv_n2_{file_key}",
                                 help=SCIENCE_HELP["inv_noise"])
+        source = output_data.get("Q") or output_data.get("EC") or {}
+        traces = sorted({c for df in source.values() for c in df.columns})
+        columns = transect_columns(traces, table, f"inv_track_{file_key}")
         try:
-            stations = inversion.station_data(output_data, scores, step, sensor)
+            stations = inversion.station_data(output_data, scores, step, sensor, columns)
         except ValueError as exc:
             st.info(str(exc))
             return
@@ -644,7 +681,7 @@ def render_inversion(
         run_key = f"inv_run_{file_key}"
         params = (int(n_layers), float(max_depth), float(first), float(alpha), float(lateral),
                   float(step), float(rel), float(floor), bool(use_noise), sensor,
-                  hash(stations.quadrature.tobytes()))
+                  hash(stations.quadrature.tobytes()), tuple(columns or ()))
         too_many = len(stations.distance) > inversion.MAX_STATIONS
         if too_many:
             length = float(stations.distance[-1] - stations.distance[0])
@@ -677,7 +714,7 @@ def render_inversion(
         if table is not None and output_data.get("EC"):
             errors_ec = {
                 gem_io.channel_column("EC", lb): sc["mean_std"]
-                for lb, sc in scores.get("EC", {}).items() if sc["noise_method"] == "between-trace"
+                for lb, sc in scores.get("EC", {}).items() if np.isfinite(sc["mean_std"])
             }
             try:
                 data = inversion.emagpy_from_table(table, sensor, errors_ec or None)
@@ -687,7 +724,7 @@ def render_inversion(
             download_button(
                 "EMagPy survey (.csv)", data, f"{file_key}_emagpy.csv", key=f"inv_emagpy_{file_key}",
                 help="Coil columns HCP{separation}f{frequency}h{height} in mS/m with *_err "
-                     "columns from the between-pass noise. EMagPy models a plain loop pair: "
+                     "columns from the measured noise of each frequency. EMagPy models a plain loop pair: "
                      "the GEM-2 bucking coil is not modelled there.",
             )
 

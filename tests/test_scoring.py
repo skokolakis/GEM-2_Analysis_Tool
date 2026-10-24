@@ -52,6 +52,47 @@ def test_process_sheet_keeps_first_reading_at_repeated_distance():
 
 
 # ---------------------------------------------------------------------------
+# Lines at different positions are not repeat passes (#15)
+# ---------------------------------------------------------------------------
+
+def test_parallel_lines_are_scored_within_each_line():
+    rng = np.random.default_rng(0)
+    d = np.arange(0.0, 40.0, 0.1)
+    # three transects over different ground (offsets of 50), noise 1
+    df = pd.DataFrame({"d": d, **{f"Line_{k}": 50.0 * k + np.sin(d / 5) * 10 + rng.normal(0, 1, d.size)
+                                  for k in range(3)}})
+    tracks = {f"Line_{k}": k for k in range(3)}
+    _, sc, error, _ = R.process_sheet(df, 0.5, "linear", tracks)
+    assert error is None and sc["noise_method"] == R.NOISE_INTRA and sc["passes"] == 1
+    assert 0.8 < sc["mean_std"] < 1.2                          # not the 50-unit spread between lines
+    _, lumped, *_ = R.process_sheet(df, 0.5, "linear")
+    assert lumped["mean_std"] > 40                             # all lines taken as repeat passes
+
+
+def test_repeat_passes_are_pooled_within_their_transect():
+    rng = np.random.default_rng(1)
+    d = np.arange(0.0, 40.0, 0.5)
+    ground = {0: 0.0, 1: 100.0}
+    cols = {f"Line_{k}": ground[k // 2] + np.sin(d / 5) * 10 + rng.normal(0, 1, d.size) for k in range(4)}
+    df = pd.DataFrame({"d": d, **cols})
+    _, sc, *_ = R.process_sheet(df, 0.5, "linear", {f"Line_{k}": k // 2 for k in range(4)})
+    assert sc["noise_method"] == R.NOISE_BETWEEN and sc["passes"] == 2
+    assert 0.7 < sc["mean_std"] < 1.4
+    assert 15 < sc["amplitude"] < 30                           # range within a transect, not 100 + 20
+
+
+def test_area_survey_file_warns_about_separate_lines():
+    rows = []
+    for k in range(4):
+        y = np.arange(0.0, 20.0, 0.5)
+        rows.append(pd.DataFrame({"Line": k, "X": 3.0 * k, "Y": y, "EC1525Hz[mS/m]": 10.0 * k + y}))
+    data = pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+    _, scores, warnings = R.process_gem_file(data, "area.csv", 0.5, "linear")
+    assert any("4 different positions" in w for w in warnings)
+    assert scores["EC"]["1525Hz"]["noise_method"] == R.NOISE_INTRA
+
+
+# ---------------------------------------------------------------------------
 # Units (#8)
 # ---------------------------------------------------------------------------
 

@@ -287,11 +287,17 @@ class StationData:
     source: str                  # "Q" or "EC"
 
 
-def _mean_profile_table(output_data: dict[str, pd.DataFrame]) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Mean profiles of all channels on their joint distance grid: (distance, labels, values (D, F))."""
+def _mean_profile_table(
+    output_data: dict[str, pd.DataFrame], columns: list[str] | None = None
+) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """
+    Mean profiles of all channels on their joint distance grid: (distance,
+    labels, values (D, F)), over the trace *columns* (default: all traces).
+    """
     profiles = {}
     for label, df in output_data.items():
-        prof = df.mean(axis=1, skipna=True)
+        traces = df if columns is None else df[[c for c in columns if c in df.columns]]
+        prof = traces.mean(axis=1, skipna=True)
         prof.index = np.round(prof.index.to_numpy(dtype=float), 9)
         profiles[label] = prof
     table = pd.concat(profiles, axis=1).sort_index()
@@ -303,20 +309,26 @@ def station_data(
     scores: dict[str, dict[str, dict]],
     station_step: float,
     sensor: E.Sensor = E.GEM2,
+    columns: list[str] | None = None,
 ) -> StationData:
     """
-    Stations every `station_step` metres along the mean profiles. Uses the
-    quadrature channels when present, otherwise EC converted to quadrature
-    (ec_to_quadrature). The measured noise is the between-pass sigma of each
-    frequency divided by sqrt(number of passes), the noise of the mean
-    profile (NaN for a frequency scored from a single pass; None if no
-    frequency has it).
+    Stations every `station_step` metres along the mean profiles of the
+    trace *columns* (one transect and its repeat passes; default: all
+    traces). Uses the quadrature channels when present, otherwise EC
+    converted to quadrature (ec_to_quadrature). The measured noise is the
+    sigma of each frequency's score (between passes, or within the line for a
+    single pass) divided by sqrt(number of passes averaged), the noise of the
+    mean profile (None if no frequency has it).
     """
     source = "Q" if output_data.get("Q") else "EC"
     channels = output_data.get(source) or {}
     if not channels:
         raise ValueError("Inversion needs Q (quadrature) or EC channels.")
-    distance, labels, values = _mean_profile_table(channels)
+    distance, labels, values = _mean_profile_table(channels, columns)
+    keep = np.isfinite(values).any(axis=1)
+    if not keep.any():
+        raise ValueError("The chosen lines have no readings to invert.")
+    distance, values = distance[keep], values[keep]
     freqs = np.array([float(lb[:-2]) for lb in labels])
     order = np.argsort(freqs)
     freqs, values = freqs[order], values[:, order]
@@ -325,13 +337,12 @@ def station_data(
     keep = np.unique(np.abs(distance[:, None] - targets[None, :]).argmin(axis=0))
     distance, values = distance[keep], values[keep]
 
-    def mean_noise(sc: dict) -> float:
-        """Noise of the mean of n passes: the between-pass sigma / sqrt(n)."""
-        if sc.get("noise_method") != "between-trace":
-            return np.nan
-        return sc.get("mean_std", np.nan) / np.sqrt(max(int(sc.get("n_traces", 1)), 1))
+    def mean_noise(sc: dict, label: str) -> float:
+        """Noise of the mean of n passes: the reading sigma / sqrt(n)."""
+        traces = channels[label].columns if columns is None else [c for c in columns if c in channels[label]]
+        return sc.get("mean_std", np.nan) / np.sqrt(max(len(traces), 1))
 
-    noise = np.array([mean_noise(scores.get(source, {}).get(lb, {})) for lb in labels])
+    noise = np.array([mean_noise(scores.get(source, {}).get(lb, {}), lb) for lb in labels])
     if source == "EC":
         q = ec_to_quadrature(freqs, values, sensor)
         # noise in mS/m -> ppm with the local slope dQ/dEC at the median EC

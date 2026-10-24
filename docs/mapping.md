@@ -12,7 +12,7 @@ In basic mode the sidebar offers the gridding method, cell size, line levelling,
 
 ## Pseudo-section (distance × frequency)
 
-Stacks the line-averaged profiles of all frequencies (the mean across survey lines at each distance — meaningful for repeat passes of one transect) into one contour plot: distance on x, frequency on y.
+Stacks the mean profiles of all frequencies (the mean of the repeat passes of one transect at each distance) into one contour plot: distance on x, frequency on y. When the lines of a file lie at different positions (an area survey), a **Transect** choice appears and the section is drawn for that transect only — the mean of lines over different ground is not a profile of any place.
 
 - The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Labels in kHz are converted to Hz.
 - Profiles are aligned on the distance range they all cover — nothing is extrapolated.

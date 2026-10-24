@@ -681,7 +681,7 @@ def pivot_gem_frequency(
     )
 
     # Rename columns to "Line_0", "Line_1", "Line_L1", etc.
-    pivoted.columns = [f"Line_{c}" for c in pivoted.columns]
+    pivoted.columns = [gem_io.trace_column(c) for c in pivoted.columns]
 
     # Reset index so column 0 = distance (what process_sheet expects)
     pivoted = pivoted.reset_index()
@@ -794,6 +794,9 @@ def process_gem_file(
     warnings.extend(messages)
 
     gem_data = parse_gem_dataframe(prepared, warnings, distance_col=pipeline.DISTANCE_COL)
+    tracks = trace_tracks(prepared)
+    if tracks is not None:
+        warnings.append(SEPARATE_TRACKS_WARNING.format(n=len(set(tracks.values()))))
 
     output_data: dict[str, dict[str, pd.DataFrame]] = _empty_modes()
     scores: dict[str, dict[str, dict]] = _empty_modes()
@@ -801,7 +804,7 @@ def process_gem_file(
     for mode_key in gem_io.GEM_MODES:
         for freq_label, pivoted_df in gem_data[mode_key].items():
             interp_df, score_dict, error, col_warnings = process_sheet(
-                pivoted_df, distance_step, interp_kind
+                pivoted_df, distance_step, interp_kind, tracks
             )
 
             for w in col_warnings:
@@ -819,6 +822,31 @@ def process_gem_file(
             warnings.append(f"{mode_key}: {mixed}")
 
     return output_data, scores, warnings
+
+
+SEPARATE_TRACKS_WARNING = (
+    "The lines lie at {n} different positions across the survey, so they are not all repeat "
+    "passes of one transect. Noise is measured between repeat passes of the same transect "
+    "(within each line where a transect was walked once) and the score is the median over the "
+    "transects. The mean profiles and ±1σ envelopes still average lines over different ground: "
+    "use the area map for the whole survey, and pick one transect for the pseudo-section and "
+    "the inversion."
+)
+
+
+def trace_tracks(table: pd.DataFrame) -> dict[str, int] | None:
+    """
+    Transect of each trace column ({trace column: track}) when the lines of
+    *table* lie at more than one position (gem_io.track_groups); None when
+    they are all repeat passes of one transect or their positions are unknown.
+    """
+    try:
+        groups = gem_io.track_groups(table)
+    except (KeyError, ValueError):
+        return None
+    if not groups or len(set(groups.values())) < 2:
+        return None
+    return {gem_io.trace_column(line): track for line, track in groups.items()}
 
 
 @st.cache_data(show_spinner=False, max_entries=64)    # up to 3 settings variants per file
@@ -892,16 +920,24 @@ def process_sheet(
     df: pd.DataFrame,
     distance_step: float = DEFAULT_DISTANCE_STEP,
     interp_kind: str = DEFAULT_INTERP_KIND,
+    tracks: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame | None, dict | None, str | None, list[str]]:
     """
     Process a single sheet.
+
+    *tracks* maps trace columns to transects (gem_io.track_groups): only
+    traces on one transect are repeat passes, so the between-trace noise and
+    the amplitude are taken within each transect walked at least twice, or
+    within each trace when every transect was walked once. None: all traces
+    are repeat passes of one transect.
 
     Returns
     -------
     interpolated_df : DataFrame indexed by common distance, columns = original trace
                       columns; NaN outside each trace's own measured range
     score_dict      : {"mean_std": σ_noise, "amplitude": float, "score": float,
-                       "noise_method": NOISE_BETWEEN | NOISE_INTRA, "n_traces": int}
+                       "noise_method": NOISE_BETWEEN | NOISE_INTRA, "n_traces": int,
+                       "passes": passes per transect behind σ (median)}
                       score is NaN when the noise is zero or undefined
     error           : human-readable reason for failure, or None on success
     col_warnings    : list of per-column warning strings surfaced to the UI
@@ -982,26 +1018,41 @@ def process_sheet(
     interpolated_df = pd.DataFrame(interpolated_lines, index=common_dist)
     interpolated_df.index.name = "Distance (m)"
 
-    rep_prof = interpolated_df.mean(axis=1, skipna=True)
     n_traces = interpolated_df.shape[1]
+    groups: dict[int, list[str]] = {}
+    for col in interpolated_df.columns:
+        groups.setdefault(0 if tracks is None else tracks.get(col, -1 - len(groups)), []).append(col)
+    repeats = [cols for cols in groups.values() if len(cols) >= 2]
 
-    if n_traces >= 2:
-        # Between-trace noise, only where ≥ 2 passes were measured. The passes
-        # are a finite sample of the measurement process, hence ddof=1; the
-        # point-wise variances are pooled as sqrt(mean(var)).
-        overlap = interpolated_df.notna().sum(axis=1) >= 2
-        if not overlap.any():
+    if repeats:
+        # Between-trace noise, only where ≥ 2 passes of one transect were
+        # measured. The passes are a finite sample of the measurement process,
+        # hence ddof=1; the point-wise variances are pooled as sqrt(mean(var)).
+        # Lines at different positions differ by the ground, not by noise.
+        variances, ranges, passes = [], [], []
+        for cols in repeats:
+            sub = interpolated_df[cols]
+            overlap = sub.notna().sum(axis=1) >= 2
+            if not overlap.any():
+                continue
+            variances.append(sub[overlap].var(axis=1, skipna=True, ddof=1).to_numpy())
+            mean = sub[overlap].mean(axis=1, skipna=True)
+            ranges.append(float(np.nanmax(mean) - np.nanmin(mean)))
+            passes.append(len(cols))
+        if not variances:
             return None, None, "traces do not overlap in distance", col_warnings
-        var_prof = interpolated_df[overlap].var(axis=1, skipna=True, ddof=1)
-        noise = float(np.sqrt(np.nanmean(var_prof)))
-        amp_prof = rep_prof[overlap]
+        noise = float(np.sqrt(np.nanmean(np.concatenate(variances))))
         noise_method = NOISE_BETWEEN
     else:
-        noise = _intra_profile_noise(next(iter(raw_samples.values())))
-        amp_prof = rep_prof
+        # Every transect walked once: noise and contrast within each trace.
+        sigmas = np.array([_intra_profile_noise(raw_samples[c]) for c in interpolated_df.columns])
+        noise = float(np.sqrt(np.nanmean(sigmas ** 2))) if np.isfinite(sigmas).any() else float("nan")
+        ranges = [float(np.nanmax(interpolated_df[c]) - np.nanmin(interpolated_df[c]))
+                  for c in interpolated_df.columns]
+        passes = [1]
         noise_method = NOISE_INTRA
 
-    amplitude = float(np.nanmax(amp_prof) - np.nanmin(amp_prof))
+    amplitude = float(np.median(ranges))   # one transect: the range of its mean profile
 
     if np.isfinite(noise) and noise >= SCORE_EPSILON:
         score = amplitude / noise
@@ -1019,6 +1070,7 @@ def process_sheet(
         "score": score,
         "noise_method": noise_method,
         "n_traces": n_traces,
+        "passes": int(np.median(passes)),
     }
     return interpolated_df, score_dict, None, col_warnings
 
@@ -2563,9 +2615,15 @@ def _render_pseudosection(
     file_key: str,
     contour: ContourSettings,
     is_gem: bool,
+    table: pd.DataFrame | None = None,
 ) -> None:
     st.markdown("#### Pseudo-section")
-    profiles = {name: df.mean(axis=1, skipna=True) for name, df in output_data.items()}
+    traces = sorted({c for df in output_data.values() for c in df.columns})
+    columns = ui_tools.transect_columns(traces, table, f"ps_track_{file_key}")
+    profiles = {
+        name: (df if columns is None else df[[c for c in columns if c in df.columns]]).mean(axis=1, skipna=True)
+        for name, df in output_data.items()
+    }
     try:
         ps = ctr.build_pseudosection(profiles)
         fig = ctr.make_pseudosection_figure(
@@ -2769,7 +2827,13 @@ def render_contouring(
     if not output_data:
         return
     if contour.pseudosection and mode in PSEUDOSECTION_MODES:
-        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem)
+        table = None
+        if is_gem:
+            try:
+                table, _ = prepared_table(file_bytes, file_name, prep)
+            except ValueError:   # preparation problems are already listed in the warnings
+                pass
+        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem, table)
     if contour.area_map and mode in AREA_MAP_MODES:
         _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
 

@@ -106,6 +106,20 @@ def test_projection_follows_line_direction_on_wide_grids():
     np.testing.assert_allclose(d.reshape(50, 41), np.tile(np.linspace(0, 20, 41), (50, 1)), atol=1e-9)
 
 
+def test_track_groups_tell_repeat_passes_from_parallel_lines():
+    y = np.linspace(0, 20, 41)
+    passes = [pd.DataFrame({"Line": k, "X": 0.1 * k, "Y": y if k % 2 else y[::-1]}) for k in range(3)]
+    grid = [pd.DataFrame({"Line": 10 + k, "X": 5.0 + 2.0 * k, "Y": y}) for k in range(4)]
+    tracks = G.track_groups(pd.concat(passes + grid, ignore_index=True), "metres")
+    assert tracks[0] == tracks[1] == tracks[2]                 # one transect walked three times
+    assert len({tracks[k] for k in range(10, 14)} | {tracks[0]}) == 5
+
+
+def test_track_groups_without_coordinates_or_one_line():
+    assert G.track_groups(pd.DataFrame({"Line": [0, 0, 1, 1], "Y": [0, 1, 0, 1]})) is None
+    assert G.track_groups(pd.DataFrame({"Line": 0, "X": [0.0, 1.0], "Y": [0.0, 0.0]}), "metres") is None
+
+
 def test_path_distance_restarts_on_each_line():
     df = pd.DataFrame({"Line": [0, 0, 0, 1, 1], "X": [0, 3, 3, 10, 10], "Y": [0, 4, 8, 0, 1]})
     d = G.along_track_distance(df, "path", coord_mode="metres")

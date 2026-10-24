@@ -350,6 +350,43 @@ def along_track_distance(
     return out
 
 
+def trace_column(line) -> str:
+    """Column of a line in the pivoted profile tables, e.g. 7 -> 'Line_7'."""
+    return f"Line_{line}"
+
+
+def track_groups(
+    df: pd.DataFrame, coord_mode: str = "auto", line_col: str = "Line"
+) -> dict | None:
+    """
+    Which lines are repeat passes of one transect: {Line value: track number}.
+    Each line is placed at the median of its positions across the mean line
+    direction; going across the survey, a line within ACROSS_TRACK_TOL_M of
+    the first line of the current track joins it, otherwise it starts a new
+    track. None when the table has no coordinates, fewer than two lines with
+    positions or no line direction (then nothing tells passes from lines).
+    """
+    try:
+        x, y = _local_xy(df, coord_mode)
+    except ctr.ContouringError:
+        return None
+    ok = np.isfinite(x) & np.isfinite(y)
+    lines = df[line_col].to_numpy()
+    if ok.sum() < 2 or pd.Series(lines[ok]).nunique() < 2:
+        return None
+    axis = _line_axis(x, y, ok, df, line_col)
+    if axis is None:
+        return None
+    across = np.column_stack([x[ok], y[ok]]) @ np.array([-axis[1], axis[0]])
+    position = pd.Series(across).groupby(lines[ok], sort=False).median().sort_values()
+    tracks, start, track = {}, None, -1
+    for line, pos in position.items():
+        if start is None or pos - start > ctr.ACROSS_TRACK_TOL_M:
+            start, track = pos, track + 1
+        tracks[line] = track
+    return tracks
+
+
 def line_labels(lines: pd.Series) -> pd.Series:
     """Line labels as text, whole-number floats without '.0' (7.0 -> '7'), as typed by users."""
     def label(v):
