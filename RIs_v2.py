@@ -162,10 +162,12 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
         "draw a finer map but cannot add detail between lines that were not measured."
     ),
     "clip": (
-        "Blanks the most extreme values of each channel, e.g. readings near metal."
+        "Blanks the most extreme values of each channel. It always removes the strongest "
+        "readings of the survey, which are often the targets themselves (metal, kilns, clay "
+        "lenses, saline patches): use the despike filter for isolated spikes."
     ),
     "clip_range": (
-        "Values below the lower or above the upper percentile are blanked."
+        "Values below the lower or above the upper percentile of the whole survey are blanked."
     ),
     "coil_axis": (
         "Direction of the coil axis (the walking direction) on the map; the footprint is "

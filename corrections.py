@@ -647,7 +647,10 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
         for col in cols:
             out[col], n = clip_to_percentiles(_numeric(out, col), lo, hi)
             total += n
-        msgs.append(f"Clipping to the {lo:g}–{hi:g} percentile range blanked {total} value(s).")
+        msgs.append(
+            f"Clipping to the {lo:g}–{hi:g} percentile range blanked {total} value(s): the "
+            "strongest readings of each channel, which may be real anomalies rather than errors."
+        )
 
     if s.altitude_column:
         if s.altitude_column not in out.columns:
