@@ -2619,6 +2619,7 @@ def _render_pseudosection(
     contour: ContourSettings,
     is_gem: bool,
     table: pd.DataFrame | None = None,
+    sensor: emphysics.Sensor | None = None,
 ) -> None:
     st.markdown("#### Pseudo-section")
     traces = sorted({c for df in output_data.values() for c in df.columns})
@@ -2642,6 +2643,10 @@ def _render_pseudosection(
     png = fig_to_png(fig)
     ui_tools.show_figure(fig)
     st.caption(PSEUDOSECTION_CAPTION)
+    if is_gem and mode == "EC":
+        depths = ui_tools.depth_caption(profiles, sensor or emphysics.GEM2)
+        if depths:
+            st.caption(depths)
     ui_tools.download_button(
         "Pseudo-section (.png)", png, f"{Path(file_name).stem}_{mode}_pseudosection.png",
         key=f"dl_ps_{file_key}",
@@ -2856,7 +2861,8 @@ def render_contouring(
                 table, _ = prepared_table(file_bytes, file_name, prep)
             except ValueError:   # preparation problems are already listed in the warnings
                 pass
-        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem, table)
+        _render_pseudosection(output_data, mode, file_name, file_key, contour, is_gem, table,
+                              (prep or pipeline.PrepSettings()).sensor)
     if contour.area_map and mode in AREA_MAP_MODES:
         _render_area_map(output_data, mode, file_name, file_key, contour, file_bytes, is_gem, prep)
 

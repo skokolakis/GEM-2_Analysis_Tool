@@ -88,3 +88,11 @@ def test_forward_model_panel_on_main_page():
     at.run()
     assert not at.exception
     assert any("Detectable" in str(df.value.columns.tolist()) for df in at.dataframe)
+
+
+def test_depth_caption_lists_each_frequency():
+    profiles = {f"{f}Hz": pd.Series([10.0, 10.0]) for f in (475, 63025)}
+    text = U.depth_caption(profiles, E.GEM2)
+    doi = [E.depth_of_investigation(f, 0.01) for f in (475, 63025)]
+    assert f"475 Hz {doi[0]:.2g} m" in text and f"63025 Hz {doi[1]:.2g} m" in text
+    assert U.depth_caption({"Sheet1": pd.Series([1.0])}, E.GEM2) is None

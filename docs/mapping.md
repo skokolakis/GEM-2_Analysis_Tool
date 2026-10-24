@@ -17,6 +17,7 @@ Stacks the mean profiles of all frequencies (the mean of the repeat passes of on
 - The y-axis is logarithmic when every label is a distinct positive frequency, otherwise categorical. Labels in kHz are converted to Hz.
 - Profiles are aligned on the distance range they all cover — nothing is extrapolated.
 - White lines mark the measured frequencies; colours between them are interpolated.
+- The frequency axis is not a depth axis. On the EC tab the caption gives each frequency's depth of investigation at its median EC: for the GEM-2 at 10 mS/m it only goes from about 3.3 m at 475 Hz to 2.5 m at 63 kHz, because under low induction numbers the coil geometry, not the frequency, sets the depth response.
 
 > **The frequency axis is not a calibrated depth axis.** Under the LIN approximation the depth response of a loop–loop sensor is set by coil geometry, not frequency (McNeill, 1980; Callegary et al., 2007). Analyses of small broadband sensors nevertheless find that the practical depth of investigation grows roughly with the square root of the skin depth, so lower frequencies see somewhat deeper (Huang, 2005). Read the axis as a qualitative trend at most.
 

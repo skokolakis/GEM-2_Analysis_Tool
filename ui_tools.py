@@ -472,6 +472,28 @@ def _frequency_info(freqs: tuple, sigmas: tuple, sensor: emphysics.Sensor):
     return table, depths, curves
 
 
+def depth_caption(profiles: dict[str, pd.Series], sensor: emphysics.Sensor) -> str | None:
+    """
+    Depth of investigation of each frequency at the median of its EC
+    profile (mS/m), as one sentence for a pseudo-section; None without
+    frequencies in Hz or positive EC.
+    """
+    freqs, sigmas = [], []
+    for label, prof in profiles.items():
+        f, ec = ctr.parse_frequency(label), float(np.nanmedian(prof)) if len(prof) else np.nan
+        if f is not None and np.isfinite(ec) and ec > 0:
+            freqs.append(f)
+            sigmas.append(ec / 1000.0)
+    if not freqs:
+        return None
+    table, _, _ = _frequency_info(tuple(freqs), tuple(sigmas), sensor)
+    doi = table.columns[-1]
+    depths = ", ".join(f"{f:g} Hz {d:.2g} m" for f, d in zip(table["Frequency (Hz)"], table[doi]))
+    return (f"Depth of investigation at the median EC (70 % of the response from above it, sensor "
+            f"at {sensor.height:g} m): {depths}. Frequency changes the depth much less than the "
+            "y axis suggests, so read the section as a frequency axis, not a depth axis.")
+
+
 def render_frequency_info(
     output_data: dict[str, pd.DataFrame], sensor: emphysics.Sensor, file_key: str
 ) -> None:
