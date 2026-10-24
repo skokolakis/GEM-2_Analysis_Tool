@@ -139,8 +139,11 @@ log = logging.getLogger(__name__)
 
 SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choices
     "altitude": (
-        "Column with the sensor height of each reading. Readings are corrected to the "
-        "reference height with a fitted height response."
+        "Column with the sensor height above ground of each reading. With 'Recompute EC / MS "
+        "from I / Q', each reading is converted at its own height (the physics removes the "
+        "height effect). Otherwise readings are corrected to the reference height with a "
+        "fitted height response, which also removes any change of the ground that goes with "
+        "height."
     ),
     "altitude_ref": (
         "Height every reading is corrected to; 0 uses the median height."

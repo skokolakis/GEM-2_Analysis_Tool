@@ -692,7 +692,10 @@ def _correct_readings(out: pd.DataFrame, s: CorrectionSettings, msgs: list[str])
             models.append(model)
         msgs.append(
             f"Sensor-height correction to {ref:.3g} m from '{s.altitude_column}' "
-            f"({models.count('exponential')} exponential, {models.count('linear')} linear fits)."
+            f"({models.count('exponential')} exponential, {models.count('linear')} linear fits). "
+            "The fit takes any change of the ground that goes with height (crops, hedges, "
+            "slopes) as a height effect; with I / Q, 'Recompute EC / MS from I / Q' converts "
+            "each reading at its own height instead."
         )
 
     if s.temperature_column:

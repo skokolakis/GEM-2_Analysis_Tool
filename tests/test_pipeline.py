@@ -84,6 +84,22 @@ def test_iq_offsets_are_subtracted():
     assert any("Subtracted calibration offsets" in m for m in msgs)
 
 
+def test_recompute_uses_each_readings_height():
+    import corrections
+
+    heights = np.repeat([0.6, 1.0, 1.5], 4)
+    z = np.array([E.forward_ppm(5325.0, [0.03], sensor=E.Sensor(height=h))[0] for h in heights])
+    df = pd.DataFrame({"Line": 0, "Y": np.arange(12.0), "Alt": heights,
+                       "I_5325Hz": z.real, "Q_5325Hz": z.imag})
+    settings = corrections.CorrectionSettings(altitude_column="Alt")
+    out, msgs = P.prepare_gem_table(df, P.PrepSettings(recompute_from_iq=True, corrections=settings))
+    np.testing.assert_allclose(out["EC5325Hz[mS/m]"], 30.0, rtol=1e-3)   # the same ground everywhere
+    assert any("own height" in m for m in msgs)
+    assert not any("Sensor-height correction" in m for m in msgs)       # no fitted curve
+    plain, _ = P.prepare_gem_table(df.drop(columns="Alt"), P.PrepSettings(recompute_from_iq=True))
+    assert np.ptp(plain["EC5325Hz[mS/m]"]) > 5.0                         # one height for all
+
+
 def test_iq_offsets_warn_that_exported_ec_is_unchanged():
     import corrections
 
