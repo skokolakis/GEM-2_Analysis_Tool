@@ -55,7 +55,12 @@ PREP_APPLIES_TO = "Applied to every GEM file before its profiles, maps and furth
 # little; both pass through every reading without overshoot.
 INTERP_METHODS = ["linear", "pchip"]
 
-PROFILE_LINE_WIDTH = 2.0
+LINE_STYLES = {
+    "Solid": "-",
+    "Dashed": "--",
+    "Dash-dot": "-.",
+    "Dotted": ":",
+}
 
 # Publication-style figures for every plot in the app: boxed axes with inward
 # ticks, a light grid, and the colour-blind-safe Okabe & Ito (2008) palette
@@ -306,8 +311,14 @@ class GraphOptions:
     selected_sheets: list[str] = field(default_factory=list)  # empty → show all
     x_lim: tuple[float, float] | None = None
     y_lim: tuple[float, float] | None = None
+    show_grid: bool = True
+    line_width: float = 2.0
+    line_style: str = "-"
     show_traces: bool = True
     show_envelope: bool = True
+    plot_title: str = ""   # empty → use auto-generated default
+    x_label: str = ""      # empty → "Distance (m)"
+    y_label: str = ""      # empty → profile_label(mode)
     x_column: str = PROFILE_X   # what is plotted (plot_axis_options)
     y_column: str = PROFILE_Y
 
@@ -1074,15 +1085,16 @@ def make_overview_figure(
                 common_dist,
                 rep_prof.values,
                 label=name,
-                linewidth=PROFILE_LINE_WIDTH,
+                linewidth=opts.line_width,
+                linestyle=opts.line_style,
             )
 
     _draw_markers(ax, markers)
-    ax.set_xlabel("Distance (m)")
-    ax.set_ylabel(y_label)
-    ax.set_title(f"Representative profiles [{mode}] — {file_name}")
+    ax.set_xlabel(opts.x_label or "Distance (m)")
+    ax.set_ylabel(opts.y_label or y_label)
+    ax.set_title(opts.plot_title or f"Representative profiles [{mode}] — {file_name}")
     ax.legend(fontsize=8)
-    ax.grid(True)
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -1143,16 +1155,16 @@ def make_readings_figure(table: pd.DataFrame, opts: GraphOptions, title: str) ->
         step = np.diff(xi[ok])
         colour = cmap(k)
         if ok.sum() > 1 and (np.all(step >= 0) or np.all(step <= 0)):
-            ax.plot(xi, yi, color=colour, linewidth=0.5 * PROFILE_LINE_WIDTH,
+            ax.plot(xi, yi, color=colour, linewidth=0.5 * opts.line_width, linestyle=opts.line_style,
                     label=f"Line {label}")
         else:
             ax.scatter(xi, yi, color=colour, s=4, label=f"Line {label}")
     if len(groups) <= 12:
         ax.legend(fontsize=8)
-    ax.set_xlabel(opts.x_column)
-    ax.set_ylabel(opts.y_column)
-    ax.set_title(f"{title} ({len(groups)} line{'s' if len(groups) != 1 else ''})")
-    ax.grid(True)
+    ax.set_xlabel(opts.x_label or opts.x_column)
+    ax.set_ylabel(opts.y_label or opts.y_column)
+    ax.set_title(opts.plot_title or f"{title} ({len(groups)} line{'s' if len(groups) != 1 else ''})")
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -1187,6 +1199,7 @@ def make_sheet_figure(
                 color="0.55",
                 alpha=0.4,
                 linewidth=0.7,
+                linestyle=opts.line_style,
             )
 
     # Mean profile
@@ -1194,7 +1207,8 @@ def make_sheet_figure(
         common_dist,
         rep_prof,
         color="C0",
-        linewidth=PROFILE_LINE_WIDTH,
+        linewidth=opts.line_width,
+        linestyle=opts.line_style,
         label="Mean",
     )
 
@@ -1211,11 +1225,11 @@ def make_sheet_figure(
         )
 
     _draw_markers(ax, markers)
-    ax.set_xlabel("Distance (m)")
-    ax.set_ylabel(profile_label(mode, sheet_name))
+    ax.set_xlabel(opts.x_label or "Distance (m)")
+    ax.set_ylabel(opts.y_label or profile_label(mode, sheet_name))
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
-    ax.grid(True)
+    ax.grid(opts.show_grid)
     if opts.x_lim is not None:
         ax.set_xlim(opts.x_lim)
     if opts.y_lim is not None:
@@ -1421,7 +1435,7 @@ def render_graph_editor(
                 x_data_min, x_data_max = float(x_ok.min()), float(x_ok.max())
             if y_ok.size and opts.y_column != PROFILE_Y:
                 y_data_min, y_data_max = float(y_ok.min()), float(y_ok.max())
-        col_sheets, col_axes = st.columns(2)
+        col_sheets, col_style, col_axes = st.columns([2, 1, 2])
 
         with col_sheets:
             st.markdown(f"**Visible {item_noun(mode)[1]}**")
@@ -1445,6 +1459,29 @@ def render_graph_editor(
                 value=True,
                 key=f"ge_envelope_{file_key}",
             )
+
+        with col_style:
+            st.markdown("**Style**")
+            opts.show_grid = st.checkbox(
+                "Grid",
+                value=True,
+                key=f"ge_grid_{file_key}",
+            )
+            opts.line_width = st.slider(
+                "Line width",
+                min_value=0.5,
+                max_value=5.0,
+                value=2.0,
+                step=0.5,
+                key=f"ge_lw_{file_key}",
+            )
+            style_label = st.selectbox(
+                "Line style",
+                options=list(LINE_STYLES.keys()),
+                index=0,
+                key=f"ge_ls_{file_key}",
+            )
+            opts.line_style = LINE_STYLES[style_label]
 
         with col_axes:
             st.markdown("**X axis range**")
@@ -1476,6 +1513,28 @@ def render_graph_editor(
                     opts.y_lim = (y_min, y_max)
                 else:
                     st.caption("Y min must be < Y max")
+
+        st.divider()
+        st.markdown("**Labels & title**")
+        lc1, lc2, lc3 = st.columns(3)
+        opts.plot_title = lc1.text_input(
+            "Overview plot title",
+            value="",
+            placeholder="Leave blank for default",
+            key=f"ge_title_{file_key}",
+        )
+        opts.x_label = lc2.text_input(
+            "X axis label",
+            value="",
+            placeholder="Distance (m)",
+            key=f"ge_xlabel_{file_key}",
+        )
+        opts.y_label = lc3.text_input(
+            "Y axis label",
+            value="",
+            placeholder="Automatic (units from file)",
+            key=f"ge_ylabel_{file_key}",
+        )
 
     return opts
 

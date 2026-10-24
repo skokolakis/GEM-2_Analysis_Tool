@@ -68,7 +68,7 @@ Each mode tab shows:
 
 - **Channels** — the frequencies / channels found, or the **Frequency ranking** table when scoring is on.
 - **Representative profiles** (collapsed; click to open) — every frequency's mean profile on one axes (scores in the legend when scoring is on), with event markers as dotted lines.
-- **Graph editor** — choose the **X axis** (distance along line, X, Y, Lat/Lon, time, reading number, or a channel for cross-plots) and the **Y axis** (the representative profiles, or any channel of the file — readings are then plotted one colour per line); toggle frequencies; set axis limits; show or hide individual traces and the ±1σ envelope. For publication styling, download the profiles and plot them in your own software.
+- **Graph editor** — choose the **X axis** (distance along line, X, Y, Lat/Lon, time, reading number, or a channel for cross-plots) and the **Y axis** (the representative profiles, or any channel of the file — readings are then plotted one colour per line); toggle frequencies; set axis limits, line width and style, labels and title; show or hide individual traces and the ±1σ envelope.
 - **Per-frequency detail plots** (per-channel on the AUX tab) — individual traces (thin, semi-transparent), the mean profile (bold) and the ±1σ envelope.
 - **Downloads** — see [Outputs](outputs.md).
 
