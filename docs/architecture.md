@@ -35,7 +35,9 @@ RIs_v2.py
 │   ├── process_gem_file()          — GEM CSV / XLSX
 │   └── rank_scores()
 ├── Interpolation helpers
-│   └── _interpolate_with_method()
+│   ├── _interpolate_with_method()  — linear, PCHIP, nearest, kriging
+│   ├── _profile_variogram()        — one variogram per channel, pairs within passes
+│   └── _krige_profile()            — 1D ordinary kriging, moving neighbourhood
 ├── Plotting
 │   ├── make_overview_figure()
 │   ├── make_readings_figure()

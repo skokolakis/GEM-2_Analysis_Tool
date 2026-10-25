@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 import RIs_v2 as R  # noqa: E402
@@ -12,6 +13,7 @@ import RIs_v2 as R  # noqa: E402
 
 def _full_export(
     scoring: bool = False, distance_method: str = "Y", status_bad: int = 0, contour: bool = False,
+    interp_kind: str = "linear",
 ):
     """Script body run by AppTest; all imports must be local."""
     import numpy as np
@@ -38,7 +40,7 @@ def _full_export(
     data = table.to_csv(index=False).encode()
     prep = pipeline.PrepSettings(distance_method=distance_method)
     maps = R.ContourSettings(area_map=True, pseudosection=True) if contour else None
-    R.render_gem_results(data, "survey.csv", 0.5, "linear", maps, scoring, prep)
+    R.render_gem_results(data, "survey.csv", 0.5, interp_kind, maps, scoring, prep)
 
 
 def _texts(at):
@@ -278,3 +280,42 @@ def test_science_choices_have_help_tooltips():
     assert at.toggle(key="ct_area").help == R.SCIENCE_HELP["area_map"]
     assert at.number_input(key="sen_sep").help == R.SCIENCE_HELP["separation"]
     assert at.checkbox(key="cor_despike").help == R.SCIENCE_HELP["despike"]
+
+
+@pytest.mark.parametrize("method", ["nearest", "kriging"])
+def test_new_interpolation_methods_score_plot_and_export(method):
+    at = AppTest.from_function(
+        _full_export, kwargs={"scoring": True, "interp_kind": method}, default_timeout=180
+    )
+    at.run()
+    assert not at.exception
+    assert not [w.value for w in at.warning if "interpolation failed" in w.value]
+    assert _texts(at).count("Frequency ranking") == 4
+    assert at.get("download_button")
+
+
+def _batch_export(interp_kind: str):
+    """Script body run by AppTest; all imports must be local."""
+    import numpy as np
+    import pandas as pd
+
+    import RIs_v2 as R
+
+    d = np.arange(0, 20, 0.25)
+    sheet = pd.DataFrame({"d": d, "a": np.sin(d), "b": np.sin(d) + 0.1 * np.cos(7 * d)})
+    interp, score, *_ = R.process_sheet(sheet, 0.5, interp_kind)
+    entry = {"stem": "f", "mode": "EC", "output_data": {"1525Hz": interp},
+             "scores": {"1525Hz": score}}
+    R.render_batch_export([entry], ["f.csv"], interp_kind, scoring=True)
+
+
+@pytest.mark.parametrize("method", R.INTERP_METHODS)
+def test_batch_workbook_is_named_after_the_method(method, monkeypatch):
+    import ui_tools
+    names = []
+    monkeypatch.setattr(ui_tools, "download_button",
+                        lambda label, data, file_name, **kw: names.append((label, file_name)))
+    at = AppTest.from_function(_batch_export, kwargs={"interp_kind": method}, default_timeout=60)
+    at.run()
+    assert not at.exception
+    assert names == [(f"All files — {method} (.xlsx)", f"batch_{method}.xlsx")]

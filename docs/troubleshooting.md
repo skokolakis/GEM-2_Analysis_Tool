@@ -15,8 +15,11 @@ Each file's warnings (expander under the file name) list every step the app took
 ### Linear and PCHIP give different scores
 - Both pass through every reading; they differ only between readings. A noticeable difference means the distance step is finer than the reading spacing — set the step close to the spacing (the summary card shows it).
 
-### Akima needs ≥ 5 points
-- Columns with fewer valid points are skipped with a warning. Switch to `pchip` (≥ 2 points) or `linear` for sparse data.
+### Kriging skips a channel
+- Kriging fits one variogram per channel from all its passes, which needs a few dozen readings; a channel with fewer is skipped with a warning. Switch to `linear`, `pchip` or `nearest` (≥ 2 points) for sparse data.
+
+### Kriging gives much higher scores
+- Expected: kriging filters the nugget (noise) out of each pass, so σ falls and the score rises. Compare scores only between runs with the same interpolation method. See [Interpolation methods](profiles-and-scoring.md#interpolation-methods).
 
 ### Scores rose after turning on a filter
 - Despiking lowers the noise σ. Compare scores only between runs with the same [corrections & filters](corrections.md).
