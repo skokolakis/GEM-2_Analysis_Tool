@@ -154,6 +154,20 @@ def test_changed_settings_are_shown_and_reset():
     assert not any(c.value for c in at.checkbox if c.label.startswith("Despike"))
 
 
+def test_every_interpolation_method_can_be_picked():
+    at = AppTest.from_file("RIs_v2.py", default_timeout=60)
+    at.run()
+    box = at.sidebar.selectbox(key="prof_interp")
+    assert list(box.options) == ["linear", "pchip", "nearest", "kriging"]
+    box.set_value("nearest").run()
+    assert any("nearest interpolation" in c.value for c in at.sidebar.caption)
+    at.sidebar.toggle(key="scoring").set_value(True).run()
+    assert R.KRIGING_SCORE_WARNING not in [w.value for w in at.sidebar.warning]
+    at.sidebar.selectbox(key="prof_interp").set_value("kriging").run()
+    assert not at.exception
+    assert R.KRIGING_SCORE_WARNING in [w.value for w in at.sidebar.warning]
+
+
 # ── Basic and advanced settings ──────────────────────────────────────────────
 
 def test_basic_mode_hides_expert_settings():

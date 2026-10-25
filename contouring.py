@@ -372,12 +372,14 @@ class VariogramFit:
 
 
 def fit_variogram(
-    px: np.ndarray, py: np.ndarray, pv: np.ndarray, model: str = "spherical", seed: int = 0
+    px: np.ndarray, py: np.ndarray, pv: np.ndarray, model: str = "spherical", seed: int = 0,
+    max_lag: float | None = None,
 ) -> VariogramFit:
     """
     Empirical semivariogram in log-spaced lag classes up to half the maximum
-    pair distance, fitted by weighted least squares with Cressie (1985)
-    weights N(h) / gamma(h)^2, re-evaluated on the fitted model.
+    pair distance (or *max_lag*, if shorter), fitted by weighted least
+    squares with Cressie (1985) weights N(h) / gamma(h)^2, re-evaluated on
+    the fitted model.
 
     Log-spaced classes give the short lags their own classes, and Cressie
     weights stop the far more numerous long-lag pairs from dominating the fit.
@@ -404,7 +406,7 @@ def fit_variogram(
 
     d = pdist(np.column_stack([px, py]))
     g = 0.5 * pdist(pv[:, None], "sqeuclidean")
-    max_lag = 0.5 * float(d.max())
+    max_lag = min(0.5 * float(d.max()), max_lag or np.inf)
     keep = (d > 0) & (d <= max_lag)
     d, g = d[keep], g[keep]
     if d.size == 0:

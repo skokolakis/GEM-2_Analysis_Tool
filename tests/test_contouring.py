@@ -211,6 +211,15 @@ def test_fit_variogram_recovers_structure():
                                      "nugget": vf.nugget}
 
 
+def test_fit_variogram_max_lag_limits_the_lag_classes():
+    rng = np.random.default_rng(0)
+    x = np.arange(0, 300, 0.2)
+    v = np.tanh((x - 150) / 20) + rng.normal(0, 0.1, x.size)
+    vf = C.fit_variogram(x, np.zeros_like(x), v, "gaussian", max_lag=5.0)
+    assert max(vf.lags) <= 5.0
+    assert vf.nugget == pytest.approx(0.01, rel=0.5)   # the noise variance, not hidden by the trend
+
+
 def test_fit_variogram_rejects_unknown_model():
     with pytest.raises(ValueError, match="Unknown variogram model"):
         C.fit_variogram(np.arange(20.0), np.arange(20.0) ** 0.5, np.arange(20.0), "cubic")

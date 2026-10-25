@@ -208,7 +208,10 @@ def test_traces_are_not_extrapolated(method):
     assert interp.loc[interp.index < 3, "L2"].isna().all()
     assert interp.loc[interp.index > 95, "L3"].isna().all()
     assert sc["signal_std"] < 11                     # extrapolated ends would inflate it
-    assert 0.4 < sc["mean_std"] < 0.6
+    if method == "kriging":                          # filters the nugget, so σ falls
+        assert 0.05 < sc["mean_std"] < 0.4
+    else:
+        assert 0.4 < sc["mean_std"] < 0.6
 
 
 def test_between_trace_noise_uses_sample_std_and_matches_plot_envelope():
@@ -276,3 +279,90 @@ def test_zero_noise_gives_blank_score_ranked_last():
 def test_non_overlapping_traces_are_reported():
     df = pd.DataFrame({"d": X, "a": np.where(X < 40, 1.0, np.nan), "b": np.where(X > 60, 2.0, np.nan)})
     assert R.process_sheet(df, 0.5, "linear")[2] == "traces do not overlap in distance"
+
+
+# ---------------------------------------------------------------------------
+# Nearest-neighbour and kriging profile interpolation
+# ---------------------------------------------------------------------------
+
+def test_nearest_takes_the_closest_reading():
+    xp, yp = np.array([0.0, 1.0, 3.0]), np.array([10.0, 20.0, 30.0])
+    out = R._interpolate_with_method(xp, yp, np.array([0.0, 0.4, 0.6, 1.9, 2.1, 3.0]), "nearest")
+    np.testing.assert_array_equal(out, [10, 10, 20, 20, 30, 30])
+
+
+def test_nearest_keeps_the_reading_noise():
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame({"d": X, **{f"L{i}": _trace(rng) for i in range(3)}})
+    _, near, *_ = R.process_sheet(df, 0.25, "nearest")
+    _, lin, *_ = R.process_sheet(df, 0.25, "linear")
+    assert near["mean_std"] == pytest.approx(0.5, rel=0.1)
+    assert near["mean_std"] > lin["mean_std"]        # linear averages between readings
+
+
+def test_kriging_filters_the_noise_and_follows_the_signal():
+    rng = np.random.default_rng(4)
+    df = pd.DataFrame({"d": X, **{f"L{i}": _trace(rng) for i in range(4)}})
+    errors, sigmas = {}, {}
+    for method in ("linear", "kriging"):
+        interp, sc, error, _ = R.process_sheet(df, 0.5, method)
+        assert error is None
+        truth = 20 + 10 * np.tanh((interp.index.to_numpy() - 50) / 5)
+        errors[method] = np.sqrt(np.mean((interp.mean(axis=1).to_numpy() - truth) ** 2))
+        sigmas[method] = sc["mean_std"]
+    assert errors["kriging"] < 0.7 * errors["linear"]
+    assert sigmas["kriging"] < 0.7 * sigmas["linear"]
+
+
+def test_kriging_is_continuous_and_not_extrapolated():
+    rng = np.random.default_rng(5)
+    xs = np.arange(0, 100.5, 0.5)
+    ys = 5 + np.sin(xs / 5) + rng.normal(0, 0.3, xs.size)
+    grid = np.arange(-2, 102.01, 0.1)
+    out = R._interpolate_with_method(xs, ys, grid, "kriging")
+    inside = (grid >= 0) & (grid <= 100)
+    assert np.isnan(out[~inside]).all() and np.isfinite(out[inside]).all()
+    assert np.max(np.abs(np.diff(out[inside]))) < 0.3   # no jumps onto single readings
+
+
+def test_kriging_handles_a_constant_pass():
+    xs = np.arange(0, 20.0, 0.5)
+    out = R._interpolate_with_method(xs, np.full(xs.size, 7.0), xs, "kriging")
+    np.testing.assert_allclose(out, 7.0)
+
+
+def test_kriging_needs_enough_readings_for_a_variogram():
+    xs = np.arange(0, 4.0, 0.5)                        # 2 passes of 8 readings
+    df = pd.DataFrame({"d": xs, "a": np.sin(xs), "b": np.cos(xs)})
+    interp, _, error, _ = R.process_sheet(df, 0.5, "kriging")
+    assert interp is None and error.startswith("kriging failed — too few readings")
+
+
+def test_kriging_short_passes_use_the_channel_variogram():
+    rng = np.random.default_rng(7)
+    df = pd.DataFrame({"d": X, "long": _trace(rng), "short": _trace(rng, 40, 50)})
+    interp, _, error, col_warnings = R.process_sheet(df, 0.5, "kriging")
+    assert error is None and not col_warnings
+    assert interp["short"].notna().sum() == 21
+
+
+def test_profile_variogram_pairs_readings_within_a_pass_only():
+    rng = np.random.default_rng(8)
+    x = np.arange(0, 200, 0.2)
+    a = np.sin(x / 10) + rng.normal(0, 0.1, x.size)
+    b = np.sin(x / 10) + 100 + rng.normal(0, 0.1, x.size)   # same noise, another level
+    one = R._profile_variogram([(x, a)])
+    both = R._profile_variogram([(x, a), (x, b)])
+    assert both.nugget == pytest.approx(0.01, rel=0.3)
+    assert both.psill + both.nugget == pytest.approx(one.psill + one.nugget, rel=0.3)
+
+
+def test_kriging_is_fast_on_long_profiles():
+    import time
+    rng = np.random.default_rng(6)
+    xs = np.arange(0, 3000, 0.15)                      # 20 000 readings
+    ys = np.sin(xs / 30) + rng.normal(0, 0.1, xs.size)
+    t = time.perf_counter()
+    out = R._interpolate_with_method(xs, ys, np.arange(0, 3000, 0.5), "kriging")
+    assert time.perf_counter() - t < 10
+    assert np.nanmax(np.abs(out - np.sin(np.arange(0, 3000, 0.5) / 30))) < 0.2

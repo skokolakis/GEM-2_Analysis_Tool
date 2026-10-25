@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.interpolate import PchipInterpolator
+from scipy.interpolate import PchipInterpolator, interp1d
 
 import contouring as ctr
 import corrections
@@ -51,9 +51,12 @@ PSEUDOSECTION_MODES = tuple(MODES)
 AREA_MAP_MODES = (*MODES, "AUX")
 PREP_APPLIES_TO = "Applied to every GEM file before its profiles, maps and further analysis."
 
-# Readings are usually denser than the profile grid, so the method matters
-# little; both pass through every reading without overshoot.
-INTERP_METHODS = ["linear", "pchip"]
+# Readings are usually denser than the profile grid, so linear and PCHIP
+# differ little; nearest keeps single readings, kriging filters the noise.
+INTERP_METHODS = ["linear", "pchip", "nearest", "kriging"]
+PROFILE_KRIGE_NEIGHBOURS = 16       # readings around each grid point (moving neighbourhood)
+PROFILE_VARIOGRAM_SPANS = 2         # variogram fitted up to this many neighbourhood widths
+PROFILE_KRIGE_CHUNK = 4096          # grid points per batched kriging solve
 
 LINE_STYLES = {
     "Solid": "-",
@@ -112,6 +115,10 @@ SCORING_HELP = (
 SMOOTHING_SCORE_WARNING = (
     "Despiking lowers the noise σ, so scores rise. Compare scores only between runs with "
     "the same filters."
+)
+KRIGING_SCORE_WARNING = (
+    "Kriging filters the nugget (noise) out of each pass, so the noise σ falls and scores "
+    "rise. Compare scores only between runs with the same interpolation method."
 )
 DISTANCE_HELP = (
     "How the distance of each reading along its line is found. "
@@ -236,7 +243,13 @@ SCIENCE_HELP = {                 # tooltips (the "?" icon) of the science choice
     ),
     "interpolation": (
         "How each pass is resampled onto the common grid. Linear joins the readings with "
-        "straight lines; PCHIP is smooth and, like linear, never overshoots the readings."
+        "straight lines; PCHIP is smooth and, like linear, never overshoots the readings. "
+        "Nearest takes the closest reading: nothing is averaged, so the noise σ is that of "
+        "the readings, but the profile is stepped and positions shift by up to half the "
+        "reading spacing. Kriging weights the 16 readings around each grid point by a "
+        "gaussian variogram fitted to the passes of the channel, and treats the nugget as "
+        "noise: the smoothest profile, but the noise σ falls and scores rise, so compare "
+        "scores only within one method. Kriging is the slowest."
     ),
     "lag_channel": (
         "Channel compared between neighbouring lines; one with clear anomalies works best."
@@ -481,8 +494,9 @@ $$\\mathrm{{SNR_{{dB}}}} = 10\\,\\log_{{10}}\\frac{{P_s}}{{P_n}}, \\qquad P_n = 
 more. When P_s ≤ 0 — no signal rises above the noise — the score is
 left blank and ranked last.
 
-> **Filters change scores.** Despiking lowers σ and so raises the
-> score. Compare scores only between runs with the same settings.
+> **Filters change scores.** Despiking and kriging lower σ and so
+> raise the score. Compare scores only between runs with the same
+> settings.
 
 **Frequency selection** under the ranking keeps up to three
 high-scoring frequencies whose mean profiles are not strongly
@@ -514,9 +528,12 @@ correlated, since correlated frequencies carry the same information
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
 | **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
+| **nearest** | 2 | Value of the closest reading. Nothing is averaged, so σ is that of the readings; the profile is stepped and positions shift by up to half the reading spacing. |
+| **kriging** | 2 | 1D ordinary kriging from the 16 readings around each grid point, with a gaussian variogram fitted over short lags to the passes of each channel (Cressie, 1985). The nugget is treated as measurement noise and filtered out (Cressie, 1993): the smoothest profile, but σ falls and scores rise. |
 
 GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile
-grid, so the two give nearly the same profiles and scores.
+grid, so linear, PCHIP and nearest give nearly the same profiles and
+scores; kriging scores are higher and comparable only with each other.
 
 ---
 
@@ -561,6 +578,7 @@ Methods in full: [documentation]({DOCS_URL}/README.md).
 | **σ_noise** | Pooled sample std across passes (multi-pass) or second-difference MAD estimate on the measured samples (single pass) |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 | **PCHIP** | Shape-preserving piecewise cubic interpolation that avoids overshoot |
+| **Nugget** | Variogram value at zero distance: measurement noise and variation shorter than the reading spacing |
 
 ---
 
@@ -806,20 +824,105 @@ def prepared_table(
 _METHOD_MIN_POINTS = {
     "linear": 2,
     "pchip": 2,
+    "nearest": 2,
+    "kriging": 2,       # the variogram is fitted to all passes of the channel
 }
 
 
 def _interpolate_with_method(
-    xp: np.ndarray, yp: np.ndarray, target_x: np.ndarray, method: str
+    xp: np.ndarray, yp: np.ndarray, target_x: np.ndarray, method: str,
+    variogram: ctr.VariogramFit | None = None,
 ) -> np.ndarray:
-    """Interpolate *yp* at *xp* onto *target_x* using the named method."""
+    """Interpolate *yp* at *xp* onto *target_x* using the named method (*variogram*: kriging)."""
     if method == "linear":
         return np.interp(target_x, xp, yp)
 
     if method == "pchip":
         return PchipInterpolator(xp, yp)(target_x)
 
+    if method == "nearest":
+        return interp1d(xp, yp, kind="nearest", bounds_error=False, assume_sorted=True)(target_x)
+
+    if method == "kriging":
+        return _krige_profile(xp, yp, target_x, variogram)
+
     raise ValueError(f"Unknown interpolation method: {method!r}")
+
+
+def _profile_variogram(passes: list[tuple[np.ndarray, np.ndarray]]) -> ctr.VariogramFit | None:
+    """
+    Gaussian variogram along the line, pooled over the (distance, value)
+    *passes* of one channel by contouring.fit_variogram, up to
+    PROFILE_VARIOGRAM_SPANS kriging neighbourhood widths: the lags the
+    estimates use. Each pass sits on its own row, farther from the others
+    than that, so only pairs within a pass count. One fit per channel keeps
+    long surveys fast and smooths every pass alike.
+
+    The gaussian model is parabolic near the origin, like an EMI signal
+    averaged over the sensor footprint: spherical and exponential models,
+    linear there, took the noise for slope on steep profiles (nugget 0).
+    None when no pass varies. Raises ValueError when no fit is possible.
+    """
+    if all(np.ptp(y) == 0 for _, y in passes):
+        return None
+    spacing = float(np.median(np.concatenate([np.diff(x) for x, _ in passes])))
+    max_lag = PROFILE_VARIOGRAM_SPANS * PROFILE_KRIGE_NEIGHBOURS * spacing
+    rows = np.concatenate([np.full(len(x), 2.0 * max_lag * i) for i, (x, _) in enumerate(passes)])
+    try:
+        return ctr.fit_variogram(
+            np.concatenate([x for x, _ in passes]), rows, np.concatenate([y for _, y in passes]),
+            "gaussian", max_lag=max_lag,
+        )
+    except ctr.KrigingError as exc:
+        raise ValueError("too few readings to fit a variogram, use linear or PCHIP") from exc
+
+
+def _krige_profile(
+    xp: np.ndarray, yp: np.ndarray, target_x: np.ndarray, variogram: ctr.VariogramFit | None = None
+) -> np.ndarray:
+    """
+    1D ordinary kriging along distance (NaN outside the readings), with the
+    channel's *variogram* (default: fitted to this pass, _profile_variogram).
+
+    Each grid point is estimated from the PROFILE_KRIGE_NEIGHBOURS readings
+    around it, so the cost grows linearly with the profile length. The
+    nugget counts as measurement noise and is filtered out: gamma between a
+    grid point and a reading at the same place is the nugget, not 0
+    (Cressie, 1993), so the profile is continuous instead of jumping to
+    each reading it happens to hit.
+    """
+    from pykrige.variogram_models import gaussian_variogram_model
+
+    out = np.full(target_x.shape, np.nan)
+    inside = np.flatnonzero((target_x >= xp[0]) & (target_x <= xp[-1]))
+    vg = variogram or _profile_variogram([(xp, yp)])
+    sill = vg.psill + vg.nugget if vg else 0.0
+    if not sill > 0:                        # no variation the variogram could see
+        out[inside] = np.interp(target_x[inside], xp, yp)
+        return out
+
+    def gamma(h):   # scaled to unit sill: the weights do not depend on the scale
+        return gaussian_variogram_model([vg.psill / sill, vg.range, vg.nugget / sill], h)
+
+    k = min(PROFILE_KRIGE_NEIGHBOURS, len(xp))
+    for lo in range(0, inside.size, PROFILE_KRIGE_CHUNK):   # bounds the memory of fine grids
+        idx = inside[lo:lo + PROFILE_KRIGE_CHUNK]
+        t = target_x[idx]
+        start = np.clip(np.searchsorted(xp, t) - k // 2, 0, len(xp) - k)
+        nb = start[:, None] + np.arange(k)
+        xn = xp[nb]
+        a = np.ones((len(t), k + 1, k + 1))
+        a[:, :k, :k] = gamma(np.abs(xn[:, :, None] - xn[:, None, :]))
+        a[:, np.arange(k), np.arange(k)] = 0.0      # gamma(0) = 0 between a reading and itself
+        a[:, k, k] = 0.0
+        b = np.ones((len(t), k + 1))
+        b[:, :k] = gamma(np.abs(t[:, None] - xn))   # the nugget stays: noise is filtered
+        try:
+            w = np.linalg.solve(a, b[..., None])[..., 0]
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(f"kriging system is singular ({exc})") from exc
+        out[idx] = np.einsum("mk,mk->m", w[:, :k], yp[nb])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -886,9 +989,7 @@ def process_sheet(
     n_points = int(round(span / distance_step)) + 1
     common_dist = np.linspace(min_dist, max_dist, n_points)
 
-    interpolated_lines: dict[str, np.ndarray] = {}
-    raw_samples: dict[str, np.ndarray] = {}
-
+    readings: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for col in line_data.columns:
         y = line_data[col].values
         mask = ~np.isnan(distance) & ~np.isnan(y)
@@ -912,17 +1013,26 @@ def process_sheet(
         if df_xy.shape[0] < 2:
             continue
 
-        xp = df_xy["d"].values
-        yp = df_xy["y"].values
+        min_pts = _METHOD_MIN_POINTS.get(interp_kind, 2)
+        if df_xy.shape[0] < min_pts:
+            col_warnings.append(
+                f"column '{col}': need ≥{min_pts} points for {interp_kind} interpolation, skipped"
+            )
+            continue
+        readings[col] = (df_xy["d"].values, df_xy["y"].values)
 
+    variogram = None
+    if interp_kind == "kriging" and readings:
         try:
-            min_pts = _METHOD_MIN_POINTS.get(interp_kind, 2)
-            if len(xp) < min_pts:
-                col_warnings.append(
-                    f"column '{col}': need ≥{min_pts} points for {interp_kind} interpolation, skipped"
-                )
-                continue
-            values = _interpolate_with_method(xp, yp, common_dist, interp_kind)
+            variogram = _profile_variogram(list(readings.values()))
+        except ValueError as exc:
+            return None, None, f"kriging failed — {exc}", col_warnings
+
+    interpolated_lines: dict[str, np.ndarray] = {}
+    raw_samples: dict[str, np.ndarray] = {}
+    for col, (xp, yp) in readings.items():
+        try:
+            values = _interpolate_with_method(xp, yp, common_dist, interp_kind, variogram)
         except Exception as exc:
             col_warnings.append(f"column '{col}': interpolation failed — {exc}")
             continue
@@ -3047,6 +3157,8 @@ def main():
                 index=0, key=wkey("prof_interp"),
                 help=SCIENCE_HELP["interpolation"],
             )
+            if scoring and interp_kind == "kriging":
+                st.warning(KRIGING_SCORE_WARNING)
 
             if distance_step > 10.0:
                 st.warning(

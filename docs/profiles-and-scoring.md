@@ -22,7 +22,7 @@ Each trace is used only inside its own measured distance range — grid points o
 |---|---|
 | **Frequency scoring** | Off by default. With it off the app shows each mode's channels, profiles, maps and exports without scores. AUX channels are never scored. |
 | **Distance step (m)** | Spacing of the common interpolation grid (default 0.5 m). |
-| **Interpolation method** | Linear or PCHIP, below. |
+| **Interpolation method** | Linear, PCHIP, nearest or kriging, below. With scoring on, kriging shows a warning that its scores are higher. |
 
 ## Scoring
 
@@ -45,7 +45,7 @@ The ranking table and exports show the **noise method** and number of **traces**
 
 > **Why sample std (ddof = 1)?** The passes are a finite sample of the measurement process whose noise is being estimated, so the sample formula applies. With two passes the population formula (ddof = 0) would understate σ by a factor of √½ ≈ 0.71.
 
-> **Filters change scores.** Despiking lowers σ and so raises the score. Compare scores only between runs with the same settings.
+> **Filters change scores.** Despiking and kriging lower σ and so raise the score. Compare scores only between runs with the same settings.
 
 To go from scores to a short list of non-redundant frequencies, see [Frequency selection](interpretation.md#frequency-selection).
 
@@ -63,8 +63,10 @@ The **skin depth** δ = √(2 / ωμσ) is the depth at which the primary field 
 |---|---|---|
 | **linear** | 2 | Piecewise linear. Conservative, no overshoot. Recommended for noisy or sparse data. |
 | **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial (Fritsch & Carlson, 1980). Smooth, shape-preserving and monotone within each interval, so it never overshoots the readings. |
+| **nearest** | 2 | Value of the closest reading (`scipy.interpolate.interp1d`, `kind="nearest"`). Nothing is averaged, so σ is that of the readings themselves — the most conservative score. The profile is stepped, and each value sits up to half the reading spacing from where it was measured. |
+| **kriging** | 2 | 1D ordinary kriging along distance. Each grid point is estimated from the 16 readings around it (a moving neighbourhood, so long profiles stay fast), with a gaussian variogram fitted by the same weighted least squares as the area maps (Cressie, 1985). One variogram is fitted per channel, from pairs of readings within each pass (never across passes), so every pass is smoothed alike and a short pass borrows the structure of the others; the fit uses lags up to twice the neighbourhood width, the lags the estimates use. The gaussian model is parabolic near the origin, like an EMI signal averaged over the sensor footprint; the spherical and exponential models are linear there and, on steep profiles, took the noise for slope and fitted no nugget. The nugget is treated as measurement noise and filtered out (Cressie, 1993): the profile is continuous and the smoothest of the four, but it no longer passes through the readings. |
 
-Columns with fewer than two points are skipped with a warning. GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile grid, so the two methods give nearly the same profiles and scores. Splines that overshoot (cubic, quadratic), the nearest-neighbour step and the polynomial trend fit, which smoothed each trace and inflated its score, were removed.
+Passes with fewer than two readings are skipped with a warning; kriging skips a channel whose variogram cannot be fitted (it needs a few dozen readings over all its passes). GEM-2 readings (every 0.1–0.2 m) are usually denser than the profile grid, so linear, PCHIP and nearest give nearly the same profiles and scores. Kriging is different in kind: by filtering the nugget it removes much of the noise from each pass, so the between-pass σ falls and the score rises — on a synthetic profile with σ = 0.5 it measured σ ≈ 0.13, about 10 dB more. Its mean profile is closer to the true signal (there, a third of the linear profile's error), so it suits displaying and exporting smooth profiles; compare its scores only with other kriging runs. Splines that overshoot (cubic, quadratic) and the polynomial trend fit were removed.
 
 ## Viewing the results
 
