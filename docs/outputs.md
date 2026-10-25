@@ -27,7 +27,7 @@ One workbook for all uploaded files with the current interpolation method:
 
 | Where | Files | Details |
 |---|---|---|
-| Area maps | PNG, grid CSV, ESRI `.asc`, GeoTIFF, `.prj` | [2D mapping → Downloads](mapping.md#downloads) |
+| Area maps | PNG, grid CSV, ESRI `.asc`, GeoTIFF, `.prj`; ZIP of every channel | [2D mapping → Downloads](mapping.md#downloads) |
 | Layered-earth inversion | Model CSV, EMagPy survey file | [Sensor physics → Inversion](sensor-physics.md#layered-earth-inversion) |
 | Multi-height calibration | I / Q offsets CSV (reload as *Calibration offsets*) | [Sensor physics](sensor-physics.md#multi-height-calibration) |
 | Soil tools | Sampling sites, predicted property, management zones (CSV) | [Soil tools](soil-tools.md) |

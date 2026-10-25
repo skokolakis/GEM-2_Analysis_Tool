@@ -154,6 +154,7 @@ MIME_TYPES = {
     ".asc": "text/plain",
     ".prj": "text/plain",
     ".tif": "image/tiff",
+    ".zip": "application/zip",
 }
 
 

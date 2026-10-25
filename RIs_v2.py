@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import re
+import zipfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -2425,7 +2426,8 @@ def _render_area_map(
                 file_bytes, file_name, gem_value_column(mode, freq), prep,
                 **grid_params(contour),
             )
-        result, processing = _map_processing(result, file_key)
+        map_filter = _map_filter(file_key)
+        result, processing = _apply_map_filter(result, map_filter)
         fig = ctr.make_area_map_figure(
             result, label, f"{freq} [{mode}] — {ctr.method_title(result)}",
             contour.n_levels, show_points=contour.show_points, style=contour.colours,
@@ -2482,6 +2484,8 @@ def _render_area_map(
     _render_map_statistics(result, label, file_key)
     stem = Path(file_name).stem
     _render_map_downloads(result, png, f"{stem}_{mode}_{freq}_{result.method}", file_key)
+    _render_bulk_map_export(output_data, mode, file_name, file_key, contour, file_bytes, prep,
+                            map_filter)
 
 
 def cv_groups(
@@ -2501,10 +2505,10 @@ def cv_groups(
     return np.array([tracks.get(line, f"line {line}") for line in result.bline], dtype=object)
 
 
-def _map_processing(result: ctr.AreaMapResult, key: str) -> tuple[ctr.AreaMapResult, list[str]]:
-    """Optional grid filter, chosen in an expander (advanced settings)."""
+def _map_filter(key: str) -> tuple[str, int, float] | None:
+    """Optional grid filter (kind, window, threshold), chosen in an expander (advanced settings)."""
     if not show_advanced():
-        return result, []
+        return None
     with st.expander("Map processing (filters)", expanded=False):
         kind = st.selectbox("Filter", gridtools.MAP_FILTERS, key=f"mp_kind_{key}",
                             help=SCIENCE_HELP["map_filter"])
@@ -2514,9 +2518,16 @@ def _map_processing(result: ctr.AreaMapResult, key: str) -> tuple[ctr.AreaMapRes
         if kind == "despike":
             threshold = st.number_input("Despike threshold (× robust σ)", 1.0, 20.0, 4.0,
                                         key=f"mp_thr_{key}", help=SCIENCE_HELP["map_despike"])
-    if kind == "none":
+    return None if kind == "none" else (kind, int(size), float(threshold))
+
+
+def _apply_map_filter(
+    result: ctr.AreaMapResult, map_filter: tuple[str, int, float] | None
+) -> tuple[ctr.AreaMapResult, list[str]]:
+    """The grid after the filter from _map_filter(), and its messages."""
+    if map_filter is None:
         return result, []
-    z, msgs = gridtools.process_map(result.z, kind, int(size), float(threshold))
+    z, msgs = gridtools.process_map(result.z, *map_filter)
     return replace(result, z=z), msgs
 
 
@@ -2557,6 +2568,105 @@ def _render_map_downloads(result: ctr.AreaMapResult, png: bytes, base: str, key:
             "georeferenced. Choose UTM under 'Projection of Lat/Lon' (advanced settings), or use "
             "the lon/lat columns of the CSV."
         )
+
+
+def build_area_map_zip(
+    file_bytes: bytes,
+    file_name: str,
+    mode: str,
+    channels: list[str],
+    contour: ContourSettings,
+    prep: pipeline.PrepSettings | None = None,
+    map_filter: tuple[str, int, float] | None = None,
+    include_grids: bool = False,
+    progress=None,
+) -> tuple[bytes, list[str]]:
+    """
+    ZIP of the area map of every channel, gridded and drawn with the same
+    settings as the single map (PNG, and with *include_grids* the CSV, .asc,
+    GeoTIFF and .prj). Returns the archive and one message per channel left
+    out; *progress* is called with (done, total) after each channel.
+    """
+    stem = Path(file_name).stem
+    skipped = []
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, freq in enumerate(channels):
+            try:
+                result = compute_area_map_cached(
+                    file_bytes, file_name, gem_value_column(mode, freq), prep,
+                    **grid_params(contour),
+                )
+                result, _ = _apply_map_filter(result, map_filter)
+                fig = ctr.make_area_map_figure(
+                    result, ctr.value_label(mode, freq),
+                    f"{freq} [{mode}] — {ctr.method_title(result)}",
+                    contour.n_levels, show_points=contour.show_points, style=contour.colours,
+                )
+                try:
+                    png = fig_to_png(fig)
+                finally:
+                    plt.close(fig)
+            except ctr.ContouringError as exc:
+                skipped.append(f"{freq}: {exc}")
+            else:
+                base = f"{stem}_{mode}_{freq}_{result.method}"
+                zf.writestr(f"{base}.png", png)
+                if include_grids:
+                    zf.writestr(f"{base}.csv", ctr.grid_to_csv(result))
+                    zf.writestr(f"{base}.asc", ctr.grid_to_asc(result))
+                    zf.writestr(f"{base}.tif", gridtools.geotiff_bytes(
+                        result.z, result.spec.x0, result.spec.y0, result.spec.cell, result.epsg))
+                    if result.epsg:
+                        zf.writestr(f"{base}.prj", gridtools.prj_wkt(result.epsg))
+            if progress is not None:
+                progress(i + 1, len(channels))
+    return buf.getvalue(), skipped
+
+
+def _render_bulk_map_export(
+    output_data: dict[str, pd.DataFrame],
+    mode: str,
+    file_name: str,
+    file_key: str,
+    contour: ContourSettings,
+    file_bytes: bytes,
+    prep: pipeline.PrepSettings | None,
+    map_filter: tuple[str, int, float] | None,
+) -> None:
+    """Every channel's area map in one ZIP, so the maps need not be saved one channel at a time."""
+    channels = list(output_data.keys())
+    if len(channels) < 2:
+        return
+    with st.expander(f"Export all {len(channels)} channels", expanded=False):
+        st.caption("Grids every channel with the settings above (method, colours, filter) and "
+                   "packs the maps into one ZIP. Gridding many channels can take a while.")
+        include_grids = st.checkbox("Include the grids (.csv, .asc, .tif)", key=f"bulk_grids_{file_key}")
+        run_key = f"bulk_run_{file_key}"
+        params = (mode, tuple(channels), contour, prep, map_filter, include_grids,
+                  hash(file_bytes))
+        if st.button("Prepare ZIP", key=f"bulk_btn_{file_key}", icon=":material/folder_zip:"):
+            bar = st.progress(0.0, text="Gridding…")
+            data, skipped = build_area_map_zip(
+                file_bytes, file_name, mode, channels, contour, prep, map_filter, include_grids,
+                progress=lambda done, total: bar.progress(done / total, text=f"Gridded {done} of {total}"),
+            )
+            bar.empty()
+            st.session_state[run_key] = (params, data, skipped)
+        ran = st.session_state.get(run_key)
+        if ran is None:
+            return
+        if ran[0] != params:
+            st.caption("The settings changed since the ZIP was made: press Prepare ZIP to update it.")
+            return
+        _, data, skipped = ran
+        for msg in skipped:
+            st.caption(f"Left out — {msg}")
+        if len(skipped) < len(channels):
+            ui_tools.download_button(
+                f"All {mode} maps (.zip)", data, f"{Path(file_name).stem}_{mode}_{contour.method}_maps.zip",
+                key=f"dl_bulk_{file_key}",
+            )
 
 
 def render_contouring(

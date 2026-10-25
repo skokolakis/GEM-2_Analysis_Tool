@@ -154,3 +154,75 @@ def test_sidebar_colours_apply_to_the_pseudosection_alone():
     shown = at.main.markdown[-1].value
     assert "area_map=False" in shown and "pseudosection=True" in shown
     assert "display='image'" in shown
+
+
+def test_bulk_export_zips_every_channel():
+    at = AppTest.from_function(_gem_app, default_timeout=180)
+    at.run()
+    at.checkbox(key="bulk_grids_survey_EC").check()
+    at.button(key="bulk_btn_survey_EC").click().run()
+    assert not at.exception
+    button = next(b for b in at.get("download_button") if b.label == "All EC maps (.zip)")
+    assert button.proto.url        # the archive was handed to the browser
+
+
+def test_bulk_export_needs_a_new_zip_after_a_settings_change():
+    at = AppTest.from_function(_gem_app, default_timeout=180)
+    at.run()
+    at.button(key="bulk_btn_survey_EC").click().run()
+    at.checkbox(key="bulk_grids_survey_EC").check().run()
+    assert not at.exception
+    assert any("press Prepare ZIP" in c.value for c in at.caption)
+    assert not any(b.label == "All EC maps (.zip)" for b in at.get("download_button"))
+
+
+def _channel_table(empty_ms: bool = False) -> bytes:
+    import numpy as np
+    import pandas as pd
+
+    rows = []
+    for i in range(6):
+        ys = np.arange(0.0, 40.0, 0.5)
+        xs = np.full_like(ys, 4.0 * i)
+        bump = np.exp(-((xs - 10) ** 2 + (ys - 20) ** 2) / 50.0)
+        rows.append(pd.DataFrame({
+            "Line": i, "X": xs, "Y": ys,
+            "EC1525Hz[mS/m]": 20 + 10 * bump,
+            "EC9825Hz[mS/m]": 22 + 8 * bump,
+            "MSusc1525Hz[1/1000]": 0.5 + 0.2 * bump,
+            "MSusc9825Hz[1/1000]": np.nan if empty_ms else 0.6 + 0.2 * bump,
+        }))
+    return pd.concat(rows, ignore_index=True).to_csv(index=False).encode()
+
+
+def test_build_area_map_zip_holds_one_map_per_channel():
+    import io
+    import zipfile
+
+    import RIs_v2 as R
+
+    calls = []
+    data, skipped = R.build_area_map_zip(
+        _channel_table(), "survey.csv", "EC", ["1525Hz", "9825Hz"], R.ContourSettings(area_map=True),
+        include_grids=True, progress=lambda done, total: calls.append((done, total)),
+    )
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    assert skipped == []
+    assert calls == [(1, 2), (2, 2)]
+    for freq in ("1525Hz", "9825Hz"):
+        for ext in ("png", "csv", "asc", "tif"):
+            assert f"survey_EC_{freq}_spline.{ext}" in names
+
+
+def test_build_area_map_zip_leaves_out_a_channel_that_cannot_be_mapped():
+    import io
+    import zipfile
+
+    import RIs_v2 as R
+
+    data, skipped = R.build_area_map_zip(
+        _channel_table(empty_ms=True), "survey.csv", "MS", ["1525Hz", "9825Hz"],
+        R.ContourSettings(area_map=True),
+    )
+    assert zipfile.ZipFile(io.BytesIO(data)).namelist() == ["survey_MS_1525Hz_spline.png"]
+    assert len(skipped) == 1 and skipped[0].startswith("9825Hz:")

@@ -80,6 +80,8 @@ Expander **Map processing (filters)** under each map, applied to the gridded val
 
 PNG; grid CSV (`x, y, value` [, `variance`] [, `lon, lat`]); ESRI ASCII grid (`.asc`); single-band float32 **GeoTIFF** (`.tif`, no-data −9999); and, when the CRS is known (UTM or a user EPSG code), an ESRI **`.prj`** file to sit next to the `.asc`. With local-metre projection the `.asc` and GeoTIFF are not georeferenced — choose UTM, or use the CSV `lon`/`lat` columns.
 
+**Export all channels** (below the downloads) grids every channel of the mode with the same method, colours and map filter and packs the maps into one ZIP — PNGs, and with *Include the grids* also the CSV, `.asc`, GeoTIFF and `.prj` of each — so the maps need not be saved one channel at a time. Press **Prepare ZIP** to build it; a channel that cannot be gridded is left out with the reason. After a settings change, prepare the ZIP again.
+
 ## Combined surveys
 
 With the area map on and two or more GEM files uploaded, **Combined surveys** (below the files) grids a channel the files share:
